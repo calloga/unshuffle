@@ -1,0 +1,56 @@
+{
+    "category": "Hats & Cymbals",
+    "default_sub": "Hats",
+    "taxonomy": {
+        "Hats": [
+            "closed-hat",
+            "closed_hat",
+            "hihat roll",
+            "closedhat",
+            "openhihat",
+            "pedal-hat",
+            "closehat",
+            "hat roll",
+            "open-hat",
+            "open_hat",
+            "pedalhat",
+            "808 hat",
+            "hi-hats",
+            "hi_hats",
+            "hihats",
+            "openhat",
+            "hi-hat",
+            "hi_hat",
+            "clhat",
+            "hihat",
+            "ophat",
+            "hats",
+            "open",
+            "clh",
+            "hat",
+            "oph",
+            "ch",
+            "hh",
+
+            "oh",
+            "op"
+        ],
+        "Cymbals": [
+            "808 cymbal",
+            "crash",
+            "ride",
+            "ridebell",
+            "bellcym",
+            "cymbals",
+            "cymbal",
+            "splash",
+            "china",
+            "gong",
+            "csh",
+            "cym",
+            "cr",
+            "cy",
+            "rd"
+        ]
+    }
+}

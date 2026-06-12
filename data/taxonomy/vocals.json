@@ -1,0 +1,37 @@
+{
+    "category": "Vocals",
+    "default_sub": "no-sub",
+    "taxonomy": {
+        "Acapellas": [
+            "acapella",
+            "vocals",
+            "phrase",
+            "phrases",
+            "singing",
+            "spoken",
+            "choir",
+            "coral",
+            "hit"
+        ],
+        "Efforts": [
+            "breathing",
+            "breath",
+            "grunt",
+            "grunts",
+            "sigh",
+            "cough",
+            "scream",
+            "shout",
+            "chants"
+        ],
+        "Reactions": [
+            "laugh",
+            "laughing",
+            "giggle",
+            "gasp",
+            "wow",
+            "hey"
+        ],
+        "no-sub": []
+    }
+}

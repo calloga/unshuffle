@@ -1,0 +1,4 @@
+include LICENSE NOTICE.md README.md CHANGELOG.md SECURITY.md
+recursive-include data *.json
+recursive-include icons *.png *.ico
+recursive-include bin *

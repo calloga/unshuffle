@@ -1,0 +1,436 @@
+{
+  "music": {
+    "metadata_schema": {
+      "fields": [
+        "origin_region",
+        "era",
+        "parent_genres",
+        "related_genres",
+        "common_instruments",
+        "common_moods",
+        "tempo_range_bpm"
+      ]
+    },
+    "families": {
+      "art_music": {
+        "classical": {
+          "historical_periods": {
+            "medieval": [
+              "gregorian chant",
+              "organum",
+              "ars antiqua"
+            ],
+            "renaissance": [
+              "madrigal",
+              "motet",
+              "consort music"
+            ],
+            "baroque": [
+              "fugue",
+              "cantata",
+              "oratorio",
+              "concerto grosso"
+            ],
+            "classical_period": [
+              "symphony",
+              "sonata",
+              "concerto",
+              "string quartet"
+            ],
+            "romantic": [
+              "program music",
+              "lieder",
+              "tone poem",
+              "nationalist music"
+            ],
+            "modern": [
+              "serialism",
+              "minimalism",
+              "avant-garde",
+              "spectralism"
+            ]
+          },
+          "ensemble_forms": [
+            "opera",
+            "orchestral",
+            "choral",
+            "chamber music",
+            "solo piano"
+          ],
+          "contemporary_branches": [
+            "electroacoustic",
+            "musique concrete",
+            "sound art",
+            "new complexity"
+          ]
+        },
+        "film_and_stage": [
+          "film score",
+          "musical theatre",
+          "ballet",
+          "opera soundtrack"
+        ]
+      },
+      "rock": {
+        "classic_rock": [
+          "hard rock",
+          "progressive rock",
+          "psychedelic rock",
+          "blues rock",
+          "glam rock"
+        ],
+        "alternative_rock": [
+          "grunge",
+          "shoegaze",
+          "emo",
+          "indie rock",
+          "noise rock",
+          "slowcore"
+        ],
+        "punk_related": [
+          "punk rock",
+          "hardcore punk",
+          "post-punk",
+          "pop punk",
+          "garage punk",
+          "anarcho-punk"
+        ],
+        "extreme_and_hybrid": [
+          "post-rock",
+          "post-hardcore",
+          "math rock",
+          "blackgaze",
+          "industrial rock"
+        ]
+      },
+      "metal": {
+        "traditional": [
+          "heavy metal",
+          "power metal",
+          "speed metal",
+          "thrash metal"
+        ],
+        "extreme": [
+          "black metal",
+          "death metal",
+          "doom metal",
+          "sludge metal",
+          "grindcore"
+        ],
+        "modern": [
+          "nu metal",
+          "metalcore",
+          "deathcore",
+          "progressive metal",
+          "djent"
+        ]
+      },
+      "pop": {
+        "mainstream": [
+          "dance pop",
+          "teen pop",
+          "synthpop",
+          "electropop"
+        ],
+        "alternative": [
+          "indie pop",
+          "art pop",
+          "hyperpop",
+          "bedroom pop",
+          "dream pop"
+        ],
+        "regional": [
+          "k-pop",
+          "j-pop",
+          "latin pop",
+          "mandopop",
+          "cantopop",
+          "anime music"
+        ]
+      },
+      "hip_hop": {
+        "core_styles": [
+          "boom bap",
+          "gangsta rap",
+          "alternative hip hop",
+          "southern rap",
+          "jazz rap"
+        ],
+        "trap_related": [
+          "trap",
+          "drill",
+          "phonk",
+          "trap soul",
+          "cloud rap",
+          "rage"
+        ],
+        "regional_scenes": [
+          "west coast rap",
+          "east coast rap",
+          "uk drill",
+          "memphis rap",
+          "brooklyn drill"
+        ]
+      },
+      "electronic": {
+        "house": [
+          "deep house",
+          "tech house",
+          "progressive house",
+          "acid house",
+          "garage house"
+        ],
+        "techno": [
+          "detroit techno",
+          "minimal techno",
+          "dub techno",
+          "hard techno",
+          "industrial techno"
+        ],
+        "trance": [
+          "psytrance",
+          "uplifting trance",
+          "goa trance",
+          "hard trance"
+        ],
+        "bass_music": [
+          "dubstep",
+          "future bass",
+          "uk bass",
+          "trap edm",
+          "breakbeat"
+        ],
+        "drum_and_bass": [
+          "liquid drum and bass",
+          "neurofunk",
+          "jungle",
+          "jump-up",
+          "darkstep"
+        ],
+        "ambient_and_experimental": [
+          "ambient",
+          "dark ambient",
+          "drone",
+          "idm",
+          "glitch",
+          "microsound"
+        ],
+        "dance_related": [
+          "disco",
+          "italo disco",
+          "eurodance",
+          "freestyle",
+          "hi-nrg"
+        ]
+      },
+      "jazz": {
+        "traditional": [
+          "bebop",
+          "hard bop",
+          "swing",
+          "cool jazz",
+          "modal jazz",
+          "free jazz"
+        ],
+        "fusion": [
+          "jazz fusion",
+          "acid jazz",
+          "latin jazz",
+          "jazz funk",
+          "nu jazz"
+        ],
+        "regional": [
+          "afro-cuban jazz",
+          "gypsy jazz",
+          "bossa nova",
+          "samba jazz"
+        ]
+      },
+      "soul_funk_rnb": {
+        "soul": [
+          "deep soul",
+          "northern soul",
+          "neo-soul"
+        ],
+        "funk": [
+          "p-funk",
+          "go-go",
+          "boogie",
+          "g-funk"
+        ],
+        "rnb": [
+          "contemporary r&b",
+          "alternative r&b",
+          "quiet storm",
+          "new jack swing"
+        ],
+        "gospel": [
+          "traditional gospel",
+          "urban gospel",
+          "contemporary christian"
+        ]
+      },
+      "folk_country_blues": {
+        "folk": [
+          "celtic folk",
+          "american folk",
+          "british folk",
+          "indie folk",
+          "neo-folk"
+        ],
+        "country": [
+          "bluegrass",
+          "honky tonk",
+          "outlaw country",
+          "country pop",
+          "alt-country"
+        ],
+        "blues": [
+          "delta blues",
+          "chicago blues",
+          "texas blues",
+          "electric blues",
+          "country blues"
+        ]
+      },
+      "reggae_and_caribbean": {
+        "jamaican": [
+          "roots reggae",
+          "dub",
+          "rocksteady",
+          "dancehall",
+          "ska",
+          "ragga"
+        ],
+        "caribbean": [
+          "soca",
+          "calypso",
+          "kompa",
+          "zouk",
+          "reggaeton"
+        ]
+      },
+      "world_and_regional": {
+        "african": {
+          "west_african": [
+            "afrobeats",
+            "highlife",
+            "juju",
+            "fuji",
+            "palm-wine"
+          ],
+          "senegalese": [
+            "mbalax",
+            "sabar"
+          ],
+          "central_african": [
+            "soukous",
+            "makossa"
+          ],
+          "southern_african": [
+            "amapiano",
+            "kwaito",
+            "mbaqanga",
+            "gqom"
+          ]
+        },
+        "latin_american": {
+          "caribbean": [
+            "salsa",
+            "bachata",
+            "merengue",
+            "dembow"
+          ],
+          "south_american": [
+            "tango",
+            "cumbia",
+            "vallenato",
+            "sertanejo"
+          ],
+          "brazilian": [
+            "bossa nova",
+            "samba",
+            "mpb",
+            "baile funk",
+            "forro"
+          ]
+        },
+        "asian": {
+          "south_asian": [
+            "indian classical",
+            "hindustani",
+            "carnatic",
+            "bollywood",
+            "bhangra"
+          ],
+          "east_asian": [
+            "enka",
+            "mandopop",
+            "cantopop",
+            "city pop",
+            "v-pop"
+          ],
+          "southeast_asian": [
+            "dangdut",
+            "luk thung",
+            "pinoy pop"
+          ]
+        },
+        "middle_eastern_and_north_african": {
+          "arabic": [
+            "arabic pop",
+            "shaabi",
+            "mahraganat"
+          ],
+          "north_african": [
+            "raï",
+            "gnawa",
+            "chaabi"
+          ]
+        },
+        "indigenous_and_traditional": [
+          "native american music",
+          "aboriginal australian music",
+          "throat singing",
+          "tuvan folk"
+        ]
+      },
+      "utility_and_special_purpose": {
+        "children": [
+          "nursery rhymes",
+          "children's songs"
+        ],
+        "holiday": [
+          "christmas music",
+          "carols",
+          "halloween music"
+        ],
+        "comedy": [
+          "novelty song",
+          "musical parody"
+        ],
+        "background": [
+          "library music",
+          "elevator music",
+          "muzak"
+        ]
+      }
+    },
+    "cross_genre_tags": [
+      "dream pop",
+      "blackgaze",
+      "folk rock",
+      "country rap",
+      "rap metal",
+      "electro swing",
+      "jazz rock",
+      "ambient techno",
+      "industrial rock",
+      "psychedelic folk",
+      "trip hop",
+      "vaporwave",
+      "chillwave",
+      "witch house"
+    ]
+  }
+}

@@ -1,0 +1,220 @@
+from enum import IntEnum
+from pathlib import Path
+
+class StagingColumn(IntEnum):
+    PACK = 0
+    FILENAME = 1
+    CATEGORY = 2
+    SUBCATEGORY = 3
+    TAGS = 4
+    CONFIDENCE = 5
+    TYPE = 6
+    PATH = 7
+
+DRAFT_IS_PRESERVED_FIELD = "__draft_is_preserved"
+DRAFT_PRESERVED_ROOT_FIELD = "__draft_preserved_root"
+
+# Configuration mapping columns to UI labels and search prefixes
+COLUMN_CONFIG = {
+    StagingColumn.PACK: {"label": "Package Name", "prefix": "pack"},
+    StagingColumn.FILENAME: {"label": "File Name", "prefix": "name"},
+    StagingColumn.CATEGORY: {"label": "Category", "prefix": "cat"},
+    StagingColumn.TAGS: {"label": "Tags", "prefix": "tag"},
+    StagingColumn.CONFIDENCE: {"label": "Confidence", "prefix": "conf"},
+    StagingColumn.PATH: {"label": "Path", "prefix": "path"},
+    StagingColumn.TYPE: {"label": "Type", "prefix": "type"},
+    StagingColumn.SUBCATEGORY: {"label": "Sub", "prefix": "sub"},
+}
+
+# Dynamically generated headers
+STAGING_HEADERS = [COLUMN_CONFIG[col]["label"] for col in sorted(StagingColumn)]
+
+HEADER_FILTERABLE_COLUMNS = (
+    StagingColumn.PACK,
+    StagingColumn.CATEGORY,
+    StagingColumn.TAGS,
+)
+
+TREE_SKIP_FIELD_PREFIXES = {
+    "audio_type": "audio_type",
+    "category": "category",
+    "pack": "pack",
+}
+
+# Unified Prefix Map (Shorthand -> Canonical Column Name)
+# This should be the single source of truth for the SearchEngine
+SEARCH_PREFIX_MAP = {
+    "cat": "category", "category": "category",
+    "sub": "subcategory", "subcategory": "subcategory",
+    "pack": "pack", "packname": "pack",
+    "name": "sample_name", "file": "sample_name", "filename": "sample_name",
+    "tag": "tags", "tags": "tags",
+    "type": "audio_type",
+    "conf": "confidence", "confidence": "confidence",
+    "root": "source", "source": "source", "path": "path", "source_path": "source_path"
+}
+
+ICONS_DIR = Path(__file__).parent.parent.parent / "icons"
+FOLDER_ICON = ICONS_DIR / "folder.png"
+HELP_ICON = ICONS_DIR / "help.png"
+EDIT_ICON = ICONS_DIR / "edit.png"
+DELETE_ICON = ICONS_DIR / "delete.png"
+SAVE_ICON = ICONS_DIR / "save.png"
+UNDO_ICON = ICONS_DIR / "undo.png"
+REDO_ICON = ICONS_DIR / "redo.png"
+REFRESH_ICON = ICONS_DIR / "refresh.png"
+PLAY_ICON = ICONS_DIR / "play.png"
+PAUSE_ICON = ICONS_DIR / "pause.png"
+STOP_ICON = ICONS_DIR / "stop.png"
+SIMILAR_ICON = ICONS_DIR / "similar.png"
+DIFFERENT_ICON = ICONS_DIR / "different.png"
+NORM_ICON = ICONS_DIR / "scale.png"
+VOLUME_ICON = ICONS_DIR / "volume.png"
+VIBE_ICON = ICONS_DIR / "similar.png"
+CLOSE_ICON = ICONS_DIR / "close.png"
+
+# UI Geometry & Timing Constants
+SIDEBAR_WIDTH = 260
+LIB_TAB_OUTER_MARGIN = 12
+LIB_TAB_CONTENT_GAP = 10
+SIDEBAR_ITEM_HEIGHT = 32
+SIDEBAR_ICON_BUTTON_SIZE = 20
+SIDEBAR_SECTION_SPACING = 12
+SIDEBAR_ROW_SPACING = 6
+SIDEBAR_HEADER_HEIGHT = 38
+SIDEBAR_ADD_BUTTON_HEIGHT = 32
+SIDEBAR_OUTER_MARGIN_LEFT = 8
+SIDEBAR_OUTER_MARGIN = 8
+SIDEBAR_OUTER_MARGIN_TOP = 8
+SIDEBAR_ITEM_TRAILING_MARGIN = 4
+SIDEBAR_MINOR_SECTION_SPACING = 10
+SIDEBAR_ICON_TINT_ALPHA = 120
+SIDEBAR_INNER_CONTENT_WIDTH = 226
+FOOTER_HEIGHT = 28
+VIBE_BAR_HEIGHT = 42
+ANIMATION_DURATION = 250  # ms
+DEBOUNCE_DELAY = 300      # ms
+TOOLTIP_DELAY = 700       # ms
+
+# Build page geometry
+BUILD_COMPARE_DEFAULT_WIDTH = 1180
+BUILD_COMPARE_DEFAULT_HEIGHT = 760
+BUILD_COMPARE_TREE_INFO_WIDTH = 170
+BUILD_COMPARE_TREE_INFO_MIN_WIDTH = 90
+BUILD_COMPARE_MARGIN = 16
+BUILD_COMPARE_SPACING = 12
+
+# Sidebar carousel geometry
+CAROUSEL_ROW_HEIGHT = 28
+CAROUSEL_BUTTON_HEIGHT = 32
+CAROUSEL_ICON_BUTTON_WIDTH = 24
+CAROUSEL_ICON_HITBOX_WIDTH = 20
+CAROUSEL_ARROW_ICON_SIZE = 10
+CAROUSEL_LAYOUT_SPACING = 5
+CAROUSEL_HEADER_SPACING = 6
+
+# Library tab geometry
+LIB_TAB_TOOLBAR_MARGIN_H = 10
+LIB_TAB_TOOLBAR_MARGIN_TOP = 10
+LIB_TAB_TOOLBAR_MARGIN_BOTTOM = 10
+LIB_TAB_TOOLBAR_SPACING = 8
+LIB_TAB_RIGHT_PANEL_MARGIN = 14
+LIB_TAB_RIGHT_PANEL_SPACING = 10
+LIB_TAB_DOCKED_MARGIN = 5
+LIB_TAB_VIEW_BOX_MARGIN = 0
+LIB_TAB_VIEW_BOX_SPACING = 1
+LIB_TAB_VIEW_BUTTON_ICON_SIZE = 16
+LIB_TAB_VIEW_BUTTON_WIDTH = 36
+LIB_TAB_VIEW_BUTTON_HEIGHT = 36
+LIB_TAB_VIEW_BUTTON_ICON_BOX_WIDTH = 36
+LIB_TAB_VIEW_BUTTON_ICON_BOX_HEIGHT = 36
+LIB_TAB_SEARCH_BUTTON_HEIGHT = 36
+LIB_TAB_SIDEBAR_CONTROL_SPACING = 10
+LIB_TAB_TOOL_BUTTON_ICON_SIZE = 22
+LIB_TAB_CONTENT_ZERO_MARGINS = (0, 0, 0, 0)
+LIB_TAB_COLUMN_MIN_WIDTH = 125
+LIB_TAB_ROW_MIN_HEIGHT = 34
+LIB_TAB_RESIZE_DEBOUNCE_MS = 100
+LIB_TAB_RECENT_SCAN_SOURCES_LIMIT = 12
+
+# Docked view geometry
+DOCKED_MINIMUM_WIDTH = 250
+DOCKED_MINIMUM_HEIGHT = 400
+DOCKED_MAXIMUM_WIDTH = 520
+DOCKED_MAIN_LAYOUT_MARGINS = (10, 10, 10, 10)
+DOCKED_MAIN_LAYOUT_SPACING = 10
+DOCKED_HEADER_LAYOUT_MARGINS = (0, 0, 0, 0)
+DOCKED_HEADER_LAYOUT_SPACING = 6
+DOCKED_SEARCH_ROW_MARGINS = (0, 0, 0, 0)
+DOCKED_SEARCH_ROW_SPACING = 5
+DOCKED_SEARCH_BAR_MINIMUM_WIDTH = 60
+DOCKED_SEARCH_BAR_FIXED_HEIGHT = 36
+DOCKED_OPTIONS_LAYOUT_SPACING = 12
+DOCKED_TREE_PANEL_MIN_HEIGHT = 180
+DOCKED_SCROLL_CONTENT_MIN_HEIGHT = 0
+
+# Type toggle geometry
+TYPE_TOGGLE_BOX_MARGINS = (0, 0, 0, 0)
+TYPE_TOGGLE_BOX_SPACING = 6
+TYPE_TOGGLE_BUTTON_WIDTH = 44
+TYPE_TOGGLE_BUTTON_HEIGHT = 36
+
+# Taxonomy page geometry
+WORKSPACE_ROOT_MARGINS = (10, 10, 10, 10)
+WORKSPACE_ROOT_SPACING = 10
+WORKSPACE_SECTION_MARGINS = (8, 8, 8, 8)
+WORKSPACE_SECTION_SPACING = 8
+WORKSPACE_CARD_MARGINS = (10, 10, 10, 10)
+WORKSPACE_CARD_H_SPACING = 8
+WORKSPACE_CARD_V_SPACING = 8
+
+# Slider/knob geometry
+MODERN_KNOB_SIZE = 64
+RANGE_SLIDER_MIN_HEIGHT = 24
+
+# Collapsible sections
+SECTION_CONTENT_TOP_MARGIN = 5
+SECTION_CONTENT_BOTTOM_MARGIN = 15
+SECTION_INNER_SPACING = 8
+
+# Vibe anchor bar geometry
+VIBE_ANCHOR_BAR_HEIGHT = 85
+VIBE_ANCHOR_LAYOUT_MARGINS = (10, 5, 10, 8)
+VIBE_ANCHOR_LAYOUT_SPACING = 4
+VIBE_ANCHOR_CLOSE_ICON_SIZE = 18
+VIBE_ANCHOR_SIM_ICON_SIZE = 16
+VIBE_ANCHOR_KNOB_SIZE = 45
+VIBE_ANCHOR_GAP_SMALL = 6
+VIBE_ANCHOR_GAP_MEDIUM = 15
+
+# Preview bar / footer geometry
+PREVIEW_BAR_HEIGHT = 60
+PREVIEW_BAR_MARGIN_H = 15
+PREVIEW_BAR_SPACING = 15
+PREVIEW_VOLUME_KNOB_SIZE = 40
+FOOTER_COLLAPSED_HEIGHT = 40
+FOOTER_EXPANDED_HEIGHT = 120
+FOOTER_CANCEL_BUTTON_WIDTH = 80
+FOOTER_MARGIN_H = 15
+FOOTER_MARGIN_BOTTOM = 10
+
+# Preserved dialog / header sizing
+PRESERVED_DIALOG_MIN_WIDTH = 500
+PRESERVED_LAYOUT_SPACING = 15
+PRESERVED_PATH_SPACING = 5
+PRESERVED_BOTTOM_SPACING = 10
+TABLE_HEADER_MIN_WIDTH = 32
+TABLE_HEADER_DEFAULT_HEIGHT = 38
+TABLE_HEADER_ROW0_HEIGHT = 38
+TABLE_HEADER_FIXED_WIDTH = 38
+
+# Window sizing presets
+DOCKED_WINDOW_WIDTH = 250
+DOCKED_WINDOW_HEIGHT = 1000
+MAIN_WINDOW_WIDTH = 1100
+MAIN_WINDOW_HEIGHT = 840
+
+# Staging Table specific
+DEFAULT_ROW_HEIGHT = 28
+MIN_COLUMN_WIDTH = 40
+DRAG_HANDLE_SIZE = 6

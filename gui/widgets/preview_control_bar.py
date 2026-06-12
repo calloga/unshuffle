@@ -1,0 +1,116 @@
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QWidget
+from PySide6.QtCore import Qt, QSize, Signal, QPoint
+from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtMultimedia import QMediaPlayer
+from pathlib import Path
+
+from . import AnimatedIconButton, ElidingLabel
+from ..utils.styles import (
+    apply_style,
+    preview_bar_style,
+    scaled_px,
+)
+from ..utils.layout_helpers import apply_layout_margins, apply_layout_spacing
+from ..utils.widget_helpers import apply_fixed_height, apply_fixed_size
+
+from gui.core.audio_player import SoundPreviewPlayer
+from ..utils.constants import (
+    DIFFERENT_ICON,
+    NORM_ICON,
+    PAUSE_ICON,
+    PLAY_ICON,
+    PREVIEW_BAR_HEIGHT,
+    PREVIEW_BAR_MARGIN_H,
+    PREVIEW_BAR_SPACING,
+    PREVIEW_VOLUME_KNOB_SIZE,
+    SIMILAR_ICON,
+    STOP_ICON,
+    VOLUME_ICON,
+)
+
+class PreviewControlBar(QFrame):
+    """
+    Bottom playback bar for auditioning samples.
+    
+    Provides play/stop, volume, and a "Similarity Spectrum" slider.
+    """
+    TARGET_HEIGHT = PREVIEW_BAR_HEIGHT
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        apply_fixed_height(self, scaled_px(self.TARGET_HEIGHT))
+        apply_style(self, preview_bar_style())
+        
+        layout = QHBoxLayout(self)
+        apply_layout_margins(layout, (PREVIEW_BAR_MARGIN_H, 0, PREVIEW_BAR_MARGIN_H, 0))
+        apply_layout_spacing(layout, PREVIEW_BAR_SPACING)
+
+        self.player = SoundPreviewPlayer.instance()
+
+        self.btn_play_pause = AnimatedIconButton(PLAY_ICON, QSize(18, 18))
+        self.btn_play_pause.setToolTip("Play/Pause (Space)")
+        self.btn_play_pause.clicked.connect(lambda checked=False: self.player.toggle_play_pause())
+
+        self.btn_stop = AnimatedIconButton(STOP_ICON, QSize(16, 16))
+        self.btn_stop.setToolTip("Stop (Esc)")
+        self.btn_stop.clicked.connect(lambda checked=False: self.player.stop())
+
+        self.btn_mute = AnimatedIconButton(VOLUME_ICON, QSize(18, 18))
+        self.btn_mute.setToolTip("Mute/Unmute")
+
+        layout.addWidget(self.btn_play_pause)
+        layout.addWidget(self.btn_stop)
+        layout.addStretch()
+        
+        from . import ModernKnob
+        self.vol_slider = ModernKnob()
+        self.vol_slider.setSymmetric(False)
+        apply_fixed_size(self.vol_slider, PREVIEW_VOLUME_KNOB_SIZE, PREVIEW_VOLUME_KNOB_SIZE)
+        self.vol_slider.setRange(0, 100)
+        self.vol_slider.setValue(80)
+        self.vol_slider.valueChanged.connect(lambda v: self.player.set_volume(v / 100.0))
+        
+        layout.addWidget(self.vol_slider)
+        layout.addWidget(self.btn_mute)
+
+        self.player.stateChanged.connect(self._update_play_pause_icon)
+        self.player.positionChanged.connect(self._update_time)
+        self.player.durationChanged.connect(self._update_duration)
+        self.player.volumeChanged.connect(lambda v: self.vol_slider.setValue(int(v * 100)))
+
+    def _update_play_pause_icon(self, state):
+        """Swap icons depending on playback state."""
+        is_playing = state == QMediaPlayer.PlayingState or (hasattr(QMediaPlayer, "PlaybackState") and state == QMediaPlayer.PlaybackState.PlayingState)
+        
+        if is_playing:
+            self.btn_play_pause.setToolTip("Pause (Space)")
+            self.btn_play_pause.setIcon(QIcon(str(PAUSE_ICON)))
+        else:
+            self.btn_play_pause.setToolTip("Play (Space)")
+            self.btn_play_pause.setIcon(QIcon(str(PLAY_ICON)))
+        
+        self.btn_stop.setIcon(QIcon(str(STOP_ICON)))
+
+    def _update_time(self, pos):
+        """Update playback position tracking (no UI label)."""
+        pass
+
+    def _update_duration(self, dur):
+        """Update duration tracking (no UI label)."""
+        pass
+
+    def _format_ms(self, ms: int) -> str:
+        """Format milliseconds as M:SS."""
+        s = ms // 1000
+        m = s // 60
+        s = s % 60
+        return f"{m}:{s:02d}"
+
+    def refresh_theme(self) -> None:
+        is_collapsed = self.maximumHeight() == 0
+        apply_style(self, preview_bar_style())
+        apply_fixed_height(self, 0 if is_collapsed else scaled_px(self.TARGET_HEIGHT))
+        self.setVisible(not is_collapsed)
+        for button in (self.btn_play_pause, self.btn_stop, self.btn_mute):
+            if hasattr(button, "refresh_theme"):
+                button.refresh_theme()

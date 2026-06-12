@@ -1,0 +1,20 @@
+{
+    "category": "Kicks",
+    "default_sub": "no-sub",
+    "taxonomy": {
+        "no-sub": [
+            "bass-drum",
+            "bassdrum",
+            "kicks",
+            "knock",
+            "punch",
+            "thump",
+            "boom",
+            "kick",
+            "kik",
+            "bd",
+            "808 kick",
+            "acoustic kick"
+        ]
+    }
+}

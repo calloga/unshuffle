@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=9.0,<9.1
+pyright>=1.1.409,<1.2
+pyinstaller>=6.11,<6.12
+pillow>=10.0

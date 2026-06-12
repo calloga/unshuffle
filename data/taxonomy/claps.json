@@ -1,0 +1,26 @@
+{
+    "category": "Claps",
+    "default_sub": "Generic",
+    "taxonomy": {
+        "Generic": [
+            "clap",
+            "claps",
+            "handclap",
+            "handclaps",
+            "808 clap",
+            "cp"
+        ],
+        "Group": [
+            "group clap",
+            "group claps",
+            "crowd clap",
+            "crowd claps"
+        ],
+        "Snaps": [
+            "snap",
+            "snaps",
+            "finger",
+            "snp"
+        ]
+    }
+}

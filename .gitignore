@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest*
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Project Specific
+dist/
+.unshuffle_hashes.json
+organized_directory_dump_*.json
+dry_run_report_*.csv
+unshuffle.log
+settings.json
+refactory-planning/
+.tmp/
+data/profiling/*.json
+data/profiling/*.txt
+data/profiling/*.pstats
+profile_results.pstats
+scalene-profile.json
+test_results.txt
+test_final_results.txt
+test_db_results.txt
+
+# System / Tools
+.DS_Store
+Thumbs.db
+
+# C++ Build Artifacts
+build/
+out/
+*.exe
+*.obj
+*.pdb
+*.o
+*.a
+*.lib
+*.dll
+bin/**
+!bin/
+!bin/**/
+!bin/**/.gitkeep
+
+# SQLite & Persistence
+*.db
+*.db-wal
+*.db-journal
+DO_NOT_DELETE_unshuffle/
+
+# App Temporary Data
+.test_tmp/
+.unshuffle/
+.unshuffle_drag_exports/

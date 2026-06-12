@@ -1,0 +1,39 @@
+{
+    "category": "Bass",
+    "default_sub": "no-sub",
+    "taxonomy": {
+        "no-sub": [
+            "electric bass",
+            "double bass",
+            "bassline",
+            "bass riffs",
+            "synth bass",
+            "bass riff",
+            "distbass",
+            "sub-bass",
+
+            "slap",
+            "subbass",
+            "lowend",
+            "wobble",
+            "glide",
+            "grime",
+            "growl",
+            "reese",
+            "slide",
+            "faller",
+            "bass",
+            "riff",
+            "sine",
+            "808",
+            "sub",
+            "808 bass",
+            "808-bass",
+            "808_bass",
+            "808bass",
+            "808 sub",
+            "808-sub",
+            "808_sub"
+        ]
+    }
+}

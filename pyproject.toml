@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unshuffle"
+version = "1.0.0"
+description = "Producer-first sample-library staging and migration tool."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "UmU" }]
+dependencies = [
+  "PySide6>=6.11,<6.12",
+  "mutagen>=1.47,<1.48",
+  "numpy>=2.0,<3.0",
+  "hnswlib>=0.8.0,<0.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.0,<9.1",
+  "pyright>=1.1.409,<1.2",
+  "pyinstaller>=6.11,<6.12",
+  "pillow>=10.0",
+]
+
+[project.scripts]
+unshuffle = "unshuffle.cli:main"
+unshuffle-gui = "gui.main.launcher:main"
+
+[tool.setuptools.packages.find]
+include = ["unshuffle*", "gui*"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.data-files]
+"share/unshuffle/data" = ["data/config.json"]
+"share/unshuffle/data/anchors" = ["data/anchors/*.json"]
+"share/unshuffle/data/metadata" = ["data/metadata/*.json"]
+"share/unshuffle/data/taxonomy" = ["data/taxonomy/*.json"]
+"share/unshuffle/icons" = ["icons/*.png", "icons/*.ico"]
+"share/unshuffle/bin/windows" = ["bin/windows/*"]
+"share/unshuffle/bin/macos" = ["bin/macos/*"]
+"share/unshuffle/bin/linux" = ["bin/linux/*"]

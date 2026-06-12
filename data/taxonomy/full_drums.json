@@ -1,0 +1,39 @@
+{
+    "category": "Full Drums",
+    "default_sub": "no-sub",
+    "taxonomy": {
+        "no-sub": [
+            "rhythmic sequences",
+            "rhythmic sequence",
+            "breakbeat",
+      
+            "sequences",
+   
+            "drum loop",
+            "drumloop",
+  
+            "sequence",
+            "drmloop",
+
+            "fullmix",
+            "mixdown",
+            "breaks",
+            "groove",
+            "master",
+            "rhythm",
+            "break",
+            "drill",
+            "drums",
+            "fills",
+            "rolls",
+            "beat",
+            "demo",
+            "fill",
+            "linn",
+            "lofi",
+            "roll",
+            "bip",
+            "mix"
+        ]
+    }
+}

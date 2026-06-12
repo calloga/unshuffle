@@ -1,0 +1,90 @@
+name: Native Extractors
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "unshuffle_extractor/**"
+      - "scripts/build_native_extractor.py"
+      - "scripts/check_native_extractor_bundle.py"
+      - ".github/workflows/native-extractors.yml"
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            runner: windows-latest
+            artifact_name: unshuffle-extractor-windows
+            artifact_path: bin/windows/unshuffle_extractor.exe
+          - platform: macos
+            runner: macos-latest
+            artifact_name: unshuffle-extractor-macos
+            artifact_path: bin/macos/unshuffle_extractor
+          - platform: linux
+            runner: ubuntu-latest
+            artifact_name: unshuffle-extractor-linux
+            artifact_path: bin/linux/unshuffle_extractor
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install macOS audio tooling
+        if: matrix.platform == 'macos'
+        run: brew install ffmpeg
+
+      - name: Install Linux audio tooling
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Build native extractor
+        run: python scripts/build_native_extractor.py --copy-to-bin
+
+      - name: Validate current platform extractor
+        run: python scripts/check_native_extractor_bundle.py
+
+      - name: Upload extractor artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+  assemble:
+    name: Validate all platform artifacts
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Linux audio tooling
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Download extractor artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: native-artifacts
+
+      - name: Assemble bin layout
+        shell: bash
+        run: |
+          mkdir -p bin/windows bin/macos bin/linux
+          cp "$(find native-artifacts/unshuffle-extractor-windows -name 'unshuffle_extractor.exe' -print -quit)" bin/windows/unshuffle_extractor.exe
+          cp "$(find native-artifacts/unshuffle-extractor-macos -name 'unshuffle_extractor' -print -quit)" bin/macos/unshuffle_extractor
+          cp "$(find native-artifacts/unshuffle-extractor-linux -name 'unshuffle_extractor' -print -quit)" bin/linux/unshuffle_extractor
+          chmod +x bin/macos/unshuffle_extractor bin/linux/unshuffle_extractor
+
+      - name: Validate all platform artifacts
+        run: python scripts/check_native_extractor_bundle.py --all

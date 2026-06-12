@@ -1,0 +1,133 @@
+{
+    "CATEGORY_SUPPRESSION_RULES": {
+        "Kicks": [
+            "Bass",
+            "Melodics",
+            "FX"
+        ],
+        "Snares": [
+            "Bass",
+            "FX"
+        ],
+        "Hats & Cymbals": [
+            "Bass",
+            "FX"
+        ],
+        "Claps": [
+            "Bass",
+            "FX"
+        ],
+        "Percussion": [
+            "Bass"
+        ],
+        "Vocals": [
+            "Melodics"
+        ]
+    },
+    "LOOP_INDICATORS": [
+        "loop",
+        "bpm",
+        "toploop",
+        "drumloop",
+        "perc_loop",
+        "meloloop",
+        "arp_loop",
+        "construction",
+        "phrase",
+        "sequence",
+        "riff",
+        "breakbeat",
+        "stem",
+        "progression",
+        "fill",
+        "roll",
+        "break",
+        "mix",
+        "beat",
+        "groove"
+    ],
+    "WEAK_LOOP_INDICATORS": [
+        "rhythm"
+    ],
+    "ONESHOT_INDICATORS": [
+        "oneshot",
+        "one-shot",
+        "one shots",
+        "oneshots",
+        "shot",
+        "shots",
+        "one",
+        "stab",
+        "hit",
+        "impact",
+        "punch"
+    ],
+    "ONESHOT_HINT_TOKENS": [
+        "kick",
+        "snare",
+        "hat",
+        "clap",
+        "perc",
+        "tom",
+        "rim",
+        "oneshot"
+    ],
+    "NOISE_WORDS": [
+        "free",
+        "samples",
+        "loop",
+        "loops",
+        "oneshots",
+        "one shots",
+        "one-shots",
+        "hits",
+        "sounds",
+        "audio",
+        "stems",
+        "stem",
+        "midi",
+        "drums",
+        "kit",
+        "drumkit",
+        "wav",
+        "wavs",
+        "collection",
+        "multisamples",
+        "drum",
+        "kits",
+        "sample",
+        "packs",
+        "library",
+        "barely",
+        "used",
+        "space",
+        "ambient",
+        "ambients",
+        "vol",
+        "volume",
+        "favs",
+        "favorites",
+        "24bit",
+        "48khz",
+        "441khz",
+        "16bit",
+        "aif",
+        "aiff",
+        "source",
+        "preset",
+        "presets"
+    ],
+    "HIDDEN_SYSTEM_FILES": [
+        ".ds_store",
+        "thumbs.db",
+        "desktop.ini",
+        "__MACOSX"
+    ],
+    "PERCUSSIVE_CATEGORIES": [
+        "Kicks",
+        "Snares",
+        "Claps",
+        "Hats & Cymbals",
+        "Percussion"
+    ]
+}

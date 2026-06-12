@@ -1,0 +1,102 @@
+name: App Binaries
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "gui/**"
+      - "unshuffle/**"
+      - "data/**"
+      - "docs/**"
+      - "icons/**"
+      - "bin/**"
+      - "scripts/build_app_binary.py"
+      - "scripts/app_binary_entrypoint.py"
+      - "scripts/build_windows_installer.ps1"
+      - "scripts/build_macos_dmg.sh"
+      - "scripts/build_macos_pkg.sh"
+      - "scripts/prepare_macos_icon.sh"
+      - "scripts/build_linux_deb.py"
+      - "scripts/check_native_extractor_bundle.py"
+      - "packaging/**"
+      - "pyproject.toml"
+      - "requirements*.txt"
+      - ".github/workflows/app-binaries.yml"
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }} app
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            runner: windows-latest
+            artifact_name: unshuffle-windows-installer
+            artifact_path: dist/installer/UnshuffleSetup.exe
+          - platform: macos
+            runner: macos-latest
+            artifact_name: unshuffle-macos-pkg
+            artifact_path: dist/installer/Unshuffle-macos.pkg
+          - platform: linux
+            runner: ubuntu-latest
+            artifact_name: unshuffle-linux-deb
+            artifact_path: dist/installer/unshuffle_1.0.0_amd64.deb
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install release build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Install Windows installer compiler
+        if: matrix.platform == 'windows'
+        run: choco install innosetup --no-progress -y
+
+      - name: Install macOS audio tooling
+        if: matrix.platform == 'macos'
+        run: brew install ffmpeg
+
+      - name: Install Linux audio tooling
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Build current-platform native extractor
+        run: python scripts/build_native_extractor.py --copy-to-bin
+
+      - name: Validate bundled native extractor
+        run: python scripts/check_native_extractor_bundle.py
+
+      - name: Prepare macOS app icon
+        if: matrix.platform == 'macos'
+        run: bash scripts/prepare_macos_icon.sh
+
+      - name: Build app binary
+        run: python scripts/build_app_binary.py
+
+      - name: Build Windows installer
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: ./scripts/build_windows_installer.ps1 -AppVersion "1.0.0"
+
+      - name: Build macOS installer package
+        if: matrix.platform == 'macos'
+        run: bash scripts/build_macos_pkg.sh
+
+      - name: Build Linux deb package
+        if: matrix.platform == 'linux'
+        run: python scripts/build_linux_deb.py --version "1.0.0"
+
+      - name: Upload installable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
