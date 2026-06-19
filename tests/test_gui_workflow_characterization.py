@@ -4528,7 +4528,6 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         try:
             window.show()
             build_page.show()
-            app.processEvents()
 
             self.assertEqual(window.library_tab.edit_search.height(), window.library_tab.btn_save_search.height())
             self.assertEqual(window.dock_view.edit_search.height(), window.dock_view.btn_save_search.height())
