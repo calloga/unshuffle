@@ -22,9 +22,13 @@ jobs:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
+        python -m pip install --upgrade pip 
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+        pip install -e .
+    - name: Install Qt system dependencies
+      if: runner.os == 'Linux'
+      run: sudo apt-get install -y libegl1
     - name: Test with pytest
       run: |
         python -m pytest -q
