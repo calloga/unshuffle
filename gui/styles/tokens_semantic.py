@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import pathlib
+from pathlib import Path
 from dataclasses import dataclass
 import json
 
@@ -231,7 +231,7 @@ def _theme(
     )
 
 def _load_json(theme_key: str):
-    file_path = str(pathlib.Path(__file__).resolve().parent.joinpath('themes', f'{theme_key}.json'))
+    file_path = str(Path(__file__).resolve().parent.joinpath('themes', f'{theme_key}.json'))
 
     with open(file_path) as f:
         return json.load(f)
