@@ -25,6 +25,13 @@ Download the installer for your operating system:
 
 ## Source Setup
 
+You need libpulse0 library for development.
+For Ubuntu\Linux:
+```bash
+sudo apt update
+sudo apt install libpulse0
+```
+
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m gui
