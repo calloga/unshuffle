@@ -20,7 +20,7 @@ class AudioTypeTests(unittest.TestCase):
             node_type=NodeType.FILE,
             extension=".wav",
         )
-        self.assertEqual(detect_audio_type(node), "Loops")
+        self.assertEqual("Loops", detect_audio_type(node),)
 
     def test_substring_hit_no_longer_overrides_bpm_loop(self):
         node = LibNode(
@@ -29,7 +29,7 @@ class AudioTypeTests(unittest.TestCase):
             node_type=NodeType.FILE,
             extension=".wav",
         )
-        self.assertEqual(detect_audio_type(node), "Loops")
+        self.assertEqual("Loops", detect_audio_type(node),)
 
     def test_loopmasters_parent_no_longer_forces_loop(self):
         node = LibNode(
@@ -38,7 +38,7 @@ class AudioTypeTests(unittest.TestCase):
             node_type=NodeType.FILE,
             extension=".wav",
         )
-        self.assertEqual(detect_audio_type(node), "Oneshots")
+        self.assertEqual("Oneshots", detect_audio_type(node),)
 
     def test_parent_loop_folder_without_oneshot_hint_classifies_as_loop(self):
         node = LibNode(
@@ -47,7 +47,7 @@ class AudioTypeTests(unittest.TestCase):
             node_type=NodeType.FILE,
             extension=".wav",
         )
-        self.assertEqual(detect_audio_type(node), "Loops")
+        self.assertEqual("Loops", detect_audio_type(node),) # FIXME mb real file on other computer
 
     def test_parent_loop_folder_with_token_oneshot_hint_stays_loop_after_soft_malus(self):
         node = LibNode(
@@ -56,7 +56,7 @@ class AudioTypeTests(unittest.TestCase):
             node_type=NodeType.FILE,
             extension=".wav",
         )
-        self.assertEqual(detect_audio_type(node), "Loops")
+        self.assertEqual("Loops", detect_audio_type(node),) # FIXME mb real file on other computer
 
     def test_parent_loop_folder_with_substring_oneshot_hint_is_not_malus_candidate(self):
         node = LibNode(
@@ -65,7 +65,7 @@ class AudioTypeTests(unittest.TestCase):
             node_type=NodeType.FILE,
             extension=".wav",
         )
-        self.assertEqual(detect_audio_type(node), "Loops")
+        self.assertEqual("Loops", detect_audio_type(node),) # FIXME mb real file on other computer
 
     def test_primary_classification_applies_suppression_rules_after_adjustments(self):
         runtime = {
@@ -98,9 +98,9 @@ class AudioTypeTests(unittest.TestCase):
         finally:
             reset_scoring_engine()
 
-        self.assertEqual(category, "Kicks")
+        self.assertEqual("Kicks", category, )
         self.assertGreater(confidence, 0.0)
-        self.assertEqual(evidence["trace"]["components"]["filename"]["suppressed_scores"]["Bass"], 0.0)
+        self.assertEqual(0.0, evidence["trace"]["components"]["filename"]["suppressed_scores"]["Bass"],)
 
 
 class SimilarityVectorTests(unittest.TestCase):
@@ -109,7 +109,7 @@ class SimilarityVectorTests(unittest.TestCase):
         vec = SimilarityEngine.vector_from_blob(blob)
 
         self.assertIsNone(vec)
-        self.assertEqual(calculate_similarity_distance([0.0] * 17, [0.0] * FEATURE_VECTOR_SIZE), float("inf"))
+        self.assertEqual(float("inf"), calculate_similarity_distance([0.0] * 17, [0.0] * FEATURE_VECTOR_SIZE), )
 
     def test_active_duration_from_vector_overrides_raw_duration_penalty(self):
         engine = SimilarityEngine()
@@ -119,8 +119,8 @@ class SimilarityVectorTests(unittest.TestCase):
         longer_active = _v(base + [2.0])
 
         self.assertEqual(
-            engine.calculate_distance(same_active, long_padding, d1=0.5, d2=5.0),
             0.0,
+            engine.calculate_distance(same_active, long_padding, d1=0.5, d2=5.0),
         )
         self.assertGreater(
             engine.calculate_distance(same_active, longer_active),
@@ -131,14 +131,14 @@ class SimilarityVectorTests(unittest.TestCase):
         normalized = _v([0.5, 0.25, 0.5, 0.1, 0.5] + [1.0] * 12 + [0.7])
         raw_equivalent = _v([5000.0, 0.25, 8.0, 0.1, -5.0] + [10.0] * 12 + [0.7])
 
-        self.assertEqual(normalize_distance_vector(raw_equivalent), normalized)
-        self.assertAlmostEqual(calculate_similarity_distance(normalized, raw_equivalent), 0.0, places=6)
+        self.assertEqual(normalized, normalize_distance_vector(raw_equivalent), )
+        self.assertAlmostEqual(0.0, calculate_similarity_distance(normalized, raw_equivalent), places=6)
 
     def test_invalid_vector_blob_is_rejected(self):
         self.assertIsNone(SimilarityEngine.vector_from_blob(b"bad-shape"))
 
     def test_cosine_distance_rejects_mismatched_vector_lengths(self):
-        self.assertEqual(cosine_distance([1.0, 0.0], [1.0]), float("inf"))
+        self.assertEqual(float("inf"), cosine_distance([1.0, 0.0], [1.0]), )
 
     def test_analyzer_cached_distance_matches_similarity_distance(self):
         examples = [
@@ -159,8 +159,8 @@ class SimilarityVectorTests(unittest.TestCase):
         for left, right in examples:
             with self.subTest(left=left[:5], right=right[:5]):
                 self.assertAlmostEqual(
-                    _distance_between_payloads(_distance_payload_for_vector(left), _distance_payload_for_vector(right)),
                     calculate_similarity_distance(left, right),
+                    _distance_between_payloads(_distance_payload_for_vector(left), _distance_payload_for_vector(right)),
                     places=9,
                 )
 
@@ -214,7 +214,7 @@ class SimilarityVectorTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {SimilarityEngine.EXTRACTOR_PATH_ENV: "/custom/unshuffle_extractor"}):
             engine = SimilarityEngine()
 
-        self.assertEqual(engine.extractor_path, "/custom/unshuffle_extractor")
+        self.assertEqual("/custom/unshuffle_extractor", engine.extractor_path, )
 
 
 def _v(values):
