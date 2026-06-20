@@ -47,7 +47,7 @@ class AudioTypeTests(unittest.TestCase):
             node_type=NodeType.FILE,
             extension=".wav",
         )
-        self.assertEqual("Loops", detect_audio_type(node),) # FIXME mb real file on other computer
+        self.assertEqual("Loops", detect_audio_type(node),)
 
     def test_parent_loop_folder_with_token_oneshot_hint_stays_loop_after_soft_malus(self):
         node = LibNode(
@@ -56,7 +56,7 @@ class AudioTypeTests(unittest.TestCase):
             node_type=NodeType.FILE,
             extension=".wav",
         )
-        self.assertEqual("Loops", detect_audio_type(node),) # FIXME mb real file on other computer
+        self.assertEqual("Loops", detect_audio_type(node),)
 
     def test_parent_loop_folder_with_substring_oneshot_hint_is_not_malus_candidate(self):
         node = LibNode(
@@ -65,7 +65,7 @@ class AudioTypeTests(unittest.TestCase):
             node_type=NodeType.FILE,
             extension=".wav",
         )
-        self.assertEqual("Loops", detect_audio_type(node),) # FIXME mb real file on other computer
+        self.assertEqual("Loops", detect_audio_type(node),)
 
     def test_primary_classification_applies_suppression_rules_after_adjustments(self):
         runtime = {

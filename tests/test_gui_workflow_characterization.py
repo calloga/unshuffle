@@ -3460,7 +3460,7 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         app.data_manager.export_session_to_folder.assert_called_once_with(Path("D:/Library"), parent_widget=app)
 
     def test_staging_session_import_dialogs_point_to_sidecar_database(self):
-        library_actions = Path("../gui/main/actions/library.py").read_text(encoding="utf-8") # FIXME relative path
+        library_actions = Path("../gui/main/actions/library.py").read_text(encoding="utf-8")
         startup_launcher = Path("../gui/widgets/startup_launcher.py").read_text(encoding="utf-8")
 
         self.assertIn("Unshuffle Session Database (unshuffle.db *.db)", library_actions)

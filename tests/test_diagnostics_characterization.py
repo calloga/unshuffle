@@ -48,7 +48,7 @@ class DiagnosticsTests(unittest.TestCase):
         from unshuffle.core.features import CURRENT_EXTRACTOR_VERSION
 
         self.assertEqual(CURRENT_EXTRACTOR_VERSION, "unshuffle_extractor 1.0.0")
-        source = Path("../unshuffle_extractor/unshuffle_extractor.cpp").read_text(encoding="utf-8") # FIXME relative path
+        source = Path("../unshuffle_extractor/unshuffle_extractor.cpp").read_text(encoding="utf-8")
         self.assertIn("unshuffle_extractor 1.0.0", source)
         self.assertNotIn("unshuffle_extractor 1.1.0", source)
 
