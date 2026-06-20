@@ -149,7 +149,7 @@ class SystemPageBannerTests(unittest.TestCase):
 
 
 class SupportDialogTests(unittest.TestCase):
-    def test_help_menu_is_not_exposed(self):
+    def test_help_menu_should_be_exposed(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
 
@@ -160,10 +160,10 @@ class SupportDialogTests(unittest.TestCase):
         menu = ModernMenuBar()
         try:
             top_level = [action.text() for action in menu.actions() if action.text()]
-            self.assertNotIn("Help", top_level)
-            self.assertFalse(hasattr(menu, "menu_help"))
-            self.assertFalse(hasattr(menu, "act_help_index"))
-            self.assertFalse(hasattr(menu, "act_about"))
+            self.assertIn("Help", top_level)
+            self.assertTrue(hasattr(menu, "menu_help"))
+            self.assertFalse(hasattr(menu, "act_help_index")) # dont sure in this change
+            self.assertTrue(hasattr(menu, "act_about"))
         finally:
             menu.deleteLater()
 

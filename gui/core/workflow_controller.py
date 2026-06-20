@@ -188,7 +188,6 @@ class WorkflowController(QObject):
 
         lib_hashes = set()
         existing_hashes = workflow_scan_start.existing_dedupe_keys(current_records, append=append)
-
         started = self.worker_manager.start_scan(
             self._engine, 
             sources_paths, 

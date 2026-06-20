@@ -30,6 +30,8 @@ For Ubuntu\Linux:
 ```bash
 sudo apt update
 sudo apt install libpulse0
+sudo apt install libva-x11-2
+sudo apt install libva-drm2 
 ```
 
 ```bash

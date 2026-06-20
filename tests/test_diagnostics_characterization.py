@@ -44,11 +44,11 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(report["native_available"], "yes")
         self.assertEqual(report["native_version"], "unshuffle_extractor 2.0.0")
 
-    def test_extractor_version_policy_is_v1(self):
+    def test_extractor_version_policy_is_v1(self): # FIXME cannot start without building application
         from unshuffle.core.features import CURRENT_EXTRACTOR_VERSION
 
         self.assertEqual(CURRENT_EXTRACTOR_VERSION, "unshuffle_extractor 1.0.0")
-        source = Path("unshuffle_extractor/unshuffle_extractor.cpp").read_text(encoding="utf-8")
+        source = Path("../unshuffle_extractor/unshuffle_extractor.cpp").read_text(encoding="utf-8")
         self.assertIn("unshuffle_extractor 1.0.0", source)
         self.assertNotIn("unshuffle_extractor 1.1.0", source)
 

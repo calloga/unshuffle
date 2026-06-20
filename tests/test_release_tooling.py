@@ -161,7 +161,7 @@ def test_linux_deb_builder_writes_desktop_launcher_and_icon(tmp_path, monkeypatc
 
 
 def test_windows_installer_script_registers_app_shortcuts_and_logo() -> None:
-    script = Path("packaging/windows/unshuffle.iss").read_text(encoding="utf-8")
+    script = Path("../packaging/windows/unshuffle.iss").read_text(encoding="utf-8")
 
     assert "AppId={{9D84E78F-9EB3-47A7-A42C-86C9AD5F0E46}" in script
     assert "SetupIconFile=..\\..\\icons\\app_logo.ico" in script
@@ -180,7 +180,7 @@ def test_windows_installer_script_registers_app_shortcuts_and_logo() -> None:
 
 
 def test_app_binary_workflow_uploads_installable_platform_artifacts() -> None:
-    workflow = Path(".github/workflows/app-binaries.yml").read_text(encoding="utf-8")
+    workflow = Path("../.github/workflows/app-binaries.yml").read_text(encoding="utf-8")
 
     assert "dist/installer/UnshuffleWinSetup.exe" in workflow
     assert "dist/installer/Unshuffle-macos.pkg" in workflow
@@ -193,8 +193,8 @@ def test_app_binary_workflow_uploads_installable_platform_artifacts() -> None:
 
 
 def test_platform_packages_use_cropped_circular_app_logo() -> None:
-    linux_builder = Path("scripts/build_linux_deb.py").read_text(encoding="utf-8")
-    macos_icon_script = Path("scripts/prepare_macos_icon.sh").read_text(encoding="utf-8")
+    linux_builder = Path("../scripts/build_linux_deb.py").read_text(encoding="utf-8")
+    macos_icon_script = Path("../scripts/prepare_macos_icon.sh").read_text(encoding="utf-8")
 
     assert 'repo_root / "icons" / "app_logo.png"' in linux_builder
     assert 'SOURCE_ICON="${1:-icons/app_logo.png}"' in macos_icon_script
@@ -203,7 +203,7 @@ def test_platform_packages_use_cropped_circular_app_logo() -> None:
 def test_cropped_app_logo_fills_icon_canvas() -> None:
     from PIL import Image
 
-    for path in (Path("icons/app_logo.png"), Path("icons/app_logo.ico")):
+    for path in (Path("../icons/app_logo.png"), Path("../icons/app_logo.ico")):
         image = Image.open(path).convert("RGBA")
         bbox = image.getbbox()
         assert bbox is not None

@@ -382,7 +382,7 @@ class IconRenderingTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 (root / "icons").mkdir()
-                shutil.copy2(Path("icons") / "table.png", root / "icons" / "table.png")
+                shutil.copy2(Path("../icons") / "table.png", root / "icons" / "table.png")
                 os.environ["UNSHUFFLE_ASSET_ROOT"] = str(root)
 
                 button = AnimatedIconButton("icons/table.png")
