@@ -1,0 +1,14 @@
+CREATE INDEX IF NOT EXISTS idx_cache_hash ON file_cache (hash);
+CREATE INDEX IF NOT EXISTS idx_cache_path ON file_cache (last_path);
+CREATE INDEX IF NOT EXISTS idx_cache_path_size_mtime ON file_cache (last_path, size, mtime);
+CREATE INDEX IF NOT EXISTS idx_records_session ON records (session_id);
+CREATE INDEX IF NOT EXISTS idx_records_status_file_hash ON records (status, file_hash);
+CREATE INDEX IF NOT EXISTS idx_session_sources_session ON session_sources (session_id);
+CREATE INDEX IF NOT EXISTS idx_session_metadata_session ON session_metadata (session_id);
+CREATE INDEX IF NOT EXISTS idx_staging_records_session ON staging_records (session_id);
+CREATE INDEX IF NOT EXISTS idx_staging_records_session_row ON staging_records (session_id, row_id, id);
+CREATE INDEX IF NOT EXISTS idx_staging_records_session_source ON staging_records (session_id, source_path);
+CREATE INDEX IF NOT EXISTS idx_coherence_results_session ON coherence_results (session_id);
+CREATE INDEX IF NOT EXISTS idx_refinement_candidates_session_state ON refinement_candidates (session_id, state);
+CREATE INDEX IF NOT EXISTS idx_anchor_profiles_session_state ON anchor_profiles (session_id, state);
+CREATE INDEX IF NOT EXISTS idx_coherence_review_decisions_hash ON coherence_review_decisions (file_hash);
