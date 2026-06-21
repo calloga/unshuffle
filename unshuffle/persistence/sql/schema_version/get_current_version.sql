@@ -1,0 +1,1 @@
+select version from schema_version;

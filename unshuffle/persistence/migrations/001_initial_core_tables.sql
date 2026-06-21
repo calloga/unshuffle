@@ -1,11 +1,7 @@
 CREATE TABLE IF NOT EXISTS schema_version
 (
-    version INTEGER NOT NULL
+    version INTEGER NOT NULL default 0
 );
-
-INSERT INTO schema_version (version)
-VALUES (1)
-ON CONFLICT DO UPDATE SET version=version;
 
 CREATE TABLE IF NOT EXISTS file_cache
 (
