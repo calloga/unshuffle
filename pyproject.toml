@@ -17,6 +17,7 @@ dependencies = [
   "hnswlib>=0.8.0,<0.9.0",
   "pathlib>=1.0.1",
   "peewee>=4.1.0",
+  "pydantic>=2.13.4",
 ]
 
 [project.optional-dependencies]
