@@ -41,7 +41,9 @@ class DragOutIconButton(AnimatedIconButton):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._press_pos = event.position().toPoint()
-        super().mousePressEvent(event)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if not (event.buttons() & Qt.LeftButton) or self._press_pos is None:
@@ -70,6 +72,12 @@ class DragOutIconButton(AnimatedIconButton):
         mime.setUrls([QUrl.fromLocalFile(str(source_path.absolute()))])
         drag = QDrag(self)
         drag.setMimeData(mime)
+
+        if hasattr(drag, "setPixmap"):
+            pixmap = QPixmap(1, 1)
+            pixmap.fill(Qt.transparent)
+            drag.setPixmap(pixmap)
+
         drag.exec(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
         return True
 
@@ -139,8 +147,6 @@ class PreviewControlBar(QFrame):
         else:
             self.btn_play_pause.setToolTip("Play (Space)")
             self.btn_play_pause.setIcon(QIcon(str(PLAY_ICON)))
-        
-        self.btn_stop.setIcon(QIcon(str(STOP_ICON)))
 
     def _update_time(self, pos):
         """Update playback position tracking (no UI label)."""

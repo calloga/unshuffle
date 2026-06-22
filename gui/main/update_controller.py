@@ -53,7 +53,7 @@ class UpdateController(QObject):
         message.setWindowTitle("Update Available")
         message.setText(f"{APP_NAME} {info.version} is available.")
         message.setInformativeText(f"You are running {APP_NAME} {APP_VERSION}.")
-        open_button = message.addButton("Download Update", QMessageBox.AcceptRole)
+        open_button = message.addButton("Update", QMessageBox.AcceptRole)
         message.addButton("Later", QMessageBox.RejectRole)
         message.exec()
         if message.clickedButton() is open_button:

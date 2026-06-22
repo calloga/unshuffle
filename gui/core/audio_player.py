@@ -98,6 +98,11 @@ class SoundPreviewPlayer(QObject):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
         else:
+            if (
+                self.player.mediaStatus() == QMediaPlayer.EndOfMedia
+                or (self.player.duration() > 0 and self.player.position() >= self.player.duration())
+            ):
+                self.player.setPosition(0)
             self.player.play()
 
     def set_volume(self, volume_float: float):

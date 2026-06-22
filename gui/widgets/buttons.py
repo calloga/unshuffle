@@ -112,8 +112,11 @@ class AnimatedIconButton(QPushButton):
 
     def _get_cached_icon(self) -> Optional[QPixmap]:
         """Returns a colorized version of the icon from cache or creates it."""
+        has_dynamic_icon = not self.icon().isNull()
+        icon_key = self.icon().cacheKey() if has_dynamic_icon else self.icon_path
+
         cache_key = (
-            self.icon_path,
+            icon_key,
             self.icon_size.width(),
             self.icon_size.height(),
             self.color.name() if self.color else "default",
@@ -124,7 +127,11 @@ class AnimatedIconButton(QPushButton):
         if len(self._shared_icon_cache) > self.MAX_CACHE_SIZE:
             self._shared_icon_cache.clear()
 
-        pixmap = QPixmap(self.icon_path)
+        if has_dynamic_icon:
+            pixmap = self.icon().pixmap(self.icon_size)
+        else:
+            pixmap = QPixmap(self.icon_path)
+
         if pixmap.isNull():
             return None
             
