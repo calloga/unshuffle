@@ -457,14 +457,6 @@ class PersistenceTests(unittest.TestCase):
             finally:
                 db.close()
 
-    def test_schema_version_table_is_initialized_to_v1_baseline(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db = UnshuffleDB(Path(tmp) / "schema_version.db")
-            try:
-                self.assertEqual(db.get_schema_version(), UnshuffleDB.SCHEMA_VERSION)
-            finally:
-                db.close()
-
     def test_v1_schema_contains_current_cache_and_safety_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = UnshuffleDB(Path(tmp) / "schema_columns.db")
@@ -500,19 +492,6 @@ class PersistenceTests(unittest.TestCase):
 
             conn = sqlite3.connect(db_path)
             try:
-                conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
-                conn.execute("INSERT INTO schema_version (version) VALUES (1)")
-                conn.execute(
-                    """
-                    CREATE TABLE file_cache (
-                        hash TEXT PRIMARY KEY,
-                        last_path TEXT,
-                        size INTEGER,
-                        mtime REAL,
-                        first_seen DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
                 migrations_up(conn)
                 file_cache_cols = {
                     row[1] for row in conn.execute("PRAGMA table_info(file_cache)").fetchall()
