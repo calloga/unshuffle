@@ -53,8 +53,9 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn("unshuffle_extractor 1.1.0", source)
 
         if os.name == "nt":
+            print(str(Path.cwd().parent / "bin" / "windows" / "unshuffle_extractor.exe"))
             completed = subprocess.run(
-                [str(Path.cwd() / "bin" / "windows" / "unshuffle_extractor.exe"), "--version"],
+                [str(Path.cwd().parent / "bin" / "windows" / "unshuffle_extractor.exe"), "--version"],
                 capture_output=True,
                 text=True,
                 check=True,
