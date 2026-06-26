@@ -1,6 +1,6 @@
 from typing import Dict, List, Tuple
 
-from . import taxonomy_store
+from .store import taxonomy_store
 
 
 def reset_adjustments(db) -> None:

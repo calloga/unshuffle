@@ -19,14 +19,13 @@ from ..core.paths import (
     DB_FILE_NAME,
     DIRECTORY_DUMP_FILE,
     DRY_RUN_FOLDER_NAME,
-    SYSTEM_FOLDER_NAME,
     get_global_system_dir as core_get_global_system_dir,
     get_local_system_dir as core_get_local_system_dir,
     get_system_dir as core_get_system_dir,
     get_trash_dir as core_get_trash_dir,
 )
 from unshuffle.persistence.db.unshuffle_db import UnshuffleDB
-from . import taxonomy_store
+from .store import taxonomy_store
 
 
 def get_db(target_dir: Path, is_dry_run: bool = False):

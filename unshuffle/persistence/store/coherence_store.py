@@ -3,8 +3,8 @@ import sqlite3
 from typing import Any, Optional
 from pathlib import Path
 
-from .utils.cache_utils import normalize_feature_vector
-from ..core.features import vector_from_blob
+from unshuffle.persistence.utils.cache_utils import normalize_feature_vector
+from unshuffle.core.features import vector_from_blob
 
 
 REMOVED_VERIFIED_ANCHOR_SESSION = "__removed_verified_anchors__"

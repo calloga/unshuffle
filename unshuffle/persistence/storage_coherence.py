@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from . import coherence_store
+from .store import coherence_store
 
 
 def upsert_coherence_results(db, session_id: str, results: List[Any]) -> None:
