@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from unshuffle.persistence import (
-    cache_store,
-    coherence_store,
     connection,
     storage_coherence,
     storage_learning,
@@ -16,7 +14,7 @@ from unshuffle.persistence import (
     storage_sessions,
     storage_taxonomy,
 )
-from unshuffle.persistence.cache_store import SqliteCacheStore
+from unshuffle.persistence.store.cache_store import SqliteCacheStore
 from unshuffle.persistence.utils import cache_utils
 from unshuffle.persistence.utils.cache_utils import normalize_cache_rows, cache_row
 

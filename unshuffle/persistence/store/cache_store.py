@@ -3,8 +3,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from .utils.cache_utils import normalize_feature_vector
-from ..core.features import (
+from unshuffle.persistence.utils.cache_utils import normalize_feature_vector
+from unshuffle.core.features import (
     CURRENT_EXTRACTOR_VERSION,
     CURRENT_FEATURE_SPACE_VERSION,
     CURRENT_VECTOR_SCHEMA,
