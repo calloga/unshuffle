@@ -57,5 +57,5 @@ def close_connections(
         try:
             conn.close()
         except Exception:
-            logging.debug("Failed to close SQLite connection for %s", db_path, exc_info=True)
+            logging.error("Failed to close SQLite connection for %s", db_path, exc_info=True)
     return pending, thread_state
