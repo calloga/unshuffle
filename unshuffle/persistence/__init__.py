@@ -25,7 +25,7 @@ from ..core.paths import (
     get_trash_dir as core_get_trash_dir,
 )
 from unshuffle.persistence.db.unshuffle_db import UnshuffleDB
-from .store import taxonomy_store
+from .stores import taxonomy_store
 
 
 def get_db(target_dir: Path, is_dry_run: bool = False):

@@ -14,7 +14,7 @@ from unshuffle.persistence import (
     storage_sessions,
     storage_taxonomy,
 )
-from unshuffle.persistence.store.cache_store import SqliteCacheStore
+from unshuffle.persistence.stores.cache_store import SqliteCacheStore
 from unshuffle.persistence.utils import cache_utils
 from unshuffle.persistence.utils.cache_utils import normalize_cache_rows, cache_row
 

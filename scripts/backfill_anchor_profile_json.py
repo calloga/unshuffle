@@ -58,7 +58,7 @@ def main() -> int:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-    from unshuffle.persistence.store.coherence_store import repair_anchor_profile_json
+    from unshuffle.persistence.stores.coherence_store import repair_anchor_profile_json
     from unshuffle.logic.coherence.anchor_profiles import build_anchor_payload
 
     conn = sqlite3.connect(str(db_path))
