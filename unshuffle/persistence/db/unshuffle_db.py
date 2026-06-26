@@ -10,7 +10,7 @@ from unshuffle.persistence import (
 )
 from unshuffle.persistence.storages import storage_taxonomy, storage_lifecycle, storage_coherence, storage_learning, \
     storage_sessions, storage_maintenance
-from unshuffle.persistence.stores.cache_store import SqliteCacheStore
+from unshuffle.persistence.stores.cache_store import SqliteCacheStore, PeeweeCacheStore
 from unshuffle.persistence.utils import cache_utils
 from unshuffle.persistence.utils.cache_utils import normalize_cache_rows, cache_row
 
@@ -30,7 +30,7 @@ class UnshuffleDB:
         self._write_lock = threading.RLock()
         self._closed = False
         self._initialize_schema()
-        self._cache_store = SqliteCacheStore(self.conn)
+        self._cache_store = PeeweeCacheStore(self.conn, self.db_path)
         if os.environ.get("UNSHUFFLE_DB_FOREIGN_KEY_CHECK", "0") == "1":
             self._log_foreign_key_integrity()
 
