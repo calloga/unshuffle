@@ -1,6 +1,6 @@
 from typing import Dict, List, Tuple
 
-from .stores import taxonomy_store
+from unshuffle.persistence.stores import taxonomy_store
 
 
 def reset_adjustments(db) -> None:

@@ -97,7 +97,7 @@ def test_coherence_audit_persistence_rolls_back_as_one_unit(tmp_path: Path):
         )
 
         with mock.patch(
-            "unshuffle.persistence.db.unshuffle_db.coherence_store.upsert_refinement_candidates",
+            "unshuffle.persistence.stores.coherence_store.upsert_refinement_candidates",
             side_effect=RuntimeError("forced failure"),
         ):
             try:
@@ -457,7 +457,7 @@ def test_verified_anchors_copy_forward_to_new_session(tmp_path: Path):
 
         db.upsert_anchor_profiles("old-session", [verified])
 
-        from unshuffle.persistence.system_anchor_loader import load_system_anchors
+        from unshuffle.persistence.storages.system_anchor_loader import load_system_anchors
         num_system = len(load_system_anchors())
 
         copied = db.ensure_verified_anchors_for_session("new-session")
@@ -637,7 +637,7 @@ def test_verified_anchor_copy_forward_upgrades_existing_candidate(tmp_path: Path
         db.upsert_anchor_profiles("old-session", [verified])
         db.upsert_anchor_candidates("new-session", [candidate])
 
-        from unshuffle.persistence.system_anchor_loader import load_system_anchors
+        from unshuffle.persistence.storages.system_anchor_loader import load_system_anchors
         num_system = len(load_system_anchors())
 
         copied = db.ensure_verified_anchors_for_session("new-session")
@@ -688,7 +688,7 @@ def test_anchor_profile_rows_round_trip_preserves_verified_state(tmp_path: Path)
 def test_system_anchors_lifecycle(tmp_path: Path):
     db = UnshuffleDB(tmp_path / "system_anchors_test.db")
     try:
-        from unshuffle.persistence.system_anchor_loader import load_system_anchors
+        from unshuffle.persistence.storages.system_anchor_loader import load_system_anchors
         system_rows = load_system_anchors()
         # Seed a dummy system anchor if loader returned empty list (e.g. in test env)
         if not system_rows:

@@ -4,8 +4,8 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List
 
-from ..core.assets import asset_path
-from ..core.features import (
+from unshuffle.core.assets import asset_path
+from unshuffle.core.features import (
     CURRENT_EXTRACTOR_VERSION,
     CURRENT_FEATURE_SPACE_VERSION,
     CURRENT_FEATURE_VECTOR_SIZE,

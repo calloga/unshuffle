@@ -4,8 +4,8 @@ import logging
 import sqlite3
 import time
 
-from . import connection
-from .schema.schema import initialize_v1_schema, migrations_up
+from unshuffle.persistence import connection
+from unshuffle.persistence.schema.schema import initialize_v1_schema, migrations_up
 
 
 def log_foreign_key_integrity(db) -> None:

@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 from unshuffle import persistence
+from unshuffle.core.paths import SYSTEM_FOLDER_NAME
+
 
 class TestPersistence(unittest.TestCase):
     def setUp(self):
@@ -30,12 +32,12 @@ class TestPersistence(unittest.TestCase):
     def test_get_local_system_dir(self):
         """Sidecar folder should be created in target_dir."""
         dir_path = persistence.get_local_system_dir(self.target_dir)
-        self.assertEqual(dir_path, self.target_dir / persistence.SYSTEM_FOLDER_NAME)
+        self.assertEqual(dir_path, self.target_dir / SYSTEM_FOLDER_NAME)
         self.assertTrue(dir_path.exists())
 
     def test_get_local_system_dir_rejects_file_at_sidecar_path(self):
         """Sidecar metadata path must be a folder, not an existing file."""
-        sidecar_path = self.target_dir / persistence.SYSTEM_FOLDER_NAME
+        sidecar_path = self.target_dir / SYSTEM_FOLDER_NAME
         sidecar_path.write_text("not a directory", encoding="utf-8")
 
         with self.assertRaisesRegex(RuntimeError, "metadata path exists but is not a folder"):

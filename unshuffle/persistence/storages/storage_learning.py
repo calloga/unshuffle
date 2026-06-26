@@ -1,7 +1,7 @@
 from typing import Dict, List, Set
 
-from ..core.constants import TOKEN_ADJUSTMENT_CAP, get_runtime_config_snapshot
-from ..core.tokenizer import tokenize
+from unshuffle.core.constants import TOKEN_ADJUSTMENT_CAP, get_runtime_config_snapshot
+from unshuffle.core.tokenizer import tokenize
 
 
 def _weighted_adjustment_tokens(tokens: Set[str]) -> Set[str]:
@@ -14,7 +14,7 @@ def _weighted_adjustment_tokens(tokens: Set[str]) -> Set[str]:
 
 
 def search_staging(db, session_id: str, query_text: str) -> List[int] | Set[int]:
-    from .search import search_staging as search_staging_impl
+    from unshuffle.persistence.search import search_staging as search_staging_impl
 
     return search_staging_impl(db.conn, session_id, query_text, db.search_similar_records)
 
@@ -26,7 +26,7 @@ def search_similar_records(
     limit: int = 50,
     candidate_ids: Set[int] | None = None,
 ) -> List[int]:
-    from .search import search_similar_records as search_similar_records_impl
+    from unshuffle.persistence.search import search_similar_records as search_similar_records_impl
 
     return search_similar_records_impl(db.conn, session_id, target_id, limit, candidate_ids=candidate_ids)
 

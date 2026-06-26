@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .stores import staging_store, session_store
+from unshuffle.persistence.stores import staging_store, session_store
 
 
 def register_session(db, session_id: str, source: Path, target: Path, mode: str, is_flat: bool = False) -> None:

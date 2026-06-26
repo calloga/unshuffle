@@ -9,7 +9,8 @@ from typing import Callable, Iterable
 
 from ..core.constants import IGNORED_SYSTEM_ARTIFACT_NAMES
 from ..core.path_safety import _is_effectively_empty
-from ..persistence import DRY_RUN_FOLDER_NAME, SYSTEM_FOLDER_NAME
+from ..core.paths import SYSTEM_FOLDER_NAME
+from ..persistence import DRY_RUN_FOLDER_NAME
 
 
 def remove_prefix_legend(target_dir: Path, log: Callable[..., None]) -> None:

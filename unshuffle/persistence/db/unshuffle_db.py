@@ -7,13 +7,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from unshuffle.persistence import (
     connection,
-    storage_coherence,
-    storage_learning,
-    storage_lifecycle,
-    storage_maintenance,
-    storage_sessions,
-    storage_taxonomy,
 )
+from unshuffle.persistence.storages import storage_taxonomy, storage_lifecycle, storage_coherence, storage_learning, \
+    storage_sessions, storage_maintenance
 from unshuffle.persistence.stores.cache_store import SqliteCacheStore
 from unshuffle.persistence.utils import cache_utils
 from unshuffle.persistence.utils.cache_utils import normalize_cache_rows, cache_row

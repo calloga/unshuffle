@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
-from .stores import maintenance_store
+from unshuffle.persistence.stores import maintenance_store
 
 
 def prune_ephemeral_state(
