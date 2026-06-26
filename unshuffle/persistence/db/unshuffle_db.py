@@ -9,7 +9,6 @@ from unshuffle.persistence import (
     cache_store,
     coherence_store,
     connection,
-    storage_cache,
     storage_coherence,
     storage_learning,
     storage_lifecycle,
@@ -17,6 +16,9 @@ from unshuffle.persistence import (
     storage_sessions,
     storage_taxonomy,
 )
+from unshuffle.persistence.cache_store import SqliteCacheStore
+from unshuffle.persistence.utils import cache_utils
+from unshuffle.persistence.utils.cache_utils import normalize_cache_rows, cache_row
 
 
 class UnshuffleDB:
@@ -34,6 +36,7 @@ class UnshuffleDB:
         self._write_lock = threading.RLock()
         self._closed = False
         self._initialize_schema()
+        self._cache_store = SqliteCacheStore(self.conn)
         if os.environ.get("UNSHUFFLE_DB_FOREIGN_KEY_CHECK", "0") == "1":
             self._log_foreign_key_integrity()
 
@@ -96,19 +99,19 @@ class UnshuffleDB:
         return self._get_schema_version()
 
     def get_all_hashes(self) -> Dict[str, str]:
-        return storage_cache.get_all_hashes(self)
+        return self._cache_store.get_all_hashes()
 
     def has_hash_in_library(self, file_hash: str) -> bool:
-        return storage_cache.has_hash_in_library(self, file_hash)
+        return self._cache_store.has_hash_in_library(file_hash)
 
     def get_committed_hashes(self) -> Set[str]:
-        return storage_cache.get_committed_hashes(self)
+        return self._cache_store.get_committed_hashes()
 
     def get_cached_hash(self, path: Path, size: int, mtime: float) -> Optional[str]:
-        return storage_cache.get_cached_hash(self, path, size, mtime)
+        return self._cache_store.get_cached_hash(path, size, mtime)
 
     def get_cached_hashes(self, file_stats: List[tuple[Path, int, float]]) -> Dict[str, str]:
-        return storage_cache.get_cached_hashes(self, file_stats)
+        return self._cache_store.get_cached_hashes(file_stats)
 
     def update_cache(
         self,
@@ -123,8 +126,7 @@ class UnshuffleDB:
         analysis_status: Optional[str] = None,
         analysis_tags_json: Optional[str] = None,
     ):
-        storage_cache.update_cache(
-            self,
+        row = cache_row(
             file_hash,
             path,
             size,
@@ -136,27 +138,36 @@ class UnshuffleDB:
             analysis_status,
             analysis_tags_json,
         )
+        with self.write_transaction():
+            self._cache_store.upsert_cache_rows([row])
 
     def get_feature_vector(self, file_hash: str) -> Optional[bytes]:
-        return storage_cache.get_feature_vector(self, file_hash)
+        return self._cache_store.get_feature_vector(file_hash)
 
     def get_feature_vectors_bulk(self, file_hashes: List[str]) -> Dict[str, bytes]:
-        return storage_cache.get_feature_vectors_bulk(self, file_hashes)
+        return self._cache_store.get_feature_vectors_bulk(file_hashes)
 
     def get_acoustic_vector(self, file_hash: str) -> Optional[bytes]:
-        return storage_cache.get_acoustic_vector(self, file_hash)
+        return self._cache_store.get_feature_vector(file_hash)
 
     def get_cached_path_by_hash(self, file_hash: str) -> Optional[str]:
-        return storage_cache.get_cached_path_by_hash(self, file_hash)
+        return self._cache_store.get_cached_path_by_hash(file_hash)
 
     def update_cache_bulk(self, hash_list: List[tuple]):
-        storage_cache.update_cache_bulk(self, hash_list)
+        if not hash_list:
+            return
+        normalized = normalize_cache_rows(hash_list)
+        with self.write_transaction():
+            self._cache_store.upsert_cache_rows(normalized)
 
     def remove_from_cache_by_paths(self, path_list: List[str]):
-        storage_cache.remove_from_cache_by_paths(self, path_list)
+        if not path_list:
+            return
+        with self.write_transaction():
+            self.conn.executemany("DELETE FROM file_cache WHERE last_path = ?", [(p,) for p in path_list])
 
     def clear_cache(self):
-        storage_cache.clear_cache(self)
+        self._cache_store.clear_cache()
 
     def register_session(self, session_id: str, source: Path, target: Path, mode: str, is_flat: bool = False):
         storage_sessions.register_session(self, session_id, source, target, mode, is_flat)
@@ -307,7 +318,7 @@ class UnshuffleDB:
         storage_coherence.seed_system_anchors(self, rows)
 
     def _normalize_acoustic_vector(self, value) -> Optional[bytes]:
-        return cache_store.normalize_feature_vector(value)
+        return cache_utils.normalize_feature_vector(value)
 
     def update_staging_record(self, session_id: str, row_id: int, data: Dict[str, str]):
         storage_sessions.update_staging_record(self, session_id, row_id, data)

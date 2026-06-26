@@ -3,7 +3,7 @@ import sqlite3
 from typing import Any, Optional
 from pathlib import Path
 
-from .cache_store import normalize_feature_vector
+from .utils.cache_utils import normalize_feature_vector
 from ..core.features import vector_from_blob
 
 
