@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Callable
 
 from pathlib import Path
 from peewee import SqliteDatabase, fn
@@ -14,6 +14,21 @@ from unshuffle.core.features import (
 from unshuffle.persistence.schema.enums import RecordStepStatus, RecordStatus
 from unshuffle.persistence.schema.models import db_proxy, FileCache, Record
 
+class ThreadAwareSqliteDatabase(SqliteDatabase):
+    def __init__(self, get_connection: Callable[[], sqlite3.Connection]):
+        self._get_connection = get_connection
+        super().__init__(':memory:') # not real file for hacking InterfaceError
+
+    def _connect(self):
+        return self._get_connection()
+
+    def close(self):
+        # lifecycle in UnshuffleDB, not here
+        pass
+
+    def close_all(self):
+        # lifecycle in UnshuffleDB, not here
+        pass
 
 class CacheStore(ABC):
     @abstractmethod
@@ -209,34 +224,34 @@ class SqliteCacheStore(CacheStore):
         return list(schema) == list(CURRENT_VECTOR_SCHEMA)
 
 class PeeweeCacheStore(SqliteCacheStore):
-    def __init__(self, connection, db_path):
-        self._db = SqliteDatabase(db_path)
+    def __init__(self, get_connection: Callable[[], sqlite3.Connection]):
+        self._db = ThreadAwareSqliteDatabase(get_connection)
         db_proxy.initialize(self._db)
-        super().__init__(connection)
+        super().__init__(get_connection())
 
     def get_all_hashes(self) -> dict[str, str]:
         return {x.hash: x.last_path for x in FileCache.select()}
 
     def has_hash_in_library(self, file_hash: str) -> bool:
         _count = Record.select(fn.COUNT(Record.id)).where(
-            (Record.status.in_(RecordStatus.COPIED, RecordStatus.MOVED))
+            (Record.status.in_((RecordStatus.COPIED, RecordStatus.MOVED)))
             & (Record.file_hash == file_hash)
             & (Record.step_status >> RecordStepStatus.COMMITTED)
-        ).first()
+        ).count()
 
         return _count > 0
 
     def get_committed_hashes(self) -> set[str]:
         _hashes = Record.select(Record.file_hash.distinct()).where(
-            (Record.status.in_(RecordStatus.COPIED, RecordStatus.MOVED))
+            (Record.status.in_((RecordStatus.COPIED, RecordStatus.MOVED)))
             & (Record.file_hash.is_null(False))
             & (Record.step_status >> RecordStepStatus.COMMITTED)
-        )
+        ).execute()
 
-        return set(_hashes)
+        return set(h.file_hash for h in _hashes)
 
     def get_cached_hash(self, path: Path, size: int, mtime: float) -> Optional[str]:
-        _hash = FileCache.select(
+        _hash = FileCache.select().where(
             (FileCache.last_path==Path(path).as_posix())
             & (FileCache.size==size)
             & (FileCache.mtime==mtime)
@@ -269,7 +284,7 @@ class PeeweeCacheStore(SqliteCacheStore):
             & (FileCache.feature_vector.is_null(False))
             & (FileCache.feature_space_version == CURRENT_FEATURE_SPACE_VERSION)
             & (FileCache.extractor_version == CURRENT_EXTRACTOR_VERSION)
-        ).first().dicts()
+        ).first()
 
         if not cache or not self._schema_matches_current(cache.feature_schema_json):
             return None

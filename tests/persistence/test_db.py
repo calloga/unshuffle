@@ -37,10 +37,10 @@ class TestUnshuffleDB(unittest.TestCase):
         self.db.update_cache(file_hash, path, size, mtime)
 
         cached_hash = self.db.get_cached_hash(path, size, mtime)
-        self.assertEqual(cached_hash, file_hash)
+        self.assertEqual(file_hash, cached_hash)
 
         all_hashes = self.db.get_all_hashes()
-        self.assertEqual(all_hashes[file_hash], path.as_posix())
+        self.assertEqual(path.as_posix(), all_hashes[file_hash],)
 
     def test_session_management(self):
         """Test session registration and retrieval."""
@@ -179,7 +179,7 @@ class TestUnshuffleDB(unittest.TestCase):
             },
         ])
 
-        self.assertEqual(self.db.get_committed_hashes(), {"hash-good"})
+        self.assertEqual({"hash-good"}, self.db.get_committed_hashes() )
         self.assertTrue(self.db.has_hash_in_library("hash-good"))
         self.assertFalse(self.db.has_hash_in_library("hash-failed"))
         self.assertFalse(self.db.has_hash_in_library("hash-dupe"))

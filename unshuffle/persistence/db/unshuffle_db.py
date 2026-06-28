@@ -30,7 +30,7 @@ class UnshuffleDB:
         self._write_lock = threading.RLock()
         self._closed = False
         self._initialize_schema()
-        self._cache_store = PeeweeCacheStore(self.conn, self.db_path)
+        self._cache_store = PeeweeCacheStore(self._get_connection)
         if os.environ.get("UNSHUFFLE_DB_FOREIGN_KEY_CHECK", "0") == "1":
             self._log_foreign_key_integrity()
 
