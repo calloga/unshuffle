@@ -92,7 +92,15 @@ def pyinstaller_command(
         "backports.tarfile",
         "--collect-all",
         "pydantic",
+        "--hidden-import",
+        "pydantic",
         "--collect-all",
+        "pydantic_core",
+        "--hidden-import",
+        "pydantic_core",
+        "--collect-all",
+        "peewee",
+        "--hidden-import",
         "peewee",
     ]
     if clean:
