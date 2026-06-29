@@ -1,8 +1,6 @@
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
-import pydantic
-from peewee import SqliteDatabase
-import peewee
 
 from .models import SchemaVersion, db_proxy
 from .schema_ddl import (
@@ -15,7 +13,8 @@ from unshuffle.persistence.schema_migrations import ensure_feature_schema_column
 from ...core.logging import logger
 
 
-class FileModel(pydantic.BaseModel):
+@dataclass
+class FileModel:
     name: str
     version: int
     file: Path

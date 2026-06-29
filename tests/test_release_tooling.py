@@ -232,9 +232,13 @@ def test_app_binary_workflow_uploads_installable_platform_artifacts() -> None:
 
 def test_release_build_dependencies_include_backports_tarfile() -> None:
     repo = Path(__file__).resolve().parent.parent
+    requirements = (repo / "requirements.txt").read_text(encoding="utf-8")
     requirements_dev = (repo / "requirements-dev.txt").read_text(encoding="utf-8")
     pyproject = (repo / "pyproject.toml").read_text(encoding="utf-8")
 
+    for dependency in ("peewee>=4.1.0", "pydantic>=2.13.4", "jinja2>=3.1.6"):
+        assert dependency in requirements
+        assert f'"{dependency}"' in pyproject
     assert "pyinstaller>=6.11,<7" in requirements_dev
     assert "backports.tarfile>=1.2,<2" in requirements_dev
     assert '"pyinstaller>=6.11,<7"' in pyproject
