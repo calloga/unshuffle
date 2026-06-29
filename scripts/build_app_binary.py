@@ -90,6 +90,10 @@ def pyinstaller_command(
         "backports",
         "--hidden-import",
         "backports.tarfile",
+        "--collect-all",
+        "pydantic",
+        "--collect-all",
+        "peewee",
     ]
     if clean:
         command.append("--clean")
