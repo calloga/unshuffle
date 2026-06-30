@@ -5,7 +5,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Callable, Optional, cast
 
 from pathlib import Path
-from peewee import fn
+from peewee import SqliteDatabase, fn
 
 from unshuffle.core.features import (
     CURRENT_EXTRACTOR_VERSION,
@@ -15,6 +15,7 @@ from unshuffle.core.features import (
 from unshuffle.persistence.schema.enums import RecordStepStatus, RecordStatus
 from unshuffle.persistence.schema.models import db_proxy, FileCache, Record
 from unshuffle.persistence.utils.thread_aware_sqlite_database import ThreadAwareSqliteDatabase
+from unshuffle.persistence.utils.thread_aware_sqlite_database import PeeweeStore
 
 CacheHashEntry = dict[str, Optional[str]]
 CacheHashRow = Mapping[str, Any]
@@ -238,7 +239,7 @@ class SqliteCacheStore(CacheStore):
         )
         row = cursor.fetchone()
         return row["hash"] if row else None
-    
+
     def get_cached_entry(self, path: Path, size: int, mtime: float) -> Optional[CacheHashEntry]:
         cursor = self._conn.execute(
             "SELECT hash, fast_hash FROM file_cache WHERE last_path = ? AND size = ? AND mtime = ?",
@@ -295,11 +296,10 @@ class SqliteCacheStore(CacheStore):
             return False
         return list(schema) == list(CURRENT_VECTOR_SCHEMA)
 
-class PeeweeCacheStore(SqliteCacheStore):
+class PeeweeCacheStore(SqliteCacheStore, PeeweeStore):
     def __init__(self, connection: sqlite3.Connection):
-        self._db = ThreadAwareSqliteDatabase(connection)
-        db_proxy.initialize(self._db)
-        super().__init__(lambda: connection)
+        self._initialize_db_proxy(connection)
+        super().__init__(connection)
 
     def get_all_hashes(self) -> dict[str, str]:
         return {x.hash: x.last_path for x in FileCache.select()}
