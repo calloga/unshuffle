@@ -129,5 +129,14 @@
         "Claps",
         "Hats & Cymbals",
         "Percussion"
-    ]
+    ],
+    "STORE_MIGRATION": {
+        "cache": "peewee",
+        "coherence": "peewee",
+        "learning":"sqlite",
+        "lifecycle":"sqlite",
+        "maintenance":"sqlite",
+        "sessions":"sqlite",
+        "taxonomy":"sqlite"
+    }
 }
