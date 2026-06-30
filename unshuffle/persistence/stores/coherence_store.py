@@ -3,11 +3,12 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from typing import Any, Optional
+
 from pathlib import Path
 
-from unshuffle.persistence.utils.cache_utils import normalize_feature_vector
 from unshuffle.core.features import vector_from_blob
-
+from unshuffle.persistence.utils.cache_utils import normalize_feature_vector
+from unshuffle.persistence.utils.thread_aware_sqlite_database import PeeweeStore
 
 REMOVED_VERIFIED_ANCHOR_SESSION = "__removed_verified_anchors__"
 
@@ -18,8 +19,10 @@ class SqliteCoherenceStore(CoherenceStore):
     def __init__(self, connection):
         self._connection = connection
 
-class PeeweeCoherenceStore(CoherenceStore):
-    pass
+class PeeweeCoherenceStore(SqliteCoherenceStore, PeeweeStore):
+    def __init__(self, connection: sqlite3.Connection):
+        self._initialize_db_proxy(connection)
+        super().__init__(connection)
 
 def _normalized_source_path(value: Any) -> str:
     return Path(str(value or "")).as_posix()
