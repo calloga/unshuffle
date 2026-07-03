@@ -88,3 +88,21 @@ def ensure_feature_schema_columns(conn: sqlite3.Connection) -> None:
     anchor_cols = columns("anchor_profiles")
     if "feature_schema_json" not in anchor_cols:
         conn.execute("ALTER TABLE anchor_profiles ADD COLUMN feature_schema_json TEXT")
+
+
+def ensure_fast_hash_columns(conn: sqlite3.Connection) -> None:
+    def columns(table: str) -> set[str]:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+    additions = {
+        "file_cache": "ALTER TABLE file_cache ADD COLUMN fast_hash TEXT",
+        "records": "ALTER TABLE records ADD COLUMN fast_hash TEXT",
+        "staging_records": "ALTER TABLE staging_records ADD COLUMN fast_hash TEXT",
+    }
+    for table, statement in additions.items():
+        if "fast_hash" not in columns(table):
+            conn.execute(statement)
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_fast_hash ON file_cache(fast_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_records_status_fast_hash ON records(status, fast_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_fast_hash ON staging_records(fast_hash)")

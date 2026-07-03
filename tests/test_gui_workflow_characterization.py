@@ -170,6 +170,39 @@ class MainWindowDebounceTests(unittest.TestCase):
         self.assertEqual(request.roots, ("D:/Music/Drum Kits",))
         close_qt_window(dialog, app)
 
+    def test_startup_launcher_db_reset_turns_stale_restore_into_refresh(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.startup_launcher import StartupLauncherDialog
+
+        app = QApplication.instance() or QApplication([])
+        settings = SimpleNamespace(
+            value=mock.Mock(
+                side_effect=lambda key, default="": {
+                    "last_scan_session_id": "deleted-session",
+                    "last_target": "D:/Music/Drum Kits",
+                    "last_scan_source": "D:/Music/Drum Kits",
+                }.get(key, default)
+            )
+        )
+        settings_controller = SimpleNamespace(
+            settings=settings,
+            get_startup_launcher_last_choice=mock.Mock(
+                return_value={"roots": ["D:/Music/Drum Kits"], "view_modes": ["table", "tree"]}
+            ),
+            get_library_view_modes=mock.Mock(return_value=("table", "tree")),
+        )
+
+        with mock.patch("gui.widgets.startup_launcher.load_session_sources", return_value=[]):
+            dialog = StartupLauncherDialog(settings_controller)
+
+        request = dialog.launch_request()
+
+        self.assertEqual(request.mode, "refresh")
+        self.assertEqual(request.session_id, "")
+        self.assertEqual(request.roots, ("D:/Music/Drum Kits",))
+        close_qt_window(dialog, app)
+
     def test_startup_tray_notice_waits_until_monitor_is_hidden(self):
         from gui.widgets import startup_tray
 
@@ -2562,6 +2595,7 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
 
         existing = mock.Mock(spec=PlanRecord)
         existing.hash = "hash-existing"
+        existing.fast_hash = None
 
         class _Parent(QObject):
             def __init__(self):
@@ -2581,6 +2615,28 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         self.assertEqual(kwargs["skip_expensive_hashes"], {"hash-existing"})
         self.assertEqual(kwargs["lib_hashes"], set())
         engine.db.get_committed_hashes.assert_not_called()
+
+    def test_append_scan_skips_expensive_work_for_current_workbench_fast_hashes(self):
+        from gui.core.workflow_controller import WorkflowController
+
+        existing = mock.Mock(spec=PlanRecord)
+        existing.hash = "full-existing"
+        existing.fast_hash = "fast-existing"
+
+        class _Parent(QObject):
+            def __init__(self):
+                super().__init__()
+                self.model = SimpleNamespace(records=[existing])
+                self.tagging_controller = mock.Mock()
+
+        engine = mock.Mock()
+        worker_manager = mock.Mock()
+        controller = WorkflowController(engine, worker_manager, mock.Mock(), _Parent())
+
+        controller.start_scan([Path("D:/Samples")], append=True)
+
+        kwargs = worker_manager.start_scan.call_args.kwargs
+        self.assertEqual(kwargs["skip_expensive_hashes"], {"full-existing", "fast-existing"})
 
     def test_fresh_scan_does_not_filter_against_committed_build_history(self):
         from gui.core.workflow_controller import WorkflowController
@@ -2610,6 +2666,7 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
 
         record = mock.Mock(spec=PlanRecord)
         record.hash = "hash-committed"
+        record.fast_hash = None
         record.source_path = Path("D:/Samples/kick.wav")
 
         new_records, lib_dupes, session_dupes = dedupe_plan_records([record], set(), set())
@@ -2617,6 +2674,161 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         self.assertEqual(new_records, [record])
         self.assertEqual(lib_dupes, 0)
         self.assertEqual(session_dupes, 0)
+
+    def test_scan_dedupe_uses_fast_hash_across_promoted_full_hashes(self):
+        from gui.core.workflow_records import build_dedupe_index, dedupe_plan_records
+
+        existing = mock.Mock(spec=PlanRecord)
+        existing.hash = "full-shared"
+        existing.fast_hash = "fast-shared"
+        existing.source_path = Path("D:/Samples/a.wav")
+
+        incoming = mock.Mock(spec=PlanRecord)
+        incoming.hash = "full-shared"
+        incoming.fast_hash = "fast-shared"
+        incoming.source_path = Path("D:/Other/a.wav")
+
+        new_records, lib_dupes, session_dupes = dedupe_plan_records([incoming], build_dedupe_index([existing]), set())
+
+        self.assertEqual(new_records, [])
+        self.assertEqual(lib_dupes, 0)
+        self.assertEqual(session_dupes, 1)
+
+    def test_scan_dedupe_adds_fast_hash_key_for_later_records(self):
+        from gui.core.workflow_records import dedupe_plan_records
+
+        first = mock.Mock(spec=PlanRecord)
+        first.hash = "full-shared"
+        first.fast_hash = "fast-shared"
+        first.source_path = Path("D:/Samples/a.wav")
+
+        second = mock.Mock(spec=PlanRecord)
+        second.hash = "full-shared"
+        second.fast_hash = "fast-shared"
+        second.source_path = Path("D:/Other/a.wav")
+
+        new_records, lib_dupes, session_dupes = dedupe_plan_records([first, second], set(), set())
+
+        self.assertEqual(new_records, [first])
+        self.assertEqual(lib_dupes, 0)
+        self.assertEqual(session_dupes, 1)
+
+    def test_scan_dedupe_keeps_unique_fast_hashes_provisional(self):
+        from gui.core.workflow_records import dedupe_plan_records
+
+        first = mock.Mock(spec=PlanRecord)
+        first.hash = "segmd5-v1:" + ("1" * 32)
+        first.fast_hash = first.hash
+        first.source_path = Path("D:/Samples/a.wav")
+
+        second = mock.Mock(spec=PlanRecord)
+        second.hash = "segmd5-v1:" + ("2" * 32)
+        second.fast_hash = second.hash
+        second.source_path = Path("D:/Other/b.wav")
+
+        with mock.patch("gui.core.workflow_records.get_file_hash") as full_hash_mock:
+            new_records, lib_dupes, session_dupes = dedupe_plan_records([first, second], set(), set())
+
+        self.assertEqual(new_records, [first, second])
+        full_hash_mock.assert_not_called()
+        self.assertEqual(first.hash, first.fast_hash)
+        self.assertEqual(second.hash, second.fast_hash)
+        self.assertEqual(lib_dupes, 0)
+        self.assertEqual(session_dupes, 0)
+
+    def test_scan_dedupe_keeps_fast_hash_collision_when_full_hashes_differ(self):
+        from gui.core.workflow_records import dedupe_plan_records
+
+        first = mock.Mock(spec=PlanRecord)
+        first.hash = "full-a"
+        first.fast_hash = "fast-shared"
+        first.source_path = Path("D:/Samples/a.wav")
+
+        second = mock.Mock(spec=PlanRecord)
+        second.hash = "full-b"
+        second.fast_hash = "fast-shared"
+        second.source_path = Path("D:/Other/a.wav")
+
+        new_records, lib_dupes, session_dupes = dedupe_plan_records([first, second], set(), set())
+
+        self.assertEqual(new_records, [first, second])
+        self.assertEqual(lib_dupes, 0)
+        self.assertEqual(session_dupes, 0)
+
+    def test_scan_dedupe_promotes_incoming_fast_hash_before_skipping(self):
+        from gui.core.workflow_records import build_dedupe_index, dedupe_plan_records
+
+        fast_hash = "segmd5-v1:" + ("a" * 32)
+        existing = mock.Mock(spec=PlanRecord)
+        existing.hash = "full-shared"
+        existing.fast_hash = fast_hash
+        existing.source_path = Path("D:/Samples/a.wav")
+
+        incoming = mock.Mock(spec=PlanRecord)
+        incoming.hash = fast_hash
+        incoming.fast_hash = fast_hash
+        incoming.source_path = Path("D:/Other/a.wav")
+
+        with mock.patch("gui.core.workflow_records.get_file_hash", return_value="full-shared"):
+            new_records, lib_dupes, session_dupes = dedupe_plan_records([incoming], build_dedupe_index([existing]), set())
+
+        self.assertEqual(new_records, [])
+        self.assertEqual(incoming.hash, "full-shared")
+        self.assertEqual(lib_dupes, 0)
+        self.assertEqual(session_dupes, 1)
+
+    def test_scan_dedupe_indexes_existing_full_hash_only_records_for_fast_hash_match(self):
+        from gui.core.workflow_records import build_dedupe_index, dedupe_plan_records
+
+        fast_hash = "segmd5-v1:" + ("b" * 32)
+        existing = mock.Mock(spec=PlanRecord)
+        existing.hash = "full-shared"
+        existing.fast_hash = None
+        existing.source_path = Path("D:/Samples/a.wav")
+
+        incoming = mock.Mock(spec=PlanRecord)
+        incoming.hash = fast_hash
+        incoming.fast_hash = fast_hash
+        incoming.source_path = Path("D:/Other/a.wav")
+
+        with (
+            mock.patch("gui.core.workflow_records.get_fast_hash") as fast_hash_mock,
+            mock.patch("gui.core.workflow_records.get_file_hash", return_value="full-shared"),
+        ):
+            new_records, lib_dupes, session_dupes = dedupe_plan_records([incoming], build_dedupe_index([existing]), set())
+
+        self.assertEqual(new_records, [])
+        fast_hash_mock.assert_not_called()
+        self.assertIsNone(existing.fast_hash)
+        self.assertEqual(incoming.hash, "full-shared")
+        self.assertEqual(lib_dupes, 0)
+        self.assertEqual(session_dupes, 1)
+
+    def test_scan_dedupe_indexes_incoming_full_hash_only_record_for_existing_fast_hash_match(self):
+        from gui.core.workflow_records import build_dedupe_index, dedupe_plan_records
+
+        fast_hash = "segmd5-v1:" + ("c" * 32)
+        existing = mock.Mock(spec=PlanRecord)
+        existing.hash = fast_hash
+        existing.fast_hash = fast_hash
+        existing.source_path = Path("D:/Samples/a.wav")
+
+        incoming = mock.Mock(spec=PlanRecord)
+        incoming.hash = "full-shared"
+        incoming.fast_hash = None
+        incoming.source_path = Path("D:/Other/a.wav")
+
+        with (
+            mock.patch("gui.core.workflow_records.get_fast_hash", return_value=fast_hash),
+            mock.patch("gui.core.workflow_records.get_file_hash", return_value="full-shared"),
+        ):
+            new_records, lib_dupes, session_dupes = dedupe_plan_records([incoming], build_dedupe_index([existing]), set())
+
+        self.assertEqual(new_records, [])
+        self.assertEqual(incoming.fast_hash, fast_hash)
+        self.assertEqual(existing.hash, "full-shared")
+        self.assertEqual(lib_dupes, 0)
+        self.assertEqual(session_dupes, 1)
 
     def test_new_scan_clears_active_custom_tree(self):
         from gui.core.workflow_controller import WorkflowController

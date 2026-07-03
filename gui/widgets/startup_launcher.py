@@ -313,6 +313,8 @@ class StartupLauncherDialog(QDialog):
         roots = load_session_sources(target, session_id) if target and session_id else []
         if roots:
             return roots
+        if session_id:
+            self._selected_session_id = ""
         choice = getattr(self.settings_controller, "get_startup_launcher_last_choice", None)
         if callable(choice):
             choice_roots = choice().get("roots", [])

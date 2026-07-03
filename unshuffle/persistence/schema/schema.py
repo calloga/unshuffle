@@ -9,7 +9,7 @@ from .schema_ddl import (
     create_indexes,
     create_search_objects, ensure_id_fields,
 )
-from unshuffle.persistence.schema_migrations import ensure_feature_schema_columns, ensure_schema_version
+from unshuffle.persistence.schema_migrations import ensure_fast_hash_columns, ensure_feature_schema_columns, ensure_schema_version
 from ...core.logging import logger
 
 
@@ -76,6 +76,8 @@ def migrations_up(connection: sqlite3.Connection ) -> None:
         except Exception as e:
             logger.error(f"Error running migration {f.name}: {type(e)} {e}")
 
+    ensure_fast_hash_columns(connection)
+
 def initialize_v1_schema(conn: sqlite3.Connection, schema_version: int) -> None:
     # ensure schema_version table exists
     # get current version from schema_version or 0
@@ -87,6 +89,7 @@ def initialize_v1_schema(conn: sqlite3.Connection, schema_version: int) -> None:
     ensure_coherence_schema(conn)
     create_search_objects(conn)
     ensure_feature_schema_columns(conn)
+    ensure_fast_hash_columns(conn)
     create_indexes(conn)
     ensure_id_fields(conn)
 

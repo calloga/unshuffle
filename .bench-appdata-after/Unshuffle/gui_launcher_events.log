@@ -1,0 +1,76 @@
+[2026-07-03T23:55:49.719477+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=main-enter
+argv=D:\Music\unshuffle\gui\__main__.py
+[2026-07-03T23:55:49.720001+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=create-qapplication
+[2026-07-03T23:55:49.737898+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=show-startup-dialog
+[2026-07-03T23:56:08.092492+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=startup-dialog-accepted
+mode=refresh
+roots=1
+target=D:/Drum Kits
+[2026-07-03T23:56:08.093800+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=create-main-window
+mode=refresh
+[2026-07-03T23:56:09.509703+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=launch-refresh-start
+roots=1
+target=D:/Drum Kits
+[2026-07-03T23:56:09.552995+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=enter-event-loop
+mode=refresh
+[2026-07-03T23:58:09.858790+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=show-main-window
+splash=True
+[2026-07-03T23:58:14.003659+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=launch-refresh-finished
+[2026-07-03T23:58:33.757936+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=qapplication-about-to-quit
+[2026-07-03T23:58:33.758617+00:00] Unshuffle launcher event
+app_version=1.0.2
+python=3.14.4
+platform=Windows-11-10.0.26200-SP0
+executable=D:\Music\unshuffle\.venv\Scripts\python.exe
+message=event-loop-returned
+result=0

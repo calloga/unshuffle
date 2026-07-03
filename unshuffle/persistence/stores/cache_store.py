@@ -2,7 +2,7 @@ import json
 import sqlite3
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
-from typing import Any, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 from pathlib import Path
 from peewee import fn
@@ -132,6 +132,12 @@ class CacheStore(ABC):
 
 
 class SqliteCacheStore(CacheStore):
+    def __init__(self, connection_provider: Callable[[], sqlite3.Connection]):
+        self._conn_provider = connection_provider
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        return self._conn_provider()
 
     def _get_feature_vectors(self, chunk: list[str]) -> Iterable[FeatureVectorRow]:
         placeholders = ", ".join("?" for _ in chunk)
@@ -172,9 +178,6 @@ class SqliteCacheStore(CacheStore):
         )
         return cast(Iterable[CacheHashRow], cursor.fetchall())
 
-    def __init__(self, connection: sqlite3.Connection):
-        self._conn = connection
-        
     def get_all_hashes(self) -> dict[str, str]:
         cursor = self._conn.execute("SELECT hash, last_path FROM file_cache")
         return {row["hash"]: row["last_path"] for row in cursor.fetchall()}
@@ -273,7 +276,7 @@ class PeeweeCacheStore(SqliteCacheStore):
     def __init__(self, connection: sqlite3.Connection):
         self._db = ThreadAwareSqliteDatabase(connection)
         db_proxy.initialize(self._db)
-        super().__init__(connection)
+        super().__init__(lambda: connection)
 
     def get_all_hashes(self) -> dict[str, str]:
         return {x.hash: x.last_path for x in FileCache.select()}

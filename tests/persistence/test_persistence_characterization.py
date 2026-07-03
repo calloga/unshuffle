@@ -689,6 +689,52 @@ class PersistenceTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_cache_lookup_survives_closing_second_db_handle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "handle_isolation.db"
+            first = UnshuffleDB(db_path)
+            second = None
+            try:
+                audio_path = Path(tmp) / "cached.wav"
+                first.update_cache_bulk([("hash-cached", audio_path, 10, 1.0)])
+
+                second = UnshuffleDB(db_path)
+                second.close()
+
+                cached = first.get_cached_entries([(audio_path, 10, 1.0)])
+
+                self.assertEqual(
+                    cached,
+                    {audio_path.as_posix(): {"hash": "hash-cached", "fast_hash": None}},
+                )
+            finally:
+                first.close()
+                if second is not None:
+                    second.close()
+
+    def test_worker_thread_cache_write_does_not_lock_followup_session_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = UnshuffleDB(Path(tmp) / "thread_cache_write.db")
+            errors = []
+            try:
+                audio_path = Path(tmp) / "cached.wav"
+
+                def worker_write_then_register():
+                    try:
+                        db.update_cache_bulk([("hash-cached", audio_path, 10, 1.0)])
+                        db.register_session("scan-session", Path(tmp) / "src", Path(tmp) / "target", "pending")
+                    except Exception as exc:
+                        errors.append(exc)
+
+                worker = threading.Thread(target=worker_write_then_register)
+                worker.start()
+                worker.join()
+
+                self.assertEqual([], errors)
+                self.assertIsNotNone(db.get_session("scan-session"))
+            finally:
+                db.close()
+
     def test_db_query_plans_use_v1_composite_indexes_for_hot_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = UnshuffleDB(Path(tmp) / "query_plans.db")

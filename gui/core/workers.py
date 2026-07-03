@@ -96,7 +96,7 @@ class ScanWorker(QThread):
         self.min_confidence = min_confidence
         self.skip_expensive_hashes = set(skip_expensive_hashes or ())
         self.append = append
-        self.existing_hashes = set(existing_hashes or ())
+        self.existing_hashes = existing_hashes
         self.lib_hashes = set(lib_hashes or ())
         self.current_records = list(current_records or ())
 
@@ -134,8 +134,13 @@ class ScanWorker(QThread):
             stats = scan_duplicate_stats(plan, new_records, lib_dupe_count, session_dupe_count)
             stats["category_counts"] = scan_category_counts(plan)
             
-            from unshuffle.persistence import get_db
-            db_conn = get_db(self.engine.target_dir)
+            db_conn = getattr(self.engine, "db", None)
+            owns_db_conn = False
+            if db_conn is None:
+                from unshuffle.persistence import get_db
+
+                db_conn = get_db(self.engine.target_dir)
+                owns_db_conn = True
             try:
                 source_dir = self.sources[0] if self.sources else self.engine.target_dir
                 db_conn.register_session(
@@ -164,7 +169,8 @@ class ScanWorker(QThread):
                 except Exception:
                     logging.debug("Post-scan database maintenance skipped.", exc_info=True)
             finally:
-                db_conn.close()
+                if owns_db_conn:
+                    db_conn.close()
             
             self.finished.emit(new_records, self.append, stats)
         except Exception as e:

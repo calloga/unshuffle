@@ -1,9 +1,100 @@
 from __future__ import annotations
 
+from unshuffle.core.hashing import get_fast_hash, get_file_hash, is_fast_hash
+
+
+def _record_fast_hash(rec):
+    return getattr(rec, "fast_hash", None) or (
+        getattr(rec, "hash", None) if is_fast_hash(getattr(rec, "hash", None)) else None
+    )
+
+
+def _record_full_hash(rec):
+    file_hash = getattr(rec, "hash", None)
+    return file_hash if file_hash and not is_fast_hash(file_hash) else None
+
+
+def _empty_dedupe_index():
+    return {
+        "full_hashes": set(),
+        "fast_hash_records": {},
+    }
+
+
+def _dedupe_index(existing):
+    if isinstance(existing, dict) and "full_hashes" in existing and "fast_hash_records" in existing:
+        return existing
+    index = _empty_dedupe_index()
+    for key in existing or ():
+        if isinstance(key, tuple) and len(key) == 2 and key[0] == "hash":
+            index["full_hashes"].add(key[1])
+    return index
+
+
+def add_record_to_dedupe_index(index, rec) -> None:
+    full_hash = _record_full_hash(rec)
+    fast_hash = _record_fast_hash(rec)
+    if full_hash:
+        index["full_hashes"].add(full_hash)
+    if fast_hash:
+        index["fast_hash_records"].setdefault(fast_hash, []).append(rec)
+
+
+def build_dedupe_index(records=None):
+    index = _empty_dedupe_index()
+    for record in records or ():
+        add_record_to_dedupe_index(index, record)
+    return index
+
+
+def _promote_record_hash(rec):
+    full_hash = _record_full_hash(rec)
+    if full_hash:
+        return full_hash
+    try:
+        full_hash = get_file_hash(rec.source_path)
+    except OSError:
+        full_hash = None
+    if full_hash:
+        rec.hash = full_hash
+    return full_hash
+
+
+def _ensure_record_fast_hash(rec):
+    fast_hash = _record_fast_hash(rec)
+    if fast_hash:
+        return fast_hash
+    try:
+        fast_hash = get_fast_hash(rec.source_path)
+    except OSError:
+        fast_hash = None
+    if fast_hash:
+        rec.fast_hash = fast_hash
+    return fast_hash
+
+
+def _matches_existing_fast_hash(rec, candidates) -> bool:
+    incoming_full_hash = None
+    for candidate in candidates:
+        candidate_full_hash = _record_full_hash(candidate)
+        if candidate_full_hash is None:
+            candidate_full_hash = _promote_record_hash(candidate)
+        if candidate_full_hash is None:
+            continue
+        if incoming_full_hash is None:
+            incoming_full_hash = _promote_record_hash(rec)
+        if incoming_full_hash and incoming_full_hash == candidate_full_hash:
+            return True
+    return False
+
 
 def record_dedupe_key(rec):
-    if getattr(rec, "hash", None):
-        return ("hash", rec.hash)
+    full_hash = _record_full_hash(rec)
+    if full_hash:
+        return ("hash", full_hash)
+    fast_hash = _record_fast_hash(rec)
+    if fast_hash:
+        return ("fast_hash", fast_hash)
     try:
         stat = rec.source_path.stat()
         return ("fallback", rec.source_path.name.lower(), int(stat.st_size))
@@ -12,20 +103,39 @@ def record_dedupe_key(rec):
 
 
 def dedupe_plan_records(plan, existing_hashes, lib_hashes):
+    dedupe_index = _dedupe_index(existing_hashes)
+    existing_full_hashes = set(dedupe_index["full_hashes"])
     new_records = []
     lib_dupe_count = 0
     session_dupe_count = 0
 
     for rec in plan:
-        key = record_dedupe_key(rec)
-        if key in existing_hashes:
+        full_hash = _record_full_hash(rec)
+        fast_hash = _record_fast_hash(rec)
+        if full_hash and full_hash in dedupe_index["full_hashes"]:
             session_dupe_count += 1
             continue
-        if rec.hash and rec.hash in lib_hashes:
+        if full_hash and not fast_hash and dedupe_index["fast_hash_records"]:
+            fast_hash = _ensure_record_fast_hash(rec)
+        fast_hash_candidates = dedupe_index["fast_hash_records"].get(fast_hash, []) if fast_hash else []
+        if fast_hash and fast_hash_candidates:
+            if _matches_existing_fast_hash(rec, fast_hash_candidates):
+                session_dupe_count += 1
+                continue
+        elif fast_hash and not full_hash and existing_full_hashes:
+            full_hash = _promote_record_hash(rec)
+            if full_hash and full_hash in existing_full_hashes:
+                session_dupe_count += 1
+                continue
+        if full_hash and full_hash in dedupe_index["full_hashes"]:
+            session_dupe_count += 1
+            continue
+        hash_values = {value for value in (getattr(rec, "hash", None), getattr(rec, "fast_hash", None)) if value}
+        if hash_values.intersection(lib_hashes):
             lib_dupe_count += 1
             continue
         new_records.append(rec)
-        existing_hashes.add(key)
+        add_record_to_dedupe_index(dedupe_index, rec)
 
     return new_records, lib_dupe_count, session_dupe_count
 

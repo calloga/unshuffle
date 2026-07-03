@@ -2,20 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .workflow_records import record_dedupe_key
+from .workflow_records import build_dedupe_index
 
 
 def known_duplicate_hashes_for_scan(current_records=None, append: bool = False) -> set:
     hashes = set()
     if append and current_records:
-        hashes.update(rec.hash for rec in current_records if getattr(rec, "hash", None))
+        for rec in current_records:
+            for value in (getattr(rec, "hash", None), getattr(rec, "fast_hash", None)):
+                if value:
+                    hashes.add(value)
     return hashes
 
 
-def existing_dedupe_keys(current_records=None, append: bool = False) -> set:
+def existing_dedupe_keys(current_records=None, append: bool = False) -> dict:
     if not append or not current_records:
-        return set()
-    return {record_dedupe_key(record) for record in current_records}
+        return build_dedupe_index()
+    return build_dedupe_index(current_records)
 
 
 def detach_source_root(engine, root: Path) -> list[Path]:
