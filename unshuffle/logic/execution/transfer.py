@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal, Optional
 
-from ...core.hashing import get_file_hash
+from ...core.hashing import hash_for_verification
 from ...core.path_safety import (
     _is_effectively_empty,
     ensure_unique_path,
@@ -54,19 +54,20 @@ def execute_file_transfer(
         tmp_path = Path(temp_name)
         shutil.copy2(to_filesystem_path(source_path), to_filesystem_path(tmp_path))
 
-        is_valid_hash = (
-            source_hash
-            and all(char in "0123456789abcdefABCDEF" for char in source_hash)
-            and len(source_hash) >= 32
+        source_hash = hash_for_verification(
+            source_path,
+            source_hash,
+            interrupted_check=lambda: getattr(owner, "interrupted", False),
         )
-
-        if not is_valid_hash:
-            source_hash = get_file_hash(source_path)
-            if not source_hash:
-                return None
+        if not source_hash:
+            return None
         owner._last_record_hash = source_hash
 
-        temp_hash = get_file_hash(tmp_path)
+        temp_hash = hash_for_verification(
+            tmp_path,
+            source_hash,
+            interrupted_check=lambda: getattr(owner, "interrupted", False),
+        )
 
         if source_hash != temp_hash:
             raise IOError(f"STALE_DATA: {source_path.name} has changed since scan.")

@@ -1,7 +1,7 @@
 from collections import Counter
 from pathlib import Path
 
-from ..core.hashing import get_file_hash
+from ..core.hashing import hash_for_verification
 from ..core.path_safety import is_path_within_directory
 
 
@@ -115,7 +115,7 @@ def validate_undo_records(
             if record_action == "copy":
                 continue
             return f"Undo target missing: {target_path}"
-        actual_hash = get_file_hash(target_path)
+        actual_hash = hash_for_verification(target_path, expected_hash)
         if not actual_hash or actual_hash != expected_hash:
             return f"Undo target hash mismatch: {target_path.name}"
         if record_action == "move" and source_path.exists():
@@ -137,7 +137,7 @@ def validate_undo_records(
                 return f"Duplicate trash path missing: {trash_path}"
             expected_hash = undo_expected_hash(record)
             if expected_hash and trash_path.exists():
-                actual_hash = get_file_hash(trash_path)
+                actual_hash = hash_for_verification(trash_path, expected_hash)
                 if actual_hash and actual_hash != expected_hash:
                     return f"Duplicate trash hash mismatch: {Path(record['source_path']).name}"
 

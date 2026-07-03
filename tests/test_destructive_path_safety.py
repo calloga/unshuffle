@@ -13,7 +13,7 @@ from unshuffle.logic.analysis.service import AnalysisContext, build_node_graph
 from unshuffle.persistence import UnshuffleDB
 from unshuffle.runtime.engine import RuntimeUnshuffler
 from unshuffle.runtime.cache import CacheMixin
-from unshuffle.core.hashing import get_file_hash
+from unshuffle.core.hashing import get_fast_hash, get_file_hash
 from unshuffle.core.paths import DB_FILE_NAME, get_local_system_dir
 
 
@@ -590,6 +590,34 @@ def test_copy_undo_requires_matching_target_hash(tmp_path):
     assert db.marked_undone == ["copy-session"]
 
 
+def test_copy_undo_accepts_matching_fast_hash(tmp_path):
+    target = tmp_path / "library"
+    target.mkdir()
+    source = tmp_path / "source" / "kick.wav"
+    target_file = target / "Oneshots" / "Kicks" / "kick.wav"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_bytes(b"built")
+    db = _UndoDB(
+        [{
+            "source_path": str(source),
+            "target_path": str(target_file),
+            "status": "copied",
+            "file_hash": get_fast_hash(target_file),
+            "step_status": "COMMITTED",
+            "original_action": "copy",
+        }],
+        target,
+        mode="copy",
+    )
+    engine = _runtime_for_undo(target, db)
+
+    result = engine.undo_session("copy-fast-session")
+
+    assert result["undone"] == 1
+    assert not target_file.exists()
+    assert db.marked_undone == ["copy-fast-session"]
+
+
 def test_undo_ignores_failed_build_records_and_reverts_committed_rows(tmp_path):
     target = tmp_path / "library"
     target.mkdir()
@@ -772,6 +800,38 @@ def test_duplicate_move_refuses_recreated_source_path(tmp_path):
     assert source.read_bytes() == b"new source"
     assert trash_file.exists()
     assert db.deleted == []
+
+
+def test_duplicate_move_accepts_matching_fast_hash_for_trash(tmp_path):
+    target = tmp_path / "library"
+    trash = target / "DO_NOT_DELETE_unshuffle" / "trash" / "dupe-fast-session"
+    trash.mkdir(parents=True)
+    source = tmp_path / "source" / "duplicate.wav"
+    source.parent.mkdir()
+    trash_file = trash / "duplicate.wav"
+    trash_file.write_bytes(b"trash")
+    db = _UndoDB(
+        [{
+            "source_path": str(source),
+            "target_path": str(target / "existing.wav"),
+            "status": "duplicate",
+            "trash_path": str(trash_file),
+            "file_hash": get_fast_hash(trash_file),
+            "step_status": "COMMITTED",
+            "original_action": "move",
+        }],
+        target,
+        mode="move",
+        source_roots=[source.parent],
+    )
+    engine = _runtime_for_undo(target, db)
+
+    result = engine.undo_session("dupe-fast-session")
+
+    assert result["undone"] == 1
+    assert source.read_bytes() == b"trash"
+    assert not trash_file.exists()
+    assert db.marked_undone == ["dupe-fast-session"]
 
 
 def test_failed_undo_preserves_session_history(tmp_path):

@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from typing import Callable
 
+from ...core.hashing import get_file_hash, is_fast_hash
 from ...core.path_safety import ensure_unique_path, to_filesystem_path
 
 
@@ -25,8 +26,21 @@ def handle_duplicate_record(
     existing_path_str = existing_duplicate_path(owner, file_hash)
     if not existing_path_str:
         return None
-    if not (owner.target_dir / existing_path_str).exists():
+    existing_path = Path(existing_path_str)
+    if not existing_path.is_absolute():
+        existing_path = owner.target_dir / existing_path
+    if not existing_path.exists():
         return None
+    if is_fast_hash(file_hash):
+        source_full_hash = get_file_hash(record.source_path, interrupted_check=lambda: getattr(owner, "interrupted", False))
+        existing_full_hash = get_file_hash(existing_path, interrupted_check=lambda: getattr(owner, "interrupted", False))
+        if not source_full_hash or not existing_full_hash:
+            return None
+        if source_full_hash != existing_full_hash:
+            return None
+        file_hash = source_full_hash
+        record.hash = source_full_hash
+        owner._last_record_hash = source_full_hash
     if dry_run:
         owner.log("  - Result: [DRY RUN] (File exists in library, would skip duplicate)")
         return "duplicate"
