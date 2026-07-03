@@ -28,6 +28,7 @@ def cache_row(
     feature_schema_json: Optional[str] = None,
     analysis_status: Optional[str] = None,
     analysis_tags_json: Optional[str] = None,
+    fast_hash: Optional[str] = None,
 ) -> tuple:
     return (
         file_hash,
@@ -40,6 +41,7 @@ def cache_row(
         feature_schema_json,
         analysis_status,
         analysis_tags_json,
+        fast_hash,
     )
 
 
@@ -58,5 +60,9 @@ def normalize_cache_rows(hash_list: list[tuple]) -> list[tuple]:
             file_hash, path, size, mtime, vector, feature_space, extractor, schema, status, tags = row
             normalized.append(cache_row(file_hash, Path(path), size, mtime, vector, feature_space, extractor, schema, status, tags))
             continue
-        raise ValueError(f"Unsupported cache row shape: expected 4, 9, or 10 items, got {len(row)}")
+        if len(row) == 11:
+            file_hash, path, size, mtime, vector, feature_space, extractor, schema, status, tags, fast_hash = row
+            normalized.append(cache_row(file_hash, Path(path), size, mtime, vector, feature_space, extractor, schema, status, tags, fast_hash))
+            continue
+        raise ValueError(f"Unsupported cache row shape: expected 4, 9, 10, or 11 items, got {len(row)}")
     return normalized

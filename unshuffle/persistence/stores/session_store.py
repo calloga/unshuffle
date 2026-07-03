@@ -90,8 +90,8 @@ def get_session_sources(conn: sqlite3.Connection, session_id: str) -> list[str]:
 def add_records_bulk(conn: sqlite3.Connection, session_id: str, records_list: list[dict[str, Any]]) -> None:
     conn.executemany(
         """
-        INSERT INTO records (session_id, source_path, target_path, category, subcategory, pack, file_hash, confidence, status, tags, step_status, original_action, trash_path, preserved_root, is_preserved)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO records (session_id, source_path, target_path, category, subcategory, pack, file_hash, fast_hash, confidence, status, tags, step_status, original_action, trash_path, preserved_root, is_preserved)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -102,6 +102,7 @@ def add_records_bulk(conn: sqlite3.Connection, session_id: str, records_list: li
                 record.get("subcategory"),
                 record["pack"],
                 record.get("hash", record.get("file_hash")),
+                record.get("fast_hash"),
                 record.get("confidence", 0.0),
                 record.get("status"),
                 record.get("tags"),

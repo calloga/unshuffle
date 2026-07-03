@@ -6,6 +6,7 @@ def create_core_tables(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS file_cache (
             hash TEXT PRIMARY KEY,
+            fast_hash TEXT,
             last_path TEXT,
             size INTEGER,
             mtime REAL,
@@ -64,6 +65,7 @@ def create_core_tables(conn: sqlite3.Connection) -> None:
             category TEXT,
             subcategory TEXT,
             pack TEXT,
+            fast_hash TEXT,
             file_hash TEXT,
             confidence REAL,
             status TEXT,
@@ -161,6 +163,7 @@ def create_core_tables(conn: sqlite3.Connection) -> None:
             confidence TEXT,
             duration REAL,
             hash TEXT,
+            fast_hash TEXT,
             pack_candidates TEXT,
             evidence_json TEXT,
             feature_vector BLOB,
@@ -309,11 +312,14 @@ def create_search_objects(conn: sqlite3.Connection) -> None:
 
 def create_indexes(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_hash ON file_cache(hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_fast_hash ON file_cache(fast_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_path ON file_cache(last_path)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_path_size_mtime ON file_cache(last_path, size, mtime)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_records_session ON records(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_records_status_file_hash ON records(status, file_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_records_status_fast_hash ON records(status, fast_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_session_sources_session ON session_sources(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_fast_hash ON staging_records(fast_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_session_metadata_session ON session_metadata(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session ON staging_records(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_row ON staging_records(session_id, row_id, id)")

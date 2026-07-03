@@ -1,10 +1,11 @@
 import json
 import sqlite3
 from abc import ABC, abstractmethod
-from typing import Optional, Callable
+from collections.abc import Iterable, Mapping
+from typing import Any, Optional, cast
 
 from pathlib import Path
-from peewee import SqliteDatabase, fn
+from peewee import fn
 
 from unshuffle.core.features import (
     CURRENT_EXTRACTOR_VERSION,
@@ -14,6 +15,15 @@ from unshuffle.core.features import (
 from unshuffle.persistence.schema.enums import RecordStepStatus, RecordStatus
 from unshuffle.persistence.schema.models import db_proxy, FileCache, Record
 from unshuffle.persistence.utils.thread_aware_sqlite_database import ThreadAwareSqliteDatabase
+
+CacheHashRow = Mapping[str, Any]
+FeatureVectorRow = Mapping[str, Any]
+
+_COMMITTED_RECORD_STATUSES: tuple[str, str] = (
+    RecordStatus.COPIED.value,
+    RecordStatus.MOVED.value,
+)
+_COMMITTED_STEP_STATUS = RecordStepStatus.COMMITTED.value
 
 
 class CacheStore(ABC):
@@ -34,7 +44,7 @@ class CacheStore(ABC):
         pass
 
     @abstractmethod
-    def _get_cached_hashes(self, chunk):
+    def _get_cached_hashes(self, chunk: list[str]) -> Iterable[CacheHashRow]:
         pass
 
     def get_cached_hashes(self, file_stats: list[tuple[Path, int, float]]) -> dict[str, str]:
@@ -57,11 +67,11 @@ class CacheStore(ABC):
         return result
 
     @abstractmethod
-    def _get_feature_vectors(self, chunk):
+    def _get_feature_vectors(self, chunk: list[str]) -> Iterable[FeatureVectorRow]:
         pass
 
     def get_feature_vectors_bulk(self, file_hashes: list[str]) -> dict[str, bytes]:
-        hashes = [str(item) for item in file_hashes if item]
+        hashes = [item for item in file_hashes if item]
         if not hashes:
             return {}
         result: dict[str, bytes] = {}
@@ -92,7 +102,7 @@ class CacheStore(ABC):
 
 class SqliteCacheStore(CacheStore):
 
-    def _get_feature_vectors(self, chunk):
+    def _get_feature_vectors(self, chunk: list[str]) -> Iterable[FeatureVectorRow]:
         placeholders = ", ".join("?" for _ in chunk)
         cursor = self._conn.execute(
             f"""
@@ -106,9 +116,9 @@ class SqliteCacheStore(CacheStore):
             [*chunk, CURRENT_FEATURE_SPACE_VERSION, CURRENT_EXTRACTOR_VERSION],
         )
 
-        return cursor.fetchall()
+        return cast(Iterable[FeatureVectorRow], cursor.fetchall())
 
-    def _get_cached_hashes(self, chunk):
+    def _get_cached_hashes(self, chunk: list[str]) -> Iterable[CacheHashRow]:
         placeholders = ", ".join("?" for _ in chunk)
         cursor = self._conn.execute(
             f"""
@@ -118,7 +128,7 @@ class SqliteCacheStore(CacheStore):
                    """,
             chunk,
         )
-        return cursor.fetchall()
+        return cast(Iterable[CacheHashRow], cursor.fetchall())
 
     def __init__(self, connection: sqlite3.Connection):
         self._conn = connection
@@ -192,9 +202,9 @@ class SqliteCacheStore(CacheStore):
             INSERT OR REPLACE INTO file_cache (
                 hash, last_path, size, mtime, feature_vector,
                 feature_space_version, extractor_version, feature_schema_json,
-                analysis_status, analysis_tags_json, updated_at
+                analysis_status, analysis_tags_json, fast_hash, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
             rows,
         )
@@ -219,19 +229,21 @@ class PeeweeCacheStore(SqliteCacheStore):
         return {x.hash: x.last_path for x in FileCache.select()}
 
     def has_hash_in_library(self, file_hash: str) -> bool:
+        step_status = cast(Any, Record.step_status)
         _count = Record.select(fn.COUNT(Record.id)).where(
-            (Record.status.in_((RecordStatus.COPIED, RecordStatus.MOVED)))
+            cast(Any, Record.status).in_(_COMMITTED_RECORD_STATUSES)
             & (Record.file_hash == file_hash)
-            & (Record.step_status >> RecordStepStatus.COMMITTED)
+            & (step_status.is_null(True) | (step_status == _COMMITTED_STEP_STATUS))
         ).count()
 
         return _count > 0
 
     def get_committed_hashes(self) -> set[str]:
+        step_status = cast(Any, Record.step_status)
         _hashes = Record.select(Record.file_hash.distinct()).where(
-            (Record.status.in_((RecordStatus.COPIED, RecordStatus.MOVED)))
+            cast(Any, Record.status).in_(_COMMITTED_RECORD_STATUSES)
             & (Record.file_hash.is_null(False))
-            & (Record.step_status >> RecordStepStatus.COMMITTED)
+            & (step_status.is_null(True) | (step_status == _COMMITTED_STEP_STATUS))
         ).execute()
 
         return set(h.file_hash for h in _hashes)
@@ -245,22 +257,24 @@ class PeeweeCacheStore(SqliteCacheStore):
 
         return _hash.hash if _hash else None
 
-    def _get_cached_hashes(self, chunk):
-        return FileCache.select(
+    def _get_cached_hashes(self, chunk: list[str]) -> Iterable[CacheHashRow]:
+        rows = FileCache.select(
             FileCache.hash, FileCache.last_path, FileCache.size, FileCache.mtime,
         ).where(
-            FileCache.last_path.in_(chunk)
+            cast(Any, FileCache.last_path).in_(chunk)
         ).dicts()
+        return cast(Iterable[CacheHashRow], rows)
 
-    def _get_feature_vectors(self, chunk):
-        return FileCache.select(
+    def _get_feature_vectors(self, chunk: list[str]) -> Iterable[FeatureVectorRow]:
+        rows = FileCache.select(
             FileCache.hash, FileCache.feature_vector, FileCache.feature_schema_json,
         ).where(
-            (FileCache.hash.in_(chunk))
+            (cast(Any, FileCache.hash).in_(chunk))
             & (FileCache.feature_vector.is_null(False))
             & (FileCache.feature_space_version == CURRENT_FEATURE_SPACE_VERSION)
             & (FileCache.extractor_version == CURRENT_EXTRACTOR_VERSION)
         ).dicts()
+        return cast(Iterable[FeatureVectorRow], rows)
 
     def get_feature_vector(self, file_hash: str) -> Optional[bytes]:
         cache = FileCache.select(
@@ -299,6 +313,7 @@ class PeeweeCacheStore(SqliteCacheStore):
                     FileCache.feature_schema_json,
                     FileCache.analysis_status,
                     FileCache.analysis_tags_json,
+                    FileCache.fast_hash,
                 ],
             )
             .on_conflict_replace()

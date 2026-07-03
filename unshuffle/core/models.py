@@ -20,6 +20,7 @@ class LibNode:
     children: List["LibNode"] = field(default_factory=list)
     extension: Optional[str] = None
     hash: Optional[str] = None
+    fast_hash: Optional[str] = None
     pack_candidate_weight: float = 0.0
     path_weighted_tokens: List[str] = field(default_factory=list)
     name_weighted_tokens: List[str] = field(default_factory=list)
@@ -51,6 +52,7 @@ class PlanRecord:
     duration: float = 0.0
     pack_candidates: List[Tuple[str, float]] = field(default_factory=list)
     hash: Optional[str] = None
+    fast_hash: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     feature_vector: Optional[bytes] = None
     acoustic_vector: Optional[bytes] = None
@@ -122,6 +124,7 @@ def plan_record_from_staging_row(row: Dict[str, Any], parse_tags_fn) -> PlanReco
         evidence=evidence,
         duration=row.get("duration", 0.0),
         hash=row.get("hash"),
+        fast_hash=row.get("fast_hash"),
         tags=tags,
         pack_candidates=parse_pack_candidates(row.get("pack_candidates", "")),
         feature_vector=row.get("feature_vector", row.get("acoustic_vector")),

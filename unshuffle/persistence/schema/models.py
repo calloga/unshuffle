@@ -5,8 +5,9 @@ db_proxy = DatabaseProxy()
 
 class BaseModel(Model):
     """All models inherit this to share the database connection."""
-    class Meta:
-        database = db_proxy
+
+
+BaseModel._meta.database = db_proxy
 
 
 # ============================================================================
@@ -25,6 +26,7 @@ class SchemaVersion(BaseModel):
 class FileCache(BaseModel):
     """Cache for file characteristics and feature vectors."""
     hash = TextField(primary_key=True)
+    fast_hash = TextField(null=True)
     last_path = TextField(null=True)
     size = IntegerField(null=True)
     mtime = FloatField(null=True)
@@ -97,6 +99,7 @@ class Record(BaseModel):
     subcategory = TextField(null=True)
     pack = TextField(null=True)
     file_hash = TextField(null=True)
+    fast_hash = TextField(null=True)
     confidence = FloatField(null=True)
     status = TextField(null=True)
     tags = TextField(null=True)
@@ -140,7 +143,7 @@ class LearnedCorrectionEvent(BaseModel):
 
 class Alias(BaseModel):
     """Category aliases."""
-    alias = TextField(primary_key=True)
+    alias_value = TextField(column_name='alias', primary_key=True)
     category = TextField()
     weight = FloatField()
     source = TextField(default='system')
@@ -204,6 +207,7 @@ class StagingRecord(BaseModel):
     confidence = TextField(null=True)
     duration = FloatField(null=True)
     hash = TextField(null=True)
+    fast_hash = TextField(null=True)
     pack_candidates = TextField(null=True)
     evidence_json = TextField(null=True)
     feature_vector = BlobField(null=True)
