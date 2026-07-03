@@ -313,6 +313,7 @@ def run_plan(
                                     json.dumps(list(payload.feature_schema or CURRENT_FEATURE_SCHEMA)),
                                     payload.analysis_status or "ok",
                                     "[]",
+                                    node.fast_hash,
                                 ))
                                 if len(cache_updates) >= CACHE_UPDATE_BATCH_SIZE:
                                     db.update_cache_bulk(cache_updates)
@@ -365,6 +366,7 @@ def run_plan(
                     is_preserved=True,
                     preserved_root=node.preserved_root,
                     hash=node.hash,
+                    fast_hash=node.fast_hash,
                 )
             )
             continue
@@ -470,6 +472,7 @@ def run_plan(
                 is_preserved=False,
                 pack_candidates=pack_candidates,
                 hash=node.hash,
+                fast_hash=node.fast_hash,
                 tags=tags,
                 duration=duration or 0.0,
                 feature_vector=feature_vectors.get(path),

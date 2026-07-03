@@ -31,6 +31,7 @@ def build_staging_rows(records):
                 rec.confidence,
                 rec.duration,
                 rec.hash or "",
+                getattr(rec, "fast_hash", None),
                 json.dumps(getattr(rec, "pack_candidates", []) or []),
                 json.dumps(getattr(rec, "evidence", {}) or {}, default=str),
                 getattr(rec, "feature_vector", None) or getattr(rec, "acoustic_vector", None),

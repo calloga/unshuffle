@@ -422,11 +422,66 @@ class AnalysisHashingTests(unittest.TestCase):
             db = _DB()
             context = AnalysisContext(root, db=db)
 
-            with mock.patch("unshuffle.core.hashing.get_file_hash", return_value="hash-uncached") as hash_mock:
+            with mock.patch("unshuffle.logic.analysis.service.get_fast_hash", return_value="fast-uncached") as fast_mock, \
+                    mock.patch("unshuffle.logic.analysis.service.get_file_hash", return_value="hash-uncached") as full_mock:
                 build_node_graph(root, context)
 
             assert db.file_stats is not None
             self.assertEqual(len(db.file_stats), 2)
             self.assertEqual(context.nodes[cached].hash, "hash-cached")
-            self.assertEqual(context.nodes[uncached].hash, "hash-uncached")
-            hash_mock.assert_called_once_with(uncached)
+            self.assertEqual(context.nodes[uncached].hash, "fast-uncached")
+            self.assertEqual(context.nodes[uncached].fast_hash, "fast-uncached")
+            fast_mock.assert_called_once_with(uncached)
+            full_mock.assert_not_called()
+
+    def test_build_node_graph_uses_fast_hash_without_full_hash_for_unique_files(self):
+        from unshuffle.logic.analysis.service import AnalysisContext, build_node_graph
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Source"
+            root.mkdir()
+            first = root / "first.wav"
+            second = root / "second.wav"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            context = AnalysisContext(root)
+
+            def fake_fast_hash(path):
+                return f"fast-{Path(path).stem}"
+
+            with mock.patch("unshuffle.logic.analysis.service.get_fast_hash", side_effect=fake_fast_hash) as fast_mock, \
+                    mock.patch("unshuffle.logic.analysis.service.get_file_hash") as full_mock:
+                build_node_graph(root, context)
+
+            self.assertEqual(context.nodes[first].hash, "fast-first")
+            self.assertEqual(context.nodes[first].fast_hash, "fast-first")
+            self.assertEqual(context.nodes[second].hash, "fast-second")
+            self.assertEqual(context.nodes[second].fast_hash, "fast-second")
+            self.assertEqual(fast_mock.call_count, 2)
+            full_mock.assert_not_called()
+
+    def test_build_node_graph_promotes_matching_fast_hashes_to_full_hashes(self):
+        from unshuffle.logic.analysis.service import AnalysisContext, build_node_graph
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Source"
+            root.mkdir()
+            first = root / "first.wav"
+            second = root / "second.wav"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            context = AnalysisContext(root)
+
+            def fake_full_hash(path):
+                return f"full-{Path(path).stem}"
+
+            with mock.patch("unshuffle.logic.analysis.service.get_fast_hash", return_value="fast-shared") as fast_mock, \
+                    mock.patch("unshuffle.logic.analysis.service.get_file_hash", side_effect=fake_full_hash) as full_mock:
+                build_node_graph(root, context)
+
+            self.assertEqual(context.nodes[first].fast_hash, "fast-shared")
+            self.assertEqual(context.nodes[second].fast_hash, "fast-shared")
+            self.assertEqual(context.nodes[first].hash, "full-first")
+            self.assertEqual(context.nodes[second].hash, "full-second")
+            self.assertEqual(fast_mock.call_count, 2)
+            self.assertEqual(full_mock.call_count, 2)

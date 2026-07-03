@@ -1,7 +1,18 @@
 import unittest
+import importlib.util
 from pathlib import Path
 from typing import cast
 from unshuffle.core import LibNode, NodeType, PlanRecord
+
+
+def _load_build_staging_rows():
+    state_path = Path(__file__).parents[1] / "gui" / "utils" / "state.py"
+    spec = importlib.util.spec_from_file_location("gui_utils_state_for_test", state_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Could not load gui.utils.state")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.build_staging_rows
 
 class TestModels(unittest.TestCase):
     def test_libnode_defaults(self):
@@ -54,6 +65,28 @@ class TestModels(unittest.TestCase):
         self.assertEqual(rec.duration, 0.0)
         self.assertFalse(rec.is_manual)
         self.assertEqual(rec.evidence, {})
+
+    def test_build_staging_rows_includes_fast_hash_after_hash(self):
+        build_staging_rows = _load_build_staging_rows()
+        rec = PlanRecord(
+            source_path=Path("Source/kick.wav"),
+            pack="Pack",
+            category="Kicks",
+            audio_type="Oneshots",
+            confidence="0.9",
+            hash="fast-a",
+            fast_hash="fast-a",
+            pack_candidates=[("Pack", 1.0)],
+            evidence={"source": "test"},
+        )
+
+        row = build_staging_rows([rec])[0]
+
+        self.assertEqual(row[10], "fast-a")
+        self.assertEqual(row[11], "fast-a")
+        self.assertEqual(row[12], '[["Pack", 1.0]]')
+        self.assertEqual(row[13], '{"source": "test"}')
+        self.assertEqual(len(row), 21)
 
 if __name__ == "__main__":
     unittest.main()

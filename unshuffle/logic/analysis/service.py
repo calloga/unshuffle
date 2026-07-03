@@ -28,6 +28,7 @@ from ...core.constants import (
     SHARED_BOOST_THRESHOLD,
     WINNER_BONUS_MULT,
 )
+from ...core.hashing import get_fast_hash, get_file_hash
 from ...core.models import LibNode, NodeType
 from ...core.path_safety import _is_protected_path_resolved, is_symlink_or_reparse
 from ...logic.classification import is_category_alias, tokenize
@@ -403,41 +404,81 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                     except OSError:
                         pass
                 to_hash.append(node)
-
     if to_hash:
-        from ...core.hashing import get_file_hash
+        from collections import defaultdict
 
-        if len(to_hash) > 50:
-            max_workers = max_scan_workers(len(to_hash))
-            max_pending = max_workers * 2
-            if context.progress_callback:
-                context.progress_callback({
-                    "message": f"Hashing {len(to_hash)} files.",
-                })
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                for idx, (node, file_hash) in enumerate(
-                    bounded_map(
-                        executor,
-                        lambda item: get_file_hash(item.path),
-                        to_hash,
-                        max_pending=max_pending,
-                        is_interrupted=context.is_interrupted,
-                    ),
-                    1,
-                ):
+        def assign_hashes(nodes, hash_func, message: str, serial_message: str) -> None:
+            if len(nodes) > 50:
+                max_workers = max_scan_workers(len(nodes))
+                max_pending = max_workers * 2
+                if context.progress_callback:
+                    context.progress_callback({"message": message})
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    for idx, (node, file_hash) in enumerate(
+                        bounded_map(
+                            executor,
+                            lambda item: hash_func(item.path),
+                            nodes,
+                            max_pending=max_pending,
+                            is_interrupted=context.is_interrupted,
+                        ),
+                        1,
+                    ):
+                        if context.is_interrupted():
+                            return
+                        node.hash = file_hash
+                        if hash_func is get_fast_hash:
+                            node.fast_hash = file_hash
+                        if context.progress_callback and idx % 100 == 0:
+                            context.progress_callback({"current": idx, "total": len(nodes)})
+            else:
+                if context.progress_callback:
+                    context.progress_callback({"message": serial_message})
+
+                for idx, node in enumerate(nodes, 1):
                     if context.is_interrupted():
-                        return context.nodes[root_path]
+                        return
+                    file_hash = hash_func(node.path)
                     node.hash = file_hash
-                    if context.progress_callback and idx % 100 == 0:
-                        context.progress_callback({"current": idx, "total": len(to_hash)})
-        else:
-            if context.progress_callback:
-                context.progress_callback({"message": f"Hashing {len(to_hash)} files (Serial)..."})
-            for idx, node in enumerate(to_hash, 1):
-                node.hash = get_file_hash(node.path)
-                if context.progress_callback and idx % 10 == 0:
-                    context.progress_callback({"current": idx, "total": len(to_hash)})
+                    if hash_func is get_fast_hash:
+                        node.fast_hash = file_hash
+                    if context.progress_callback and idx % 10 == 0:
+                        context.progress_callback({"current": idx, "total": len(nodes)})
 
+        assign_hashes(
+            to_hash,
+            get_fast_hash,
+            f"Fast hashing {len(to_hash)} files.",
+            f"Fast hashing {len(to_hash)} files (Serial)...",
+        )
+
+        if context.is_interrupted():
+            return context.nodes[root_path]
+
+        buckets = defaultdict(list)
+        for node in to_hash:
+            if node.fast_hash:
+                buckets[node.fast_hash].append(node)
+
+        to_promote = [
+            node
+            for bucket in buckets.values()
+            if len(bucket) > 1
+            for node in bucket
+        ]
+
+        if to_promote:
+            assign_hashes(
+                to_promote,
+                get_file_hash,
+                f"Confirming {len(to_promote)} possible duplicate files.",
+                f"Confirming {len(to_promote)} possible duplicate files (Serial)...",
+            )
+
+        if context.is_interrupted():
+            return context.nodes[root_path]
+            
     for path, node in context.nodes.items():
         if path == root_path:
             continue
