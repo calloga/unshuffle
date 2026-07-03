@@ -16,6 +16,7 @@ from unshuffle.persistence.schema.enums import RecordStepStatus, RecordStatus
 from unshuffle.persistence.schema.models import db_proxy, FileCache, Record
 from unshuffle.persistence.utils.thread_aware_sqlite_database import ThreadAwareSqliteDatabase
 
+CacheHashEntry = dict[str, Optional[str]]
 CacheHashRow = Mapping[str, Any]
 FeatureVectorRow = Mapping[str, Any]
 
@@ -44,7 +45,15 @@ class CacheStore(ABC):
         pass
 
     @abstractmethod
+    def get_cached_entry(self, path: Path, size: int, mtime: float) -> Optional[CacheHashEntry]:
+        pass
+
+    @abstractmethod
     def _get_cached_hashes(self, chunk: list[str]) -> Iterable[CacheHashRow]:
+        pass
+
+    @abstractmethod
+    def _get_cached_entries(self, chunk: list[str]) -> Iterable[CacheHashRow]:
         pass
 
     def get_cached_hashes(self, file_stats: list[tuple[Path, int, float]]) -> dict[str, str]:
@@ -64,6 +73,28 @@ class CacheStore(ABC):
                 expected_size, expected_mtime = expected
                 if int(row["size"] or 0) == expected_size and float(row["mtime"] or 0.0) == expected_mtime:
                     result[key] = row["hash"]
+        return result
+
+    def get_cached_entries(self, file_stats: list[tuple[Path, int, float]]) -> dict[str, CacheHashEntry]:
+        if not file_stats:
+            return {}
+        stats_by_path = {Path(path).as_posix(): (size, mtime) for path, size, mtime in file_stats}
+        result: dict[str, CacheHashEntry] = {}
+        paths = list(stats_by_path)
+        for start in range(0, len(paths), 900):
+            chunk = paths[start:start + 900]
+            rows = self._get_cached_entries(chunk)
+            for row in rows:
+                key = str(row["last_path"])
+                expected = stats_by_path.get(key)
+                if expected is None:
+                    continue
+                expected_size, expected_mtime = expected
+                if int(row["size"] or 0) == expected_size and float(row["mtime"] or 0.0) == expected_mtime:
+                    result[key] = {
+                        "hash": row["hash"],
+                        "fast_hash": row["fast_hash"],
+                    }
         return result
 
     @abstractmethod
@@ -129,6 +160,17 @@ class SqliteCacheStore(CacheStore):
             chunk,
         )
         return cast(Iterable[CacheHashRow], cursor.fetchall())
+    def _get_cached_entries(self, chunk: list[str]) -> Iterable[CacheHashRow]:
+        placeholders = ", ".join("?" for _ in chunk)
+        cursor = self._conn.execute(
+            f"""
+                   SELECT hash, fast_hash, last_path, size, mtime
+                   FROM file_cache
+                   WHERE last_path IN ({placeholders})
+                   """,
+            chunk,
+        )
+        return cast(Iterable[CacheHashRow], cursor.fetchall())
 
     def __init__(self, connection: sqlite3.Connection):
         self._conn = connection
@@ -170,6 +212,14 @@ class SqliteCacheStore(CacheStore):
         )
         row = cursor.fetchone()
         return row["hash"] if row else None
+    
+    def get_cached_entry(self, path: Path, size: int, mtime: float) -> Optional[CacheHashEntry]:
+        cursor = self._conn.execute(
+            "SELECT hash, fast_hash FROM file_cache WHERE last_path = ? AND size = ? AND mtime = ?",
+            (Path(path).as_posix(), size, mtime),
+        )
+        row = cursor.fetchone()
+        return {"hash": row["hash"], "fast_hash": row["fast_hash"]} if row else None
 
     def get_feature_vector(self, file_hash: str) -> Optional[bytes]:
         cursor = self._conn.execute(
@@ -260,6 +310,14 @@ class PeeweeCacheStore(SqliteCacheStore):
     def _get_cached_hashes(self, chunk: list[str]) -> Iterable[CacheHashRow]:
         rows = FileCache.select(
             FileCache.hash, FileCache.last_path, FileCache.size, FileCache.mtime,
+        ).where(
+            cast(Any, FileCache.last_path).in_(chunk)
+        ).dicts()
+        return cast(Iterable[CacheHashRow], rows)
+
+    def _get_cached_entries(self, chunk: list[str]) -> Iterable[CacheHashRow]:
+        rows = FileCache.select(
+            FileCache.hash, FileCache.fast_hash, FileCache.last_path, FileCache.size, FileCache.mtime,
         ).where(
             cast(Any, FileCache.last_path).in_(chunk)
         ).dicts()

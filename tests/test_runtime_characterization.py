@@ -415,9 +415,9 @@ class AnalysisHashingTests(unittest.TestCase):
                 def __init__(self):
                     self.file_stats = None
 
-                def get_cached_hashes(self, file_stats):
+                def get_cached_entries(self, file_stats):
                     self.file_stats = list(file_stats)
-                    return {cached.as_posix(): "hash-cached"}
+                    return {cached.as_posix(): {"hash": "hash-cached", "fast_hash": "fast-cached"}}
 
             db = _DB()
             context = AnalysisContext(root, db=db)
@@ -429,6 +429,7 @@ class AnalysisHashingTests(unittest.TestCase):
             assert db.file_stats is not None
             self.assertEqual(len(db.file_stats), 2)
             self.assertEqual(context.nodes[cached].hash, "hash-cached")
+            self.assertEqual(context.nodes[cached].fast_hash, "fast-cached")
             self.assertEqual(context.nodes[uncached].hash, "fast-uncached")
             self.assertEqual(context.nodes[uncached].fast_hash, "fast-uncached")
             fast_mock.assert_called_once_with(uncached)

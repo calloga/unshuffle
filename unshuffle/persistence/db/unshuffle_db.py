@@ -107,6 +107,12 @@ class UnshuffleDB:
     def get_cached_hashes(self, file_stats: List[tuple[Path, int, float]]) -> Dict[str, str]:
         return self._cache_store.get_cached_hashes(file_stats)
 
+    def get_cached_entry(self, path: Path, size: int, mtime: float) -> Optional[Dict[str, Optional[str]]]:
+        return self._cache_store.get_cached_entry(path, size, mtime)
+
+    def get_cached_entries(self, file_stats: List[tuple[Path, int, float]]) -> Dict[str, Dict[str, Optional[str]]]:
+        return self._cache_store.get_cached_entries(file_stats)
+
     def update_cache(
         self,
         file_hash: str,

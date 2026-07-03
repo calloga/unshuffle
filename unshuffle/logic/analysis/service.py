@@ -355,6 +355,7 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
         node = LibNode(path=path, name=name, node_type=node_type, extension=path.suffix.lower() if path.is_file() else None)
         if node_type == NodeType.FILE:
             node.hash = None
+            node.fast_hash = None
         if node_type in (NodeType.CONTAINER, NodeType.ROOT) and (path / PRESERVED_MARKER).exists():
             node.is_preserved = True
             node.preserved_root = path
@@ -374,7 +375,7 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
     if all_file_nodes:
         file_stats = []
         statted_nodes = []
-        if context.db and hasattr(context.db, "get_cached_hashes"):
+        if context.db and (hasattr(context.db, "get_cached_entries") or hasattr(context.db, "get_cached_hashes")):
             for node in all_file_nodes:
                 try:
                     stat = node.path.stat()
@@ -383,27 +384,40 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                     continue
                 statted_nodes.append(node)
                 file_stats.append((node.path, stat.st_size, stat.st_mtime))
-            cached_hashes = context.db.get_cached_hashes(file_stats)
+            if hasattr(context.db, "get_cached_entries"):
+                cached_entries = context.db.get_cached_entries(file_stats)
+            else:
+                cached_entries = {
+                    path: {"hash": file_hash, "fast_hash": None}
+                    for path, file_hash in context.db.get_cached_hashes(file_stats).items()
+                }
             for node in statted_nodes:
-                cached = cached_hashes.get(node.path.as_posix())
+                cached = cached_entries.get(node.path.as_posix())
                 if cached:
-                    node.hash = cached
+                    node.hash = cached.get("hash")
+                    node.fast_hash = cached.get("fast_hash")
                 else:
                     to_hash.append(node)
-            if context.progress_callback and cached_hashes:
-                context.progress_callback({"message": f"Hash cache: {len(cached_hashes)} reused, {len(to_hash)} new."})
-        else:
+            if context.progress_callback and cached_entries:
+                context.progress_callback({"message": f"Hash cache: {len(cached_entries)} reused, {len(to_hash)} new."})
+        elif context.db and (hasattr(context.db, "get_cached_entry") or hasattr(context.db, "get_cached_hash")):
             for node in all_file_nodes:
-                if context.db:
-                    try:
-                        stat = node.path.stat()
-                        cached = context.db.get_cached_hash(node.path, stat.st_size, stat.st_mtime)
-                        if cached:
-                            node.hash = cached
-                            continue
-                    except OSError:
-                        pass
+                try:
+                    stat = node.path.stat()
+                    if hasattr(context.db, "get_cached_entry"):
+                        cached = context.db.get_cached_entry(node.path, stat.st_size, stat.st_mtime)
+                    else:
+                        file_hash = context.db.get_cached_hash(node.path, stat.st_size, stat.st_mtime)
+                        cached = {"hash": file_hash, "fast_hash": None} if file_hash else None
+                    if cached:
+                        node.hash = cached.get("hash")
+                        node.fast_hash = cached.get("fast_hash")
+                        continue
+                except OSError:
+                    pass
                 to_hash.append(node)
+        else:
+            to_hash.extend(all_file_nodes)
     if to_hash:
         from collections import defaultdict
 
