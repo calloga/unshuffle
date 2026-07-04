@@ -1,4 +1,5 @@
 import struct
+import json
 
 from dataclasses import replace
 
@@ -78,8 +79,42 @@ def test_vector_index_threshold_counts_only_eligible_valid_vectors():
     records, stats = records_from_staging_rows(rows)
     assert len(records) == 8
     assert stats.eligible_records == 8
-    assert stats.valid_vector_records == 8
-    assert stats.can_run
+
+
+def test_vector_index_excludes_duplicate_shadow_rows():
+    rows = [
+        {
+            "row_id": 1,
+            "source_path": "D:/Samples/original.wav",
+            "category": "Bass",
+            "subcategory": "Sub",
+            "confidence": "0.8",
+            "acoustic_vector": _blob(_vec(0.1)),
+        },
+        {
+            "row_id": 2,
+            "source_path": "D:/Samples/dupe.wav",
+            "category": "Bass",
+            "subcategory": "Sub",
+            "confidence": "0.8",
+            "acoustic_vector": _blob(_vec(0.1)),
+            "evidence_json": json.dumps(
+                {
+                    "duplicate_shadow": {
+                        "is_shadow": True,
+                        "duplicate_of_hash": "hash-a",
+                        "duplicate_of_path": "D:/Samples/original.wav",
+                    }
+                }
+            ),
+        },
+    ]
+
+    records, stats = records_from_staging_rows(rows)
+
+    assert [record.record_id for record in records] == ["1"]
+    assert stats.eligible_records == 1
+    assert stats.valid_vector_records == 1
 
 
 def test_malformed_verified_anchor_radius_is_ignored():

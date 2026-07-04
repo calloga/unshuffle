@@ -21,7 +21,7 @@ def scan_summary_text(stats: dict) -> str:
         f"Added {added} new file{'s' if added != 1 else ''}.",
     ]
     if duplicates:
-        lines.append(f"Skipped {duplicates} duplicate{'s' if duplicates != 1 else ''}.")
+        lines.append(f"Staged {duplicates} duplicate shadow{'s' if duplicates != 1 else ''}.")
     return "\n".join(lines)
 
 

@@ -203,6 +203,35 @@ class MainWindowDebounceTests(unittest.TestCase):
         self.assertEqual(request.roots, ("D:/Music/Drum Kits",))
         close_qt_window(dialog, app)
 
+    def test_startup_launcher_restores_when_session_roots_match_with_different_path_spelling(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.startup_launcher import StartupLauncherDialog
+
+        app = QApplication.instance() or QApplication([])
+        settings = SimpleNamespace(
+            value=mock.Mock(
+                side_effect=lambda key, default="": {
+                    "last_scan_session_id": "last-session",
+                    "last_target": "D:/Music/Drum Kits",
+                    "last_scan_source": "D:/Music/Drum Kits/",
+                }.get(key, default)
+            )
+        )
+        settings_controller = SimpleNamespace(
+            settings=settings,
+            get_library_view_modes=mock.Mock(return_value=("table", "tree")),
+        )
+
+        with mock.patch("gui.widgets.startup_launcher.load_session_sources", return_value=["d:\\music\\drum kits"]):
+            dialog = StartupLauncherDialog(settings_controller)
+
+        request = dialog.launch_request()
+
+        self.assertEqual(request.mode, "restore")
+        self.assertEqual(request.session_id, "last-session")
+        close_qt_window(dialog, app)
+
     def test_startup_tray_notice_waits_until_monitor_is_hidden(self):
         from gui.widgets import startup_tray
 
@@ -2690,7 +2719,10 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
 
         new_records, lib_dupes, session_dupes = dedupe_plan_records([incoming], build_dedupe_index([existing]), set())
 
-        self.assertEqual(new_records, [])
+        self.assertEqual(new_records, [incoming])
+        self.assertTrue(incoming.is_duplicate_shadow)
+        self.assertEqual(incoming.duplicate_of_hash, "full-shared")
+        self.assertEqual(incoming.duplicate_of_path, existing.source_path)
         self.assertEqual(lib_dupes, 0)
         self.assertEqual(session_dupes, 1)
 
@@ -2709,7 +2741,11 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
 
         new_records, lib_dupes, session_dupes = dedupe_plan_records([first, second], set(), set())
 
-        self.assertEqual(new_records, [first])
+        self.assertEqual(new_records, [first, second])
+        self.assertIsNot(getattr(first, "is_duplicate_shadow", False), True)
+        self.assertTrue(second.is_duplicate_shadow)
+        self.assertEqual(second.duplicate_of_hash, "full-shared")
+        self.assertEqual(second.duplicate_of_path, first.source_path)
         self.assertEqual(lib_dupes, 0)
         self.assertEqual(session_dupes, 1)
 
@@ -2772,7 +2808,8 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         with mock.patch("gui.core.workflow_records.get_file_hash", return_value="full-shared"):
             new_records, lib_dupes, session_dupes = dedupe_plan_records([incoming], build_dedupe_index([existing]), set())
 
-        self.assertEqual(new_records, [])
+        self.assertEqual(new_records, [incoming])
+        self.assertTrue(incoming.is_duplicate_shadow)
         self.assertEqual(incoming.hash, "full-shared")
         self.assertEqual(lib_dupes, 0)
         self.assertEqual(session_dupes, 1)
@@ -2797,7 +2834,8 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         ):
             new_records, lib_dupes, session_dupes = dedupe_plan_records([incoming], build_dedupe_index([existing]), set())
 
-        self.assertEqual(new_records, [])
+        self.assertEqual(new_records, [incoming])
+        self.assertTrue(incoming.is_duplicate_shadow)
         fast_hash_mock.assert_not_called()
         self.assertIsNone(existing.fast_hash)
         self.assertEqual(incoming.hash, "full-shared")
@@ -2824,11 +2862,89 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         ):
             new_records, lib_dupes, session_dupes = dedupe_plan_records([incoming], build_dedupe_index([existing]), set())
 
-        self.assertEqual(new_records, [])
+        self.assertEqual(new_records, [incoming])
+        self.assertTrue(incoming.is_duplicate_shadow)
         self.assertEqual(incoming.fast_hash, fast_hash)
         self.assertEqual(existing.hash, "full-shared")
         self.assertEqual(lib_dupes, 0)
         self.assertEqual(session_dupes, 1)
+
+    def test_duplicate_shadow_promotion_after_canonical_root_removal(self):
+        from gui.core.workflow_records import mark_duplicate_shadow, promote_duplicate_shadows_after_removal
+
+        canonical = PlanRecord(Path("D:/RootA/original.wav"), "Pack", "Kicks", "Oneshots", "0.9", hash="hash-a")
+        first_shadow = PlanRecord(Path("D:/RootB/dupe1.wav"), "Other", "Bass", "Oneshots", "0.2", hash="hash-a")
+        second_shadow = PlanRecord(Path("D:/RootC/dupe2.wav"), "Other", "Bass", "Oneshots", "0.2", hash="hash-a")
+        mark_duplicate_shadow(first_shadow, canonical)
+        mark_duplicate_shadow(second_shadow, canonical)
+
+        promoted = promote_duplicate_shadows_after_removal([first_shadow, second_shadow], Path("D:/RootA"))
+
+        self.assertEqual(promoted, 1)
+        self.assertFalse(first_shadow.is_duplicate_shadow)
+        self.assertNotIn("duplicate", first_shadow.tags)
+        self.assertTrue(second_shadow.is_duplicate_shadow)
+        self.assertEqual(second_shadow.duplicate_of_path, first_shadow.source_path)
+
+    def test_duplicate_shadow_removal_does_not_promote_when_canonical_remains(self):
+        from gui.core.workflow_records import mark_duplicate_shadow, promote_duplicate_shadows_after_removal
+
+        canonical = PlanRecord(Path("D:/RootA/original.wav"), "Pack", "Kicks", "Oneshots", "0.9", hash="hash-a")
+        remaining_shadow = PlanRecord(Path("D:/RootC/dupe.wav"), "Other", "Bass", "Oneshots", "0.2", hash="hash-a")
+        mark_duplicate_shadow(remaining_shadow, canonical)
+
+        promoted = promote_duplicate_shadows_after_removal([canonical, remaining_shadow], Path("D:/RootB"))
+
+        self.assertEqual(promoted, 0)
+        self.assertTrue(remaining_shadow.is_duplicate_shadow)
+        self.assertEqual(remaining_shadow.duplicate_of_path, canonical.source_path)
+
+    def test_remove_folder_does_not_rescan_remaining_roots(self):
+        from gui.core.workflow_records import mark_duplicate_shadow
+        from gui.main.actions.library import do_remove_folder
+
+        root_a = Path("D:/RootA")
+        root_b = Path("D:/RootB")
+        canonical = PlanRecord(root_a / "original.wav", "Pack", "Kicks", "Oneshots", "0.9", hash="hash-a")
+        shadow = PlanRecord(root_b / "dupe.wav", "Pack", "Kicks", "Oneshots", "0.9", hash="hash-a")
+        mark_duplicate_shadow(shadow, canonical)
+
+        class _Model:
+            def __init__(self):
+                self.records = [canonical, shadow]
+
+            def beginResetModel(self):
+                pass
+
+            def endResetModel(self):
+                pass
+
+            def normalized_source_path(self, row):
+                return Path(self.records[row].source_path).resolve().as_posix().lower()
+
+            def _precalculate_colors(self):
+                pass
+
+        engine = SimpleNamespace(db=mock.Mock(), session_source_roots=[root_a, root_b], session_source_root=root_a)
+        workflow_controller = SimpleNamespace(
+            detach_source_root=mock.Mock(side_effect=lambda _root: setattr(engine, "session_source_roots", [root_b])),
+            start_refresh=mock.Mock(),
+        )
+        app_for_remove = SimpleNamespace(
+            engine=engine,
+            model=_Model(),
+            workflow_controller=workflow_controller,
+            library_tab=SimpleNamespace(set_sources=mock.Mock()),
+            footer=SimpleNamespace(log=mock.Mock()),
+        )
+
+        with mock.patch("gui.main.actions.library.finalize_model_mutation") as finalize_mock:
+            do_remove_folder(app_for_remove, root_a)
+
+        workflow_controller.start_refresh.assert_not_called()
+        finalize_mock.assert_called_once()
+        self.assertEqual(app_for_remove.model.records, [shadow])
+        self.assertFalse(shadow.is_duplicate_shadow)
 
     def test_new_scan_clears_active_custom_tree(self):
         from gui.core.workflow_controller import WorkflowController
@@ -3018,7 +3134,7 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
                     "total_dupe_count": 3,
                 }
             ),
-            "Scanned 12 files.\nAdded 9 new files.\nSkipped 3 duplicates.",
+            "Scanned 12 files.\nAdded 9 new files.\nStaged 3 duplicate shadows.",
         )
 
     def test_scan_summary_chart_pixmap_is_drawn(self):

@@ -61,6 +61,9 @@ class PlanRecord:
     analysis_status: Optional[str] = None
     analysis_tags_json: Optional[str] = None
     staging_row_id: Optional[int] = None
+    is_duplicate_shadow: bool = False
+    duplicate_of_hash: Optional[str] = None
+    duplicate_of_path: Optional[Path] = None
 
     def __post_init__(self) -> None:
         self.pack = str(self.pack)
@@ -113,6 +116,9 @@ def plan_record_from_staging_row(row: Dict[str, Any], parse_tags_fn) -> PlanReco
             evidence = {"reconstructed": True}
     except (json.JSONDecodeError, TypeError):
         evidence = {"reconstructed": True}
+    shadow = evidence.get("duplicate_shadow") if isinstance(evidence, dict) else None
+    if not isinstance(shadow, dict):
+        shadow = {}
 
     return PlanRecord(
         source_path=Path(row["source_path"]),
@@ -135,6 +141,9 @@ def plan_record_from_staging_row(row: Dict[str, Any], parse_tags_fn) -> PlanReco
         is_preserved=bool(row.get("is_preserved", False)),
         preserved_root=Path(row["preserved_root"]) if row.get("preserved_root") else None,
         staging_row_id=int(row["row_id"]) if row.get("row_id") is not None else None,
+        is_duplicate_shadow=bool(shadow.get("is_shadow")),
+        duplicate_of_hash=str(shadow.get("duplicate_of_hash")) if shadow.get("duplicate_of_hash") else None,
+        duplicate_of_path=Path(shadow["duplicate_of_path"]) if shadow.get("duplicate_of_path") else None,
     )
 
 

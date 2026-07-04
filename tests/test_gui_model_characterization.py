@@ -17,6 +17,27 @@ from unshuffle.logic.classification import classify_node, reset_scoring_engine
 
 
 class StagingTableModelTests(unittest.TestCase):
+    def test_duplicate_shadow_rows_are_read_only(self):
+        record = PlanRecord(
+            source_path=Path("Source/dupe.wav"),
+            pack="Pack",
+            category="Kicks",
+            audio_type="Oneshots",
+            confidence="0.9",
+            tags=["duplicate"],
+            is_duplicate_shadow=True,
+            duplicate_of_hash="hash-a",
+            duplicate_of_path=Path("Source/original.wav"),
+        )
+        model = StagingTableModel([record])
+        index = model.index(0, StagingColumn.CATEGORY)
+
+        self.assertFalse(model.flags(index) & Qt.ItemFlag.ItemIsEditable)
+        self.assertFalse(model.setData(index, "Snares", Qt.EditRole))
+        self.assertEqual(record.category, "Kicks")
+        self.assertFalse(model.apply_bulk_updates([(record, StagingColumn.CATEGORY, "Snares")]))
+        self.assertEqual(record.category, "Kicks")
+
     def test_reconstruct_plan_records_restores_pack_candidates(self):
         manager = DataManager()
         records = manager.reconstruct_plan_records(

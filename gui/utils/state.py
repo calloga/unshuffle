@@ -17,6 +17,15 @@ def build_staging_rows(records):
     for i, rec in enumerate(records):
         if hasattr(rec, "staging_row_id"):
             rec.staging_row_id = i
+        evidence = dict(getattr(rec, "evidence", {}) or {})
+        if getattr(rec, "is_duplicate_shadow", False) is True:
+            evidence["duplicate_shadow"] = {
+                "is_shadow": True,
+                "duplicate_of_hash": getattr(rec, "duplicate_of_hash", None),
+                "duplicate_of_path": str(getattr(rec, "duplicate_of_path", "")) if getattr(rec, "duplicate_of_path", None) else None,
+            }
+        else:
+            evidence.pop("duplicate_shadow", None)
         tags_clean = tags_to_search_text(rec.tags)
         rows.append(
             (
@@ -33,7 +42,7 @@ def build_staging_rows(records):
                 rec.hash or "",
                 getattr(rec, "fast_hash", None),
                 json.dumps(getattr(rec, "pack_candidates", []) or []),
-                json.dumps(getattr(rec, "evidence", {}) or {}, default=str),
+                json.dumps(evidence, default=str),
                 getattr(rec, "feature_vector", None) or getattr(rec, "acoustic_vector", None),
                 getattr(rec, "feature_space_version", None),
                 getattr(rec, "feature_schema_json", None),

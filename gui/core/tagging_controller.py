@@ -31,7 +31,7 @@ class TaggingController(QObject):
                 self.app.coherence_controller.schedule_after_render()
             self.taggingFinished.emit()
             return
-        records = list(self.app.model.records)
+        records = [rec for rec in self.app.model.records if getattr(rec, "is_duplicate_shadow", False) is not True]
         if not records:
             self.clear_state()
             if schedule_coherence and getattr(self.app, "coherence_controller", None):
@@ -113,6 +113,8 @@ class TaggingController(QObject):
 
         with model.suspended_sync():
             for row, rec in enumerate(model.records):
+                if getattr(rec, "is_duplicate_shadow", False) is True:
+                    continue
                 path_key = str(Path(getattr(rec, "source_path", ""))).replace("\\", "/")
                 generated_tags = tags_by_path.get(path_key, [])
                 merged = merge_generated_tags(getattr(rec, "tags", []) or [], generated_tags)

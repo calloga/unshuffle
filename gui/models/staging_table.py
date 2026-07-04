@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Any, Callable, Dict, cast
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QPersistentModelIndex
 from PySide6.QtGui import QColor, QUndoCommand, QUndoStack
-from unshuffle.core import PlanRecord, stable_record_identity
+from unshuffle.core import PlanRecord
 from unshuffle.core.constants import (
     DEFAULT_CLASSIFICATION_FLOOR,
     SUB_TAXONOMY_MAP,
@@ -365,6 +365,8 @@ class StagingTableModel(QAbstractTableModel):
         if not index.isValid() or role != Qt.EditRole: return False
         row = index.row()
         rec = self.records[row]
+        if getattr(rec, "is_duplicate_shadow", False) is True:
+            return False
         col = index.column()
         old_val = self._get_record_value(rec, col)
         if old_val == value: return True
@@ -436,13 +438,16 @@ class StagingTableModel(QAbstractTableModel):
             self.sync_callback(self.record_id(row), self.records[row])
 
     def _apply_bulk_values(self, updates: List[tuple[PlanRecord, int, Any]]) -> None:
+        updates = [(rec, col, value) for rec, col, value in updates if getattr(rec, "is_duplicate_shadow", False) is not True]
+        if not updates:
+            return
         with self.suspended_sync():
-            row_by_rec_id = {stable_record_identity(rec): row for row, rec in enumerate(self.records)}
+            row_by_rec_id = {id(rec): row for row, rec in enumerate(self.records)}
             touched_rows = []
             touched_cols = set()
             for rec, col, value in updates:
                 self._set_record_value(rec, col, value)
-                row = row_by_rec_id.get(stable_record_identity(rec))
+                row = row_by_rec_id.get(id(rec))
                 if row is not None:
                     touched_rows.append(row)
                 touched_cols.add(col)
@@ -466,16 +471,20 @@ class StagingTableModel(QAbstractTableModel):
     def _sync_bulk_updates(self, updates: List[tuple[PlanRecord, int, Any]]) -> None:
         if not self.sync_callback:
             return
-        row_by_rec_id = {stable_record_identity(rec): row for row, rec in enumerate(self.records)}
+        updates = [(rec, col, value) for rec, col, value in updates if getattr(rec, "is_duplicate_shadow", False) is not True]
+        row_by_rec_id = {id(rec): row for row, rec in enumerate(self.records)}
         synced_rows = set()
         for rec, _col, _value in updates:
-            row = row_by_rec_id.get(stable_record_identity(rec))
+            row = row_by_rec_id.get(id(rec))
             if row is None or row in synced_rows:
                 continue
             synced_rows.add(row)
             self._sync_record(row)
 
     def apply_bulk_updates(self, updates: List[tuple[PlanRecord, int, Any]], text: str = "") -> bool:
+        if not updates:
+            return False
+        updates = [(rec, col, value) for rec, col, value in updates if getattr(rec, "is_duplicate_shadow", False) is not True]
         if not updates:
             return False
         if self.draft_bulk_callback is not None:
@@ -504,6 +513,9 @@ class StagingTableModel(QAbstractTableModel):
 
     def flags(self, index: QModelIndex | QPersistentModelIndex) -> Qt.ItemFlags:
         if not index.isValid(): return Qt.ItemFlag.ItemIsEnabled
+        rec = self.records[index.row()]
+        if getattr(rec, "is_duplicate_shadow", False) is True:
+            return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
         if index.column() in [StagingColumn.PACK, StagingColumn.CATEGORY, StagingColumn.SUBCATEGORY, StagingColumn.TAGS]:
             return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsEnabled
         return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled

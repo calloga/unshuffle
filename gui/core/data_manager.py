@@ -266,6 +266,7 @@ class DataManager:
         if reply != QMessageBox.Yes:
             return False
 
+        local_db = None
         try:
             from unshuffle.persistence import UnshuffleDB
             from unshuffle.core.paths import get_local_system_dir
@@ -375,6 +376,9 @@ class DataManager:
             logging.exception("Failed to export staging session")
             QMessageBox.critical(parent_widget or self.app, "Export Error", f"Failed to export staging session:\n{e}")
             return False
+        finally:
+            if local_db is not None:
+                local_db.close()
 
     def import_session_from_folder(self, folder_path, parent_widget=None) -> bool:
         """Imports a staging session and staging records from a folder's local database sidecar."""
@@ -395,6 +399,7 @@ class DataManager:
             return False
 
         cursor_set = False
+        local_db = None
         try:
             local_db = UnshuffleDB(local_db_path)
             recent = local_db.get_recent_sessions(100000)
@@ -607,6 +612,8 @@ class DataManager:
         finally:
             if cursor_set:
                 QApplication.restoreOverrideCursor()
+            if local_db is not None:
+                local_db.close()
 
 
 def _pure_path_for_remap(path: object):

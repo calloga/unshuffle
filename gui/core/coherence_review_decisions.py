@@ -22,6 +22,8 @@ def review_decisions_for_records(db, records: list) -> dict[tuple[str, str], dic
     rows = db.list_coherence_review_decisions(source_paths=source_paths, file_hashes=file_hashes)
     if not rows:
         return {}
+    if not isinstance(rows, list):
+        return {}
 
     by_path = {normalized_source_path(row.get("source_path")): row for row in rows if row.get("source_path")}
     rows_by_hash: dict[str, list[dict]] = defaultdict(list)

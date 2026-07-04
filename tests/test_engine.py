@@ -84,6 +84,25 @@ class TestEngine(unittest.TestCase):
                 self.assertEqual(result["copied"], 1)
                 self.assertEqual(result["duplicates"], 1)
 
+    def test_execute_plan_skips_duplicate_shadow_records_if_they_leak_to_runtime(self):
+        shadow = PlanRecord(
+            Path("shadow.wav"),
+            "Pack",
+            "Kicks",
+            "Oneshots",
+            "0.9",
+            is_duplicate_shadow=True,
+            duplicate_of_hash="hash-a",
+            duplicate_of_path=Path("original.wav"),
+        )
+
+        result = self.engine.execute_plan([shadow], dry_run=False)
+
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["copied"], 0)
+        self.assertEqual(result["duplicates"], 0)
+        self.mock_db.add_records_bulk.assert_not_called()
+
     def test_execute_plan_uses_available_local_db_when_global_db_is_missing(self):
         plan = [PlanRecord(Path("a.wav"), "P", "C", "T", "1.0")]
         local_db = MagicMock()

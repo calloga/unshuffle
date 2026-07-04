@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QInputDialog, QMessageBox
 from ...utils import ui_helpers
 from ...utils.history import load_pending_scan_sessions
 from ...utils.state import finalize_model_mutation
+from ...core.workflow_records import promote_duplicate_shadows_after_removal
 from .session import load_staging_session
 
 
@@ -225,6 +226,7 @@ def do_remove_folder(app, root: Path):
                     new_records.append(rec)
 
             app.model.records = new_records
+            promoted_count = promote_duplicate_shadows_after_removal(app.model.records, root)
             _refresh_model_indexes(app.model)
             app.model.endResetModel()
             model_reset = False
@@ -234,9 +236,9 @@ def do_remove_folder(app, root: Path):
 
             if app.engine.session_source_roots:
                 app.footer.log(
-                    f"<b>Removed:</b> {root.name} ({removed_count} staged files removed). Rebuilding remaining sources for accuracy..."
+                    f"<b>Removed:</b> {root.name} ({removed_count} staged files removed; {promoted_count} duplicate shadow(s) promoted)."
                 )
-                app.workflow_controller.start_refresh(app.engine.session_source_roots)
+                finalize_model_mutation(app, resort=True, refresh_search=True)
             else:
                 app.footer.log(f"<b>Removed:</b> {root.name} ({removed_count} files removed from workbench)")
                 finalize_model_mutation(app, resort=True, refresh_search=True)

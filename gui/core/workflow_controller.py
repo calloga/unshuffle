@@ -16,7 +16,7 @@ from . import workflow_scan_finalization
 from . import workflow_scan_start
 from . import workflow_session_persistence
 from . import workflow_undo_completion
-from .workflow_records import build_result_compact_lines, build_result_lines, build_result_summary, dedupe_plan_records, record_dedupe_key, scan_duplicate_stats, undo_result_summary
+from .workflow_records import build_result_compact_lines, build_result_lines, build_result_summary, buildable_records, dedupe_plan_records, record_dedupe_key, scan_duplicate_stats, undo_result_summary
 from .workflow_restore import restore_previous_session
 from .workflow_summary import (
     chart_segments as _chart_segments,
@@ -323,9 +323,10 @@ class WorkflowController(QObject):
         }
         if display_context:
             self._last_build_options.update(display_context)
+        records = buildable_records(records)
         stats = getattr(self, "_last_scan_stats", {}) or {}
         self._pending_build_skipped_duplicates = {
-            "skipped_duplicates": int(stats.get("total_dupe_count") or 0),
+            "shadow_duplicates": int(stats.get("total_dupe_count") or 0),
             "skipped_session_duplicates": int(stats.get("session_dupe_count") or 0),
             "skipped_library_duplicates": int(stats.get("lib_dupe_count") or 0),
         }

@@ -10,6 +10,7 @@ from gui.core import workflow_build_completion
 from gui.core.workflow_controller import WorkflowController
 from gui.core.workflow_records import build_result_compact_lines
 from gui.core.workers import ScanWorker, StartupRestoreWorker
+from unshuffle.core import PlanRecord
 from unshuffle.persistence import get_local_db
 
 
@@ -44,6 +45,7 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
                 calls.append(("close",))
 
         engine = mock.Mock()
+        engine.db = None
         engine.session_id = "scan-session"
         engine.target_dir = Path("D:/Library")
         engine.prepare_plan.return_value = []
@@ -966,6 +968,40 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
 
         preview_player.release.assert_called_once()
         worker_manager.start_commit.assert_called_once()
+
+    def test_start_commit_filters_duplicate_shadow_records_before_build(self):
+        engine = SimpleNamespace(
+            target_dir=Path("D:/Target"),
+            session_source_roots=[],
+            _init_db_and_hashes=mock.Mock(),
+        )
+        worker_manager = mock.Mock()
+
+        class _App(QObject):
+            def __init__(self):
+                super().__init__()
+                self.settings = mock.Mock()
+                self.audio_controller = SimpleNamespace(player=None)
+
+        app = _App()
+        controller = WorkflowController(engine, worker_manager, mock.Mock(), app)
+        normal = PlanRecord(Path("D:/Samples/original.wav"), "Pack", "Kicks", "Oneshots", "0.9")
+        shadow = PlanRecord(
+            Path("D:/Samples/dupe.wav"),
+            "Pack",
+            "Kicks",
+            "Oneshots",
+            "0.9",
+            is_duplicate_shadow=True,
+            duplicate_of_hash="hash-a",
+            duplicate_of_path=normal.source_path,
+        )
+
+        controller.start_commit([normal, shadow], "D:/Target", move=True)
+
+        worker_manager.start_commit.assert_called_once()
+        records_arg = worker_manager.start_commit.call_args.args[0]
+        self.assertEqual(records_arg, [normal])
 
 
 if __name__ == "__main__":

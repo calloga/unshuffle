@@ -44,6 +44,9 @@ class ExecutionMixin:
         self._last_effective_action = "move" if move else "copy"
         self._last_record_hash = None
         self._last_record_error = ""
+        if getattr(record, "is_duplicate_shadow", False) is True:
+            self._last_record_error = "Duplicate shadow records are excluded from builds."
+            return "duplicate_shadow", record.source_path
         if record.is_preserved:
             result, dest_path, dest_folder = process_preserved_record(self, record, move=move, dry_run=dry_run)
 

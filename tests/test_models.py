@@ -1,8 +1,9 @@
 import unittest
 import importlib.util
+import json
 from pathlib import Path
 from typing import cast
-from unshuffle.core import LibNode, NodeType, PlanRecord
+from unshuffle.core import LibNode, NodeType, PlanRecord, parse_tags, plan_record_from_staging_row
 
 
 def _load_build_staging_rows():
@@ -87,6 +88,53 @@ class TestModels(unittest.TestCase):
         self.assertEqual(row[12], '[["Pack", 1.0]]')
         self.assertEqual(row[13], '{"source": "test"}')
         self.assertEqual(len(row), 21)
+
+    def test_duplicate_shadow_metadata_round_trips_through_staging_evidence(self):
+        build_staging_rows = _load_build_staging_rows()
+        rec = PlanRecord(
+            source_path=Path("Source/dupe.wav"),
+            pack="Pack",
+            category="Kicks",
+            audio_type="Oneshots",
+            confidence="0.9",
+            hash="hash-a",
+            fast_hash="fast-a",
+            tags=["duplicate"],
+            is_duplicate_shadow=True,
+            duplicate_of_hash="hash-canonical",
+            duplicate_of_path=Path("Source/canonical.wav"),
+        )
+
+        row = build_staging_rows([rec])[0]
+        evidence = json.loads(row[13])
+        shadow = evidence["duplicate_shadow"]
+
+        self.assertTrue(shadow["is_shadow"])
+        self.assertEqual(shadow["duplicate_of_hash"], "hash-canonical")
+        self.assertEqual(shadow["duplicate_of_path"], "Source\\canonical.wav")
+
+        loaded = plan_record_from_staging_row(
+            {
+                "row_id": 0,
+                "source_path": row[1],
+                "pack": row[3],
+                "category": row[4],
+                "subcategory": row[5],
+                "audio_type": row[6],
+                "tags": '["duplicate"]',
+                "confidence": row[8],
+                "duration": row[9],
+                "hash": row[10],
+                "fast_hash": row[11],
+                "pack_candidates": row[12],
+                "evidence_json": row[13],
+            },
+            parse_tags,
+        )
+
+        self.assertTrue(loaded.is_duplicate_shadow)
+        self.assertEqual(loaded.duplicate_of_hash, "hash-canonical")
+        self.assertEqual(loaded.duplicate_of_path, Path("Source/canonical.wav"))
 
 if __name__ == "__main__":
     unittest.main()

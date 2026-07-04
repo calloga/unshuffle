@@ -332,6 +332,8 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
                 self._last_duplicate_trash_path = None
                 self._last_record_error = ""
                 result, actual_dest = self._process_single_record(record, move, dry_run, flat, no_prefix, csv_writer)
+                if result == "duplicate_shadow":
+                    continue
                 duplicate_trash_path = getattr(self, "_last_duplicate_trash_path", None)
                 record_hash = getattr(self, "_last_record_hash", None) or record.hash
                 record_action = getattr(self, "_last_effective_action", None) or ("move" if move else "copy")

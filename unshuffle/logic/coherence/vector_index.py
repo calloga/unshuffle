@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -44,6 +45,16 @@ def valid_coherence_vector(value: Any) -> list[float] | None:
 def eligible_staging_row(row: dict[str, Any]) -> bool:
     if bool(row.get("is_preserved")):
         return False
+    evidence = row.get("evidence_json")
+    if isinstance(evidence, str):
+        try:
+            evidence = json.loads(evidence) if evidence else {}
+        except (TypeError, json.JSONDecodeError):
+            evidence = {}
+    if isinstance(evidence, dict):
+        shadow = evidence.get("duplicate_shadow")
+        if isinstance(shadow, dict) and bool(shadow.get("is_shadow")):
+            return False
     category = str(row.get("category") or "").strip()
     if category in EXCLUDED_CATEGORIES:
         return False

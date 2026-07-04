@@ -29,6 +29,20 @@ from gui.utils.history import load_session_sources
 from gui.utils.styles import ColorPalette, make_qcolor, scaled_px, set_zoom_percent, sync_color_palette
 
 
+def _normalized_root_tuple(roots: tuple[str, ...]) -> tuple[str, ...]:
+    result = []
+    for root in roots:
+        text = str(root or "").strip()
+        if not text:
+            continue
+        try:
+            normalized = Path(text).resolve().as_posix().lower()
+        except OSError:
+            normalized = Path(text).as_posix().lower()
+        result.append(normalized.rstrip("/"))
+    return tuple(result)
+
+
 @dataclass(frozen=True)
 class StartupLaunchRequest:
     mode: str
@@ -402,7 +416,7 @@ class StartupLauncherDialog(QDialog):
         target = (roots[0] if self._new_session_requested and roots else "") or self._target() or (roots[0] if roots else "")
         if not roots:
             mode = "empty"
-        elif roots == self._initial_roots and self._selected_session_id:
+        elif _normalized_root_tuple(roots) == _normalized_root_tuple(self._initial_roots) and self._selected_session_id:
             mode = "restore"
         else:
             mode = "refresh"
