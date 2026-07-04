@@ -71,6 +71,59 @@ def test_windows_feature_extraction_hides_subprocess_window(tmp_path: Path, monk
     assert kwargs["startupinfo"].wShowWindow == 0
 
 
+def test_bulk_feature_extraction_parses_jsonl_success_and_failure(tmp_path: Path):
+    extractor = tmp_path / "extractor.exe"
+    extractor.write_text("fake", encoding="utf-8")
+    good = tmp_path / "good.wav"
+    bad = tmp_path / "bad.wav"
+    good.write_bytes(b"audio")
+    bad.write_bytes(b"bad")
+    engine = SimilarityEngine(extractor_path=str(extractor))
+
+    rows = [
+        {
+            "path": str(good),
+            "ok": True,
+            "payload": {
+                "vector": [0.1] * FEATURE_VECTOR_SIZE,
+                "feature_schema": list(CURRENT_FEATURE_SCHEMA),
+                "feature_space_version": "unshuffle-audio-v1",
+                "extractor_version": "unshuffle_extractor 1.0.0",
+                "analysis_status": "ok",
+            },
+        },
+        {"path": str(bad), "ok": False, "error": "File is empty"},
+    ]
+    completed = mock.Mock(returncode=0, stdout="\n".join(json.dumps(row) for row in rows), stderr="")
+
+    with mock.patch("unshuffle.audio.acoustic.subprocess.run", return_value=completed) as run:
+        result = engine.extract_feature_payloads_bulk([good, bad])
+
+    assert run.call_args.args[0][1] == "--batch"
+    assert result[good] is not None
+    assert result[good].vector == [0.1] * FEATURE_VECTOR_SIZE
+    assert result[bad] is None
+    assert engine.extraction_failure_tag(bad) == "Empty"
+
+
+def test_bulk_feature_extraction_falls_back_to_single_file_on_invalid_output(tmp_path: Path):
+    extractor = tmp_path / "extractor.exe"
+    extractor.write_text("fake", encoding="utf-8")
+    sample = tmp_path / "sample.wav"
+    sample.write_bytes(b"audio")
+    engine = SimilarityEngine(extractor_path=str(extractor))
+
+    completed = mock.Mock(returncode=0, stdout="not-jsonl", stderr="")
+    fallback_payload = mock.Mock(spec=object)
+
+    with mock.patch("unshuffle.audio.acoustic.subprocess.run", return_value=completed), \
+         mock.patch.object(engine, "extract_feature_payload", return_value=fallback_payload) as fallback:
+        result = engine.extract_feature_payloads_bulk([sample])
+
+    fallback.assert_called_once_with(sample)
+    assert result[sample] is fallback_payload
+
+
 def test_audio_duration_logs_debug_for_mutagen_failures(tmp_path: Path):
     bad_file = tmp_path / "bad.mp3"
     bad_file.write_bytes(b"not audio")

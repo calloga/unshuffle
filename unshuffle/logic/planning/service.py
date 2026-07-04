@@ -32,6 +32,7 @@ from ...logic.planning.rules import is_generic_folder
 from ...persistence import get_directory_dump_filename, get_discovery_data_filename, save_json_meta
 
 DEFAULT_EXTRACTOR_WORKERS = 8
+DEFAULT_EXTRACTOR_BATCH_SIZE = 512
 CACHE_UPDATE_BATCH_SIZE = 256
 
 
@@ -45,6 +46,22 @@ def _extractor_worker_count(total: int) -> int:
     if override > 0:
         return max(1, min(override, total))
     return max_scan_workers(total, pool_cap=DEFAULT_EXTRACTOR_WORKERS)
+
+
+def _extractor_batch_size(total: int) -> int:
+    if total <= 0:
+        return 1
+    try:
+        override = int(os.environ.get("UNSHUFFLE_EXTRACTOR_BATCH_SIZE", "0") or "0")
+    except ValueError:
+        override = 0
+    if override > 0:
+        return max(1, min(override, total))
+    return min(DEFAULT_EXTRACTOR_BATCH_SIZE, total)
+
+
+def _chunks(items: List[Path], size: int) -> List[List[Path]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
 
 
 def _ancestor_candidates(
@@ -268,7 +285,9 @@ def run_plan(
                 len(feature_vectors),
                 sum(len(paths) for paths in extract_dependents.values()),
             )
-            max_workers = _extractor_worker_count(len(to_extract))
+            batch_size = _extractor_batch_size(len(to_extract))
+            batches = _chunks(to_extract, batch_size)
+            max_workers = _extractor_worker_count(len(batches))
             max_pending = max_workers * 2
             logger.info("Audio feature analysis")
             if progress_callback:
@@ -276,54 +295,59 @@ def run_plan(
                     "message": f"Audio feature analysis extracting {len(to_extract)} files.",
                 })
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                for path, payload in bounded_map(
+                completed = 0
+                for _batch, payloads in bounded_map(
                     executor,
-                    sim_engine.extract_feature_payload,
-                    to_extract,
+                    sim_engine.extract_feature_payloads_bulk,
+                    batches,
                     max_pending=max_pending,
                     is_interrupted=is_interrupted,
                 ):
-                    dependent_paths = [path, *extract_dependents.get(path, [])]
-                    if payload:
-                        vector = payload.vector
-                        blob = feature_blob_from_vector(vector)
-                        if not blob:
-                            continue
-                        values = vector_to_feature_values(vector)
-                        for result_path in dependent_paths:
-                            feature_vectors[result_path] = blob
-                            feature_values[result_path] = values
-                            analysis_statuses[result_path] = payload.analysis_status
-                            vector_duration = _duration_from_vector(vector)
-                            if vector_duration is not None:
-                                durations[result_path] = vector_duration
-                        vector_duration = _duration_from_vector(vector)
-                        if db:
-                            node = context.nodes.get(path)
-                            if node:
-                                stat = path.stat()
-                                cache_updates.append((
-                                    node.hash,
-                                    path,
-                                    stat.st_size,
-                                    stat.st_mtime,
-                                    blob,
-                                    payload.feature_space_version or CURRENT_FEATURE_SPACE_VERSION,
-                                    payload.extractor_version or CURRENT_EXTRACTOR_VERSION,
-                                    json.dumps(list(payload.feature_schema or CURRENT_FEATURE_SCHEMA)),
-                                    payload.analysis_status or "ok",
-                                    "[]",
-                                    node.fast_hash,
-                                ))
-                                if len(cache_updates) >= CACHE_UPDATE_BATCH_SIZE:
-                                    db.update_cache_bulk(cache_updates)
-                                    cache_updates.clear()
-                    else:
-                        failure_tag = sim_engine.extraction_failure_tag(path)
-                        if failure_tag:
+                    for path, payload in payloads.items():
+                        dependent_paths = [path, *extract_dependents.get(path, [])]
+                        if payload:
+                            vector = payload.vector
+                            blob = feature_blob_from_vector(vector)
+                            if not blob:
+                                continue
+                            values = vector_to_feature_values(vector)
                             for result_path in dependent_paths:
-                                analysis_failure_tags[result_path] = failure_tag
-                                analysis_statuses[result_path] = failure_tag
+                                feature_vectors[result_path] = blob
+                                feature_values[result_path] = values
+                                analysis_statuses[result_path] = payload.analysis_status
+                                vector_duration = _duration_from_vector(vector)
+                                if vector_duration is not None:
+                                    durations[result_path] = vector_duration
+                            vector_duration = _duration_from_vector(vector)
+                            if db:
+                                node = context.nodes.get(path)
+                                if node:
+                                    stat = path.stat()
+                                    cache_updates.append((
+                                        node.hash,
+                                        path,
+                                        stat.st_size,
+                                        stat.st_mtime,
+                                        blob,
+                                        payload.feature_space_version or CURRENT_FEATURE_SPACE_VERSION,
+                                        payload.extractor_version or CURRENT_EXTRACTOR_VERSION,
+                                        json.dumps(list(payload.feature_schema or CURRENT_FEATURE_SCHEMA)),
+                                        payload.analysis_status or "ok",
+                                        "[]",
+                                        node.fast_hash,
+                                    ))
+                                    if len(cache_updates) >= CACHE_UPDATE_BATCH_SIZE:
+                                        db.update_cache_bulk(cache_updates)
+                                        cache_updates.clear()
+                        else:
+                            failure_tag = sim_engine.extraction_failure_tag(path)
+                            if failure_tag:
+                                for result_path in dependent_paths:
+                                    analysis_failure_tags[result_path] = failure_tag
+                                    analysis_statuses[result_path] = failure_tag
+                        completed += 1
+                        if progress_callback and completed % 100 == 0:
+                            progress_callback({"current": completed, "total": len(to_extract)})
         if db and cache_updates:
             db.update_cache_bulk(cache_updates)
 

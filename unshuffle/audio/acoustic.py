@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from collections import OrderedDict
 from pathlib import Path
@@ -235,6 +236,53 @@ class SimilarityEngine:
         self._negative_cache_set(file_path)
         return None
 
+    def _subprocess_options(self) -> dict:
+        options = {
+            "capture_output": True,
+            "text": True,
+        }
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            options["creationflags"] = subprocess.CREATE_NO_WINDOW | 0x00000040
+            options["startupinfo"] = startupinfo
+        return options
+
+    def _payload_from_extractor_data(self, file_path: Path, data: dict) -> Optional[FeaturePayload]:
+        vector = data.get("vector")
+        if not vector and isinstance(data.get("features"), dict):
+            vector = vector_from_feature_values(data["features"])
+        if vector:
+            sanitized = self._sanitize_vector(vector)
+            if sanitized and len(sanitized) == CURRENT_FEATURE_VECTOR_SIZE:
+                feature_space_version = str(data.get("feature_space_version") or CURRENT_FEATURE_SPACE_VERSION)
+                feature_schema = tuple(data.get("feature_schema") or data.get("vector_schema") or CURRENT_FEATURE_SCHEMA)
+                if feature_space_version != CURRENT_FEATURE_SPACE_VERSION:
+                    logging.error(
+                        "C++ Extractor returned unsupported feature space %s for %s",
+                        feature_space_version,
+                        file_path.name,
+                    )
+                    return self._cache_negative_and_return_none(file_path)
+                if feature_schema != CURRENT_FEATURE_SCHEMA:
+                    logging.error(
+                        "C++ Extractor returned unsupported feature schema for %s",
+                        file_path.name,
+                    )
+                    return self._cache_negative_and_return_none(file_path)
+                self._cache_set(file_path, sanitized)
+                return FeaturePayload(
+                    vector=sanitized,
+                    feature_space_version=feature_space_version,
+                    extractor_version=str(data.get("extractor_version") or ""),
+                    feature_schema=feature_schema,
+                    analysis_status=str(data.get("analysis_status") or "ok"),
+                )
+        message = "C++ Extractor returned an invalid vector"
+        logging.error("%s for %s", message, file_path.name)
+        return self._cache_negative_and_return_none(file_path, message)
+
     def extract_feature_payload(self, file_path: Path) -> Optional[FeaturePayload]:
         cached = self._cache_get(file_path)
         if cached is not None:
@@ -256,19 +304,9 @@ class SimilarityEngine:
             return self._cache_negative_and_return_none(file_path)
 
         try:
-            creationflags = 0
-            startupinfo = None
-            if os.name == "nt":
-                creationflags = subprocess.CREATE_NO_WINDOW | 0x00000040
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = 0
             result = subprocess.run(
                 [self.extractor_path, "--file", str(file_path)],
-                capture_output=True,
-                text=True,
-                creationflags=creationflags,
-                startupinfo=startupinfo,
+                **self._subprocess_options(),
                 timeout=self.EXTRACT_TIMEOUT_SECONDS,
             )
             if result.returncode != 0:
@@ -281,39 +319,7 @@ class SimilarityEngine:
                 )
                 return self._cache_negative_and_return_none(file_path, error_text)
 
-            data = json.loads(result.stdout)
-            vector = data.get("vector")
-            if not vector and isinstance(data.get("features"), dict):
-                vector = vector_from_feature_values(data["features"])
-            if vector:
-                sanitized = self._sanitize_vector(vector)
-                if sanitized and len(sanitized) == CURRENT_FEATURE_VECTOR_SIZE:
-                    feature_space_version = str(data.get("feature_space_version") or CURRENT_FEATURE_SPACE_VERSION)
-                    feature_schema = tuple(data.get("feature_schema") or data.get("vector_schema") or CURRENT_FEATURE_SCHEMA)
-                    if feature_space_version != CURRENT_FEATURE_SPACE_VERSION:
-                        logging.error(
-                            "C++ Extractor returned unsupported feature space %s for %s",
-                            feature_space_version,
-                            file_path.name,
-                        )
-                        return self._cache_negative_and_return_none(file_path)
-                    if feature_schema != CURRENT_FEATURE_SCHEMA:
-                        logging.error(
-                            "C++ Extractor returned unsupported feature schema for %s",
-                            file_path.name,
-                        )
-                        return self._cache_negative_and_return_none(file_path)
-                    self._cache_set(file_path, sanitized)
-                    return FeaturePayload(
-                        vector=sanitized,
-                        feature_space_version=feature_space_version,
-                        extractor_version=str(data.get("extractor_version") or ""),
-                        feature_schema=feature_schema,
-                        analysis_status=str(data.get("analysis_status") or "ok"),
-                    )
-                message = "C++ Extractor returned an invalid vector"
-                logging.error("%s for %s", message, file_path.name)
-                return self._cache_negative_and_return_none(file_path, message)
+            return self._payload_from_extractor_data(file_path, json.loads(result.stdout))
         except subprocess.TimeoutExpired:
             message = (
                 f"C++ Extractor timed out after {self.EXTRACT_TIMEOUT_SECONDS}s"
@@ -329,6 +335,105 @@ class SimilarityEngine:
             logging.error("C++ Bridge Exception: %s", exc)
             return self._cache_negative_and_return_none(file_path, message)
         return self._cache_negative_and_return_none(file_path)
+
+    def extract_feature_payloads_bulk(self, file_paths: List[Path]) -> Dict[Path, Optional[FeaturePayload]]:
+        results: Dict[Path, Optional[FeaturePayload]] = {}
+        pending: List[Path] = []
+        for file_path in file_paths:
+            cached = self._cache_get(file_path)
+            if cached is not None:
+                results[file_path] = FeaturePayload(vector=cached)
+                continue
+            if self._negative_cache_get(file_path):
+                results[file_path] = None
+                continue
+            ext = file_path.suffix.lower()
+            if ext not in self.SUPPORTED_EXTS:
+                if ext == ".m4a":
+                    logging.info(
+                        "Acoustic Indexing: Skipping .m4a (not supported by C++ engine) - %s",
+                        file_path.name,
+                    )
+                results[file_path] = self._cache_negative_and_return_none(file_path)
+                continue
+            pending.append(file_path)
+
+        if not pending:
+            return results
+
+        if not Path(self.extractor_path).exists():
+            logging.error("Similarity Engine: Extractor not found at %s", self.extractor_path)
+            for file_path in pending:
+                results[file_path] = self.extract_feature_payload(file_path)
+            return results
+
+        manifest_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt") as manifest:
+                manifest_path = Path(manifest.name)
+                for file_path in pending:
+                    manifest.write(str(file_path))
+                    manifest.write("\n")
+            timeout = max(self.EXTRACT_TIMEOUT_SECONDS, self.EXTRACT_TIMEOUT_SECONDS * len(pending))
+            result = subprocess.run(
+                [self.extractor_path, "--batch", str(manifest_path)],
+                **self._subprocess_options(),
+                timeout=timeout,
+            )
+        except Exception as exc:
+            logging.info("C++ batch extractor unavailable; falling back to per-file extraction: %s", exc)
+            for file_path in pending:
+                results[file_path] = self.extract_feature_payload(file_path)
+            return results
+        finally:
+            if manifest_path is not None:
+                try:
+                    manifest_path.unlink()
+                except Exception:
+                    pass
+
+        if result.returncode != 0:
+            logging.info(
+                "C++ batch extractor failed with %s; falling back to per-file extraction: %s",
+                result.returncode,
+                (result.stderr or "").strip(),
+            )
+            for file_path in pending:
+                results[file_path] = self.extract_feature_payload(file_path)
+            return results
+
+        seen: set[Path] = set()
+        try:
+            for line in result.stdout.splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                path_text = row.get("path")
+                if not isinstance(path_text, str):
+                    raise ValueError("batch row missing path")
+                file_path = Path(path_text)
+                if file_path not in pending:
+                    file_path = next((candidate for candidate in pending if str(candidate) == path_text), file_path)
+                seen.add(file_path)
+                if row.get("ok"):
+                    payload_data = row.get("payload")
+                    if not isinstance(payload_data, dict):
+                        raise ValueError("batch success row missing payload")
+                    results[file_path] = self._payload_from_extractor_data(file_path, payload_data)
+                else:
+                    error_text = str(row.get("error") or "")
+                    logging.error("C++ Extractor Error for %s: %s", file_path.name, error_text.strip())
+                    results[file_path] = self._cache_negative_and_return_none(file_path, error_text)
+        except Exception as exc:
+            logging.info("C++ batch extractor emitted invalid output; falling back to per-file extraction: %s", exc)
+            for file_path in pending:
+                results[file_path] = self.extract_feature_payload(file_path)
+            return results
+
+        for file_path in pending:
+            if file_path not in seen:
+                results[file_path] = self.extract_feature_payload(file_path)
+        return results
 
     def extract_features(self, file_path: Path) -> Optional[List[float]]:
         payload = self.extract_feature_payload(file_path)

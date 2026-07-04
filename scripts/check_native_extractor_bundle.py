@@ -119,6 +119,39 @@ def _check_schema_smoke(path: Path) -> tuple[bool, str]:
     vector = payload.get("vector")
     if not isinstance(vector, list) or len(vector) != FEATURE_VECTOR_SIZE:
         return False, f"{path} vector length mismatch"
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "probe.wav"
+        manifest = Path(tmp) / "manifest.txt"
+        _write_probe_wav(probe)
+        manifest.write_text(str(probe) + "\n", encoding="utf-8")
+        try:
+            batch_result = subprocess.run(
+                [str(path), "--batch", str(manifest)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except OSError as exc:
+            return False, f"could not execute batch schema smoke for {path}: {exc}"
+        except subprocess.TimeoutExpired:
+            return False, f"batch schema smoke timed out: {path}"
+    if batch_result.returncode != 0:
+        stderr = (batch_result.stderr or "").strip()
+        return False, f"{path} batch schema smoke failed with {batch_result.returncode}: {stderr}"
+    lines = [line for line in batch_result.stdout.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return False, f"{path} batch schema smoke emitted {len(lines)} rows"
+    try:
+        batch_row = json.loads(lines[0])
+    except json.JSONDecodeError as exc:
+        return False, f"{path} batch schema smoke emitted invalid JSONL: {exc}"
+    if not batch_row.get("ok") or not isinstance(batch_row.get("payload"), dict):
+        return False, f"{path} batch schema smoke did not return a successful payload"
+    batch_payload = batch_row["payload"]
+    batch_vector = batch_payload.get("vector")
+    if not isinstance(batch_vector, list) or len(batch_vector) != FEATURE_VECTOR_SIZE:
+        return False, f"{path} batch vector length mismatch"
     return True, f"schema ok: {path}"
 
 

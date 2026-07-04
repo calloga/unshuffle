@@ -58,3 +58,4 @@ DO_NOT_DELETE_unshuffle/
 .test_tmp/
 .unshuffle/
 .unshuffle_drag_exports/
+.bench-appdata-*/

@@ -67,6 +67,109 @@ std::wstring utf8_to_utf16(const std::string &s) {
 }
 #endif
 
+std::wstring normalize_input_path(const std::wstring &wfilepath) {
+#ifdef _WIN32
+  try {
+    fs::path p(wfilepath);
+    fs::path abs_p = fs::absolute(p);
+    std::wstring wstr = abs_p.wstring();
+
+    std::replace(wstr.begin(), wstr.end(), L'/', L'\\');
+
+    if (wstr.length() > 240 && wstr.find(L"\\\\?\\") != 0) {
+      return L"\\\\?\\" + wstr;
+    }
+    return wstr;
+  } catch (...) {
+    return wfilepath;
+  }
+#else
+  return wfilepath;
+#endif
+}
+
+int extract_file_json(const std::wstring &wfilepath, std::ostream &out);
+int extract_batch_jsonl(const std::wstring &manifest_path, std::ostream &out);
+
+std::string json_escape(const std::string &value) {
+  std::ostringstream escaped;
+  for (char c : value) {
+    unsigned char uc = static_cast<unsigned char>(c);
+    switch (c) {
+    case '\\':
+      escaped << "\\\\";
+      break;
+    case '"':
+      escaped << "\\\"";
+      break;
+    case '\b':
+      escaped << "\\b";
+      break;
+    case '\f':
+      escaped << "\\f";
+      break;
+    case '\n':
+      escaped << "\\n";
+      break;
+    case '\r':
+      escaped << "\\r";
+      break;
+    case '\t':
+      escaped << "\\t";
+      break;
+    default:
+      if (uc < 0x20) {
+        escaped << "\\u";
+        const char *hex = "0123456789abcdef";
+        escaped << "00" << hex[(uc >> 4) & 0x0f] << hex[uc & 0x0f];
+      } else {
+        escaped << c;
+      }
+    }
+  }
+  return escaped.str();
+}
+
+int extract_batch_jsonl(const std::wstring &manifest_path, std::ostream &out) {
+  fs::path manifest = normalize_input_path(manifest_path);
+  std::ifstream input(manifest);
+  if (!input) {
+    std::cerr << "Could not open batch manifest\n";
+    return 1;
+  }
+
+  std::string line;
+  while (std::getline(input, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (line.empty()) {
+      continue;
+    }
+
+    std::ostringstream payload;
+    std::ostringstream errors;
+    std::streambuf *old_cerr = std::cerr.rdbuf(errors.rdbuf());
+    int rc = extract_file_json(utf8_to_utf16(line), payload);
+    std::cerr.rdbuf(old_cerr);
+
+    out << "{\"path\":\"" << json_escape(line) << "\",\"ok\":";
+    if (rc == 0) {
+      std::string payload_text = payload.str();
+      while (!payload_text.empty() &&
+             (payload_text.back() == '\n' || payload_text.back() == '\r')) {
+        payload_text.pop_back();
+      }
+      out << "true,\"payload\":" << payload_text;
+    } else {
+      out << "false,\"error\":\"" << json_escape(errors.str()) << "\"";
+    }
+    out << "}" << std::endl;
+  }
+
+  return 0;
+}
+
 std::string shell_quote(const std::string &value) {
 #ifdef _WIN32
   std::string escaped = "\"";
@@ -310,7 +413,8 @@ int main(int argc, char *argv[]) {
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
     if (arg == "--help" || arg == "-h") {
-      std::cout << "Usage: unshuffle_extractor --file <audio_file_path>\n";
+      std::cout << "Usage: unshuffle_extractor --file <audio_file_path>\n"
+                << "       unshuffle_extractor --batch <manifest_path>\n";
       return 0;
     }
     if (arg == "--version") {
@@ -320,6 +424,7 @@ int main(int argc, char *argv[]) {
   }
 
   std::wstring wfilepath;
+  std::wstring wbatch_manifest;
 
 #ifdef _WIN32
   int w_argc;
@@ -328,57 +433,47 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < w_argc; i++) {
       if (std::wstring(w_argv[i]) == L"--file" && (i + 1) < w_argc) {
         wfilepath = w_argv[i + 1];
+      } else if (std::wstring(w_argv[i]) == L"--batch" && (i + 1) < w_argc) {
+        wbatch_manifest = w_argv[i + 1];
       }
     }
     LocalFree(w_argv);
   }
 #else
   std::string filepath;
+  std::string batch_manifest;
   if (argc < 2) {
-    std::cerr << "Usage: unshuffle_extractor --file <audio_file_path>\n";
+    std::cerr << "Usage: unshuffle_extractor --file <audio_file_path>\n"
+              << "       unshuffle_extractor --batch <manifest_path>\n";
     return 1;
   }
 
   for (int i = 1; i < argc; i++) {
     if (std::string(argv[i]) == "--file" && (i + 1) < argc) {
       filepath = argv[i + 1];
+    } else if (std::string(argv[i]) == "--batch" && (i + 1) < argc) {
+      batch_manifest = argv[i + 1];
     }
   }
 
-  if (filepath.empty()) {
-    std::cerr << "No file provided\n";
-    return 1;
-  }
-
   wfilepath = utf8_to_utf16(filepath);
+  wbatch_manifest = utf8_to_utf16(batch_manifest);
 #endif
+
+  if (!wbatch_manifest.empty()) {
+    return extract_batch_jsonl(wbatch_manifest, std::cout);
+  }
 
   if (wfilepath.empty()) {
     std::cerr << "No file path provided or failed to parse arguments\n";
     return 1;
   }
 
-  std::wstring wpath;
+  return extract_file_json(wfilepath, std::cout);
+}
 
-#ifdef _WIN32
-  try {
-    fs::path p(wfilepath);
-    fs::path abs_p = fs::absolute(p);
-    std::wstring wstr = abs_p.wstring();
-
-    std::replace(wstr.begin(), wstr.end(), L'/', L'\\');
-
-    if (wstr.length() > 240 && wstr.find(L"\\\\?\\") != 0) {
-      wpath = L"\\\\?\\" + wstr;
-    } else {
-      wpath = wstr;
-    }
-  } catch (...) {
-    wpath = wfilepath;
-  }
-#else
-  wpath = wfilepath;
-#endif
+int extract_file_json(const std::wstring &wfilepath, std::ostream &out) {
+  std::wstring wpath = normalize_input_path(wfilepath);
 
   std::string lower_path;
   for (wchar_t c : wfilepath) {
@@ -547,40 +642,41 @@ int main(int argc, char *argv[]) {
 
   Audio_features features = compute_features(mono_samples, sampleRate);
 
-  std::cout << "{\"vector\":[" << features.brightness << ","
-            << features.percussivity << "," << features.fft_register << ","
-            << features.zcr << "," << features.decay << ",";
+  out << "{\"vector\":[" << features.brightness << ","
+      << features.percussivity << "," << features.fft_register << ","
+      << features.zcr << "," << features.decay << ",";
 
   for (int i = 0; i < 11; i++)
-    std::cout << features.chroma[i] << ",";
+    out << features.chroma[i] << ",";
 
-  std::cout << features.chroma[11] << "," << features.active_duration << ","
-            << features.loopiness_score << "," << features.transient_tail_score << "],"
-            << "\"feature_space_version\":\"unshuffle-audio-v1\","
-            << "\"extractor_version\":\"unshuffle_extractor 1.0.0\","
-            << "\"analysis_status\":\"ok\","
-            << "\"feature_schema\":[";
+  out << features.chroma[11] << "," << features.active_duration << ","
+      << features.loopiness_score << "," << features.transient_tail_score << "],"
+      << "\"feature_space_version\":\"unshuffle-audio-v1\","
+      << "\"extractor_version\":\"unshuffle_extractor 1.0.0\","
+      << "\"analysis_status\":\"ok\","
+      << "\"feature_schema\":[";
   for (int i = 0; i < 20; i++) {
     if (i > 0)
-      std::cout << ",";
-    std::cout << "\"" << FEATURE_SCHEMA[i] << "\"";
+      out << ",";
+    out << "\"" << FEATURE_SCHEMA[i] << "\"";
   }
-  std::cout << "],\"features\":{"
-            << "\"brightness\":" << features.brightness << ","
-            << "\"percussivity\":" << features.percussivity << ","
-            << "\"fft_register\":" << features.fft_register << ","
-            << "\"zcr\":" << features.zcr << ","
-            << "\"decay\":" << features.decay << ",";
+  out << "],\"features\":{"
+      << "\"brightness\":" << features.brightness << ","
+      << "\"percussivity\":" << features.percussivity << ","
+      << "\"fft_register\":" << features.fft_register << ","
+      << "\"zcr\":" << features.zcr << ","
+      << "\"decay\":" << features.decay << ",";
   for (int i = 0; i < 12; i++) {
-    std::cout << "\"chroma_" << i << "\":" << features.chroma[i] << ",";
+    out << "\"chroma_" << i << "\":" << features.chroma[i] << ",";
   }
-  std::cout << "\"active_duration\":" << features.active_duration << ","
-            << "\"loopiness_score\":" << features.loopiness_score
-            << ",\"transient_tail_score\":" << features.transient_tail_score
-            << "}}" << std::endl;
+  out << "\"active_duration\":" << features.active_duration << ","
+      << "\"loopiness_score\":" << features.loopiness_score
+      << ",\"transient_tail_score\":" << features.transient_tail_score
+      << "}}" << std::endl;
 
   return 0;
 }
+
 Audio_features compute_features(std::vector<float> &samples, int sampleRate) {
   const int fftSize = 2048;
   const int hopSize = fftSize / 2;
@@ -589,7 +685,6 @@ Audio_features compute_features(std::vector<float> &samples, int sampleRate) {
   }
   const size_t size = samples.size();
 
-  // Peak normalization keeps scalar features comparable across input gain.
   float max_val = 0.0f;
   for (float s : samples)
     max_val = std::max(max_val, std::abs(s));
@@ -599,12 +694,11 @@ Audio_features compute_features(std::vector<float> &samples, int sampleRate) {
       s /= max_val;
   }
 
-  // Silence-invariant duration: measure the span between the first and last
-  // frames with meaningful energy, ignoring padded leading/trailing silence.
+  
   float active_duration = (float)size / (float)sampleRate;
   const size_t activity_window = std::min<size_t>(1024, size);
   const size_t activity_hop = std::max<size_t>(1, activity_window / 2);
-  const float activity_threshold = 1e-4f; // RMS on peak-normalized audio.
+  const float activity_threshold = 1e-4f; 
   size_t active_start = size;
   size_t active_end = 0;
 
@@ -642,7 +736,7 @@ Audio_features compute_features(std::vector<float> &samples, int sampleRate) {
     }
   }
 
-  // Windowed decay estimates the post-peak energy tail.
+ 
   size_t step = std::max((size_t)1, (size_t)sampleRate / 200);
   size_t max_decay_samples = std::min(size, peak_i + (size_t)sampleRate * 2);
 
@@ -666,7 +760,7 @@ Audio_features compute_features(std::vector<float> &samples, int sampleRate) {
   float centroid_accum = 0.0f;
   float peak_bin_weight_accum = 0.0f;
 
-  float prev_energy = 1e-6f; // Small epsilon to allow first-frame transients
+  float prev_energy = 1e-6f; 
   float percussivity_count = 0.0f;
   float energy_sum_for_weighting = 0.0f;
   float zcr_weighted_accum = 0.0f;
@@ -716,10 +810,10 @@ Audio_features compute_features(std::vector<float> &samples, int sampleRate) {
       }
     }
 
-    // Energy weighting prevents silent frames from diluting transient and register features.
+
     if (prev_energy > 0.0f) {
       float ratio = frame_energy / prev_energy;
-      if (ratio > 1.8f) // Threshold for transient
+      if (ratio > 1.8f) 
         percussivity_count += frame_energy;
     }
 
@@ -730,7 +824,7 @@ Audio_features compute_features(std::vector<float> &samples, int sampleRate) {
     prev_energy = frame_energy;
   }
 
-  // Normalize by total energy rather than frame count so silence does not dominate.
+
   float percussivity = (energy_sum_for_weighting > 0.0f)
                            ? (percussivity_count / energy_sum_for_weighting)
                            : 0.0f;
@@ -755,9 +849,9 @@ Audio_features compute_features(std::vector<float> &samples, int sampleRate) {
                         : ((size > 1) ? (zcr_count / (float)(size - 1)) : 0.0f);
 
   // Final Scaling for Perceptual Space
-  brightness /= 10000.0f;          // Hz normalization
-  fft_register /= 16.0f;           // log2(freq) normalization
-  decay = (decay + 10.0f) / 10.0f; // Shift log range
+  brightness /= 10000.0f;          
+  fft_register /= 16.0f;           
+  decay = (decay + 10.0f) / 10.0f; 
 
   const size_t envelope_window = std::max<size_t>(1, (size_t)sampleRate / 20);
   std::vector<float> envelope;

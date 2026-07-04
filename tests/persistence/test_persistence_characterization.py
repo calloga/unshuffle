@@ -914,6 +914,33 @@ class PersistenceTests(unittest.TestCase):
             self.assertTrue(all(record.feature_vector for record in records))
             self.assertEqual({record.duration for record in records}, {0.5})
 
+    def test_run_plan_uses_bulk_feature_extraction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "Source"
+            target = root / "Target"
+            source.mkdir()
+            target.mkdir()
+            kick = source / "kick.wav"
+            snare = source / "snare.wav"
+            kick.write_bytes(b"audio-a")
+            snare.write_bytes(b"audio-b")
+
+            vector = [0.0] * SimilarityEngine.FEATURE_VECTOR_SIZE
+            vector[SimilarityEngine.IDX_ACTIVE_DURATION] = 0.5
+
+            def fake_bulk(_self, paths):
+                return {path: FeaturePayload(vector) for path in paths}
+
+            with mock.patch("unshuffle.logic.planning.service.SimilarityEngine.extract_feature_payloads_bulk", autospec=True, side_effect=fake_bulk) as bulk, \
+                 mock.patch("unshuffle.logic.planning.service.SimilarityEngine.extract_feature_payload") as single:
+                records = run_plan(source, target, acoustic_index=True)
+
+            self.assertEqual(bulk.call_count, 1)
+            single.assert_not_called()
+            self.assertEqual(len(records), 2)
+            self.assertTrue(all(record.feature_vector for record in records))
+
     def test_run_plan_reuses_acoustic_vector_duration_without_metadata_duration_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
