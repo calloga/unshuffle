@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
-from typing import Any, Iterable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 import numpy as np
 
@@ -20,6 +20,7 @@ from ...core.features import (
     SILENCE_THRESHOLD,
     normalize_distance_vector,
 )
+from ...core.progress import PhaseProgress
 from .models import (
     COHERENCE_STATUS_CLUSTERED,
     COHERENCE_STATUS_LOW,
@@ -85,20 +86,35 @@ class CoherenceEngine:
         self._global_spatial_index_cache: dict[int, Any] = {}
         self._anchor_match_cache: dict[tuple[str, str, str], list[dict]] = {}
 
-    def audit(self, records: Iterable[CoherenceRecord]) -> tuple[list[CoherenceResult], list[RefinementCandidate]]:
+    def audit(
+        self,
+        records: Iterable[CoherenceRecord],
+        *,
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> tuple[list[CoherenceResult], list[RefinementCandidate]]:
         records = list(records)
         by_group: dict[tuple[str, str, str], list[CoherenceRecord]] = defaultdict(list)
         for record in records:
             by_group[(record.audio_type, record.category, record.subcategory)].append(record)
 
+        progress = PhaseProgress(
+            progress_callback,
+            "Checking Library Coherence",
+            total=max(1, len(by_group)),
+            message=f"Checking coherence across {len(by_group)} groups...",
+            update_every=1,
+        )
+        progress.emit(0, force=True)
         results: list[CoherenceResult] = []
         group_context: _GroupContext = {}
         cluster_profiles: list[dict[str, Any]] = []
-        for group_key, group_records in by_group.items():
+        for group_index, (group_key, group_records) in enumerate(by_group.items(), 1):
             group_results, medoid_distances, group_profiles = self._audit_group(group_key, group_records)
             results.extend(group_results)
             group_context.update(medoid_distances)
             cluster_profiles.extend(group_profiles)
+            progress.emit(group_index)
+        progress.emit(max(1, len(by_group)), force=True)
 
         results = self._with_cluster_adjacency_summaries(results, cluster_profiles)
         candidates = self._refinement_candidates(records, results, group_context, cluster_profiles)

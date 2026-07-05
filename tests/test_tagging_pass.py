@@ -68,6 +68,23 @@ def test_duplicate_detection_checks_later_pairs_in_same_bucket(monkeypatch):
     ]
 
 
+def test_duplicate_detection_emits_determinate_progress():
+    from unshuffle.logic.tagging import service as tagging_service
+
+    records = [
+        _record("a.wav", vector=_blob(_v([0.0, 0.0])), duration=0.5),
+        _record("b.wav", vector=_blob(_v([0.0, 0.0])), duration=0.5),
+    ]
+    payloads = []
+
+    tagging_service.find_possible_duplicates(records, progress_callback=payloads.append)
+
+    assert payloads
+    assert all(payload["phase"] == "Checking Possible Duplicates" for payload in payloads)
+    assert any(payload.get("total") == len(records) for payload in payloads)
+    assert payloads[-1]["current"] == payloads[-1]["total"]
+
+
 def _v(values):
     return list(values) + [0.0] * (FEATURE_VECTOR_SIZE - len(values))
 
@@ -123,6 +140,63 @@ def test_tagging_controller_clear_state_hides_footer_and_invalidates_results():
     app.footer.set_tagging_state.assert_called_once_with("", False)
     app.library_tab.set_possible_duplicate_filter_enabled.assert_called_once_with(False)
     app.filter_controller.refresh_dock_filters.assert_called_once_with()
+
+
+def test_tagging_controller_quiet_progress_does_not_touch_footer():
+    class _App(QObject):
+        def __init__(self):
+            super().__init__()
+            self.footer = mock.Mock()
+
+    app = _App()
+    controller = TaggingController(app)
+    controller._request_id = 7
+    controller._quiet_requests.add(7)
+
+    controller._handle_progress(
+        {
+            "request_id": 7,
+            "phase": "Checking Possible Duplicates",
+            "current": 10,
+            "total": 20,
+        }
+    )
+
+    app.footer.set_status.assert_not_called()
+    app.footer.set_progress.assert_not_called()
+
+
+def test_tagging_controller_quiet_result_updates_filter_without_footer_notice():
+    from types import SimpleNamespace
+    from gui.models.staging_table import StagingTableModel
+
+    record = _record("first.wav")
+
+    class _App(QObject):
+        def __init__(self):
+            super().__init__()
+            self.model = StagingTableModel([record], undo_stack=None)
+            self.view_controller = SimpleNamespace(update_library_views=mock.Mock())
+            self.search_controller = SimpleNamespace(current_query="", execute_search=mock.Mock())
+            self.library_tab = mock.Mock()
+            self.filter_controller = mock.Mock()
+            self.footer = mock.Mock()
+
+    app = _App()
+    controller = TaggingController(app)
+
+    controller.apply_tagging_result(
+        {
+            "tags_by_path": {str(record.source_path).replace("\\", "/"): [POSSIBLE_DUPLICATE_TAG]},
+            "duplicate_file_count": 1,
+        },
+        schedule_coherence=False,
+        quiet=True,
+    )
+
+    app.library_tab.set_possible_duplicate_filter_enabled.assert_called_once_with(True)
+    app.filter_controller.refresh_dock_filters.assert_called_once_with()
+    app.footer.set_tagging_state.assert_called_once_with("", False, can_filter=False)
 
 
 def test_tagging_controller_syncs_generated_tags_by_stable_staging_row_id():

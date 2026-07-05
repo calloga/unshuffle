@@ -104,7 +104,8 @@ class SettingsController(QObject):
         is_docked = False
         if self.app and hasattr(self.app, "stack") and hasattr(self.app, "dock_view"):
             is_docked = (self.app.stack.currentWidget() == self.app.dock_view)
-        
+        self.settings.setValue(DOCKED_MODE_KEY, is_docked)
+
         if is_docked:
             self.settings.setValue(DOCKED_GEOMETRY_KEY, self.app.saveGeometry())
         else:

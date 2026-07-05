@@ -31,6 +31,7 @@ from ...core.constants import (
 from ...core.hashing import get_fast_hash, get_file_hash
 from ...core.models import LibNode, NodeType
 from ...core.path_safety import _is_protected_path_resolved, is_symlink_or_reparse
+from ...core.progress import PhaseProgress
 from ...logic.classification import is_category_alias, tokenize
 from .frequency import GlobalFrequencyAnalyzer
 
@@ -287,6 +288,12 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
 
     all_paths = [root_path]
     count = 0
+    discovery_progress = PhaseProgress(
+        context.progress_callback,
+        "Discovering Samples",
+        message="Discovering samples...",
+        update_every=500,
+    )
     
     if (root_path / PRESERVED_MARKER).exists():
         
@@ -330,12 +337,17 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                     all_paths.append(file_path)
 
             count += len(dirs) + len(files)
-            if context.progress_callback and count % 500 == 0:
-                context.progress_callback({"message": f"Scanning discovery: {count} items found..."})
+            discovery_progress.emit(count, message=f"Discovering samples: {count} items found...")
 
     total_found = len(all_paths)
-    if context.progress_callback:
-        context.progress_callback({"message": f"Mapping {total_found} items to graph..."})
+    mapping_progress = PhaseProgress(
+        context.progress_callback,
+        "Discovering Samples",
+        total=total_found,
+        message="Mapping samples to graph...",
+        update_every=1000,
+    )
+    mapping_progress.emit(0, force=True)
 
     for index, path in enumerate(all_paths, 1):
         if context.is_interrupted():
@@ -366,24 +378,34 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
         if node_type == NodeType.FILE:
             context.frequency_analyzer.feed_path(path)
 
-        if context.progress_callback and index % 1000 == 0:
-            context.progress_callback({"current": index, "total": total_found})
+        mapping_progress.emit(index)
+    mapping_progress.emit(total_found, force=True)
 
     all_file_nodes = [node for node in context.nodes.values() if node.node_type == NodeType.FILE and not node.name.startswith("._")]
 
     to_hash = []
     if all_file_nodes:
+        cache_progress = PhaseProgress(
+            context.progress_callback,
+            "Checking Cache",
+            total=len(all_file_nodes),
+            message=f"Checking hash cache for {len(all_file_nodes)} files.",
+            update_every=500,
+        )
+        cache_progress.emit(0, force=True)
         file_stats = []
         statted_nodes = []
         if context.db and (hasattr(context.db, "get_cached_entries") or hasattr(context.db, "get_cached_hashes")):
-            for node in all_file_nodes:
+            for index, node in enumerate(all_file_nodes, 1):
                 try:
                     stat = node.path.stat()
                 except OSError:
                     to_hash.append(node)
+                    cache_progress.emit(index)
                     continue
                 statted_nodes.append(node)
                 file_stats.append((node.path, stat.st_size, stat.st_mtime))
+                cache_progress.emit(index)
             if hasattr(context.db, "get_cached_entries"):
                 cached_entries = context.db.get_cached_entries(file_stats)
             else:
@@ -401,7 +423,7 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
             if context.progress_callback and cached_entries:
                 context.progress_callback({"message": f"Hash cache: {len(cached_entries)} reused, {len(to_hash)} new."})
         elif context.db and (hasattr(context.db, "get_cached_entry") or hasattr(context.db, "get_cached_hash")):
-            for node in all_file_nodes:
+            for index, node in enumerate(all_file_nodes, 1):
                 try:
                     stat = node.path.stat()
                     if hasattr(context.db, "get_cached_entry"):
@@ -412,21 +434,31 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                     if cached:
                         node.hash = cached.get("hash")
                         node.fast_hash = cached.get("fast_hash")
+                        cache_progress.emit(index)
                         continue
                 except OSError:
                     pass
                 to_hash.append(node)
+                cache_progress.emit(index)
         else:
             to_hash.extend(all_file_nodes)
+            cache_progress.emit(len(all_file_nodes), force=True)
+        cache_progress.emit(len(all_file_nodes), force=True)
     if to_hash:
         from collections import defaultdict
 
-        def assign_hashes(nodes, hash_func, message: str, serial_message: str) -> None:
+        def assign_hashes(nodes, hash_func, message: str, serial_message: str, phase: str) -> None:
+            progress = PhaseProgress(
+                context.progress_callback,
+                phase,
+                total=len(nodes),
+                message=message,
+                update_every=100 if len(nodes) > 50 else 10,
+            )
             if len(nodes) > 50:
                 max_workers = max_scan_workers(len(nodes))
                 max_pending = max_workers * 2
-                if context.progress_callback:
-                    context.progress_callback({"message": message})
+                progress.emit(0, force=True)
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     for idx, (node, file_hash) in enumerate(
@@ -444,11 +476,10 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                         node.hash = file_hash
                         if hash_func is get_fast_hash:
                             node.fast_hash = file_hash
-                        if context.progress_callback and idx % 100 == 0:
-                            context.progress_callback({"current": idx, "total": len(nodes)})
+                        progress.emit(idx)
+                progress.emit(len(nodes), force=True)
             else:
-                if context.progress_callback:
-                    context.progress_callback({"message": serial_message})
+                progress.emit(0, message=serial_message, force=True)
 
                 for idx, node in enumerate(nodes, 1):
                     if context.is_interrupted():
@@ -457,14 +488,15 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                     node.hash = file_hash
                     if hash_func is get_fast_hash:
                         node.fast_hash = file_hash
-                    if context.progress_callback and idx % 10 == 0:
-                        context.progress_callback({"current": idx, "total": len(nodes)})
+                    progress.emit(idx)
+                progress.emit(len(nodes), force=True)
 
         assign_hashes(
             to_hash,
             get_fast_hash,
             f"Fast hashing {len(to_hash)} files.",
             f"Fast hashing {len(to_hash)} files (Serial)...",
+            "Hashing",
         )
 
         if context.is_interrupted():
@@ -488,6 +520,7 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                 get_file_hash,
                 f"Confirming {len(to_promote)} possible duplicate files.",
                 f"Confirming {len(to_promote)} possible duplicate files (Serial)...",
+                "Finding Duplicates",
             )
 
         if context.is_interrupted():

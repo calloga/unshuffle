@@ -24,6 +24,7 @@ from ..core import (
     create_app_settings,
 )
 from ..core.acoustic_session_state import AcousticSessionState
+from ..core.operation_monitor import OperationMonitorManager
 from ..models import MultiFilterProxyModel
 from ..styles import ThemeManager
 from ..styles.tokens_geometry import (
@@ -84,6 +85,7 @@ class ModernApp(QMainWindow):
         self.data_manager = DataManager(app=self)
         self.search_controller = SearchController(self.engine, self.model, self.proxy_model, self)
         self.worker_manager = WorkerManager(self)
+        self.operation_monitor = OperationMonitorManager(self)
         self.workflow_controller = WorkflowController(self.engine, self.worker_manager, self.undo_stack, self)
         self.drafting_controller = DraftingController(self)
         self.acoustic_controller = AcousticController(self.model, self.proxy_model, self)
@@ -269,6 +271,9 @@ class ModernApp(QMainWindow):
 
     def _refresh_page_nav_buttons(self) -> None:
         window_navigation.refresh_page_nav_buttons(self)
+
+    def _reset_page_history(self) -> None:
+        window_navigation.reset_page_history(self)
 
     def _on_page_carousel_selected(self, page: str) -> None:
         window_navigation.select_carousel_page(self, page)

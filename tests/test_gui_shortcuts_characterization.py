@@ -332,8 +332,8 @@ class TableShortcutTests(unittest.TestCase):
             self.assertIn(StagingColumn.TYPE, tab._visible_table_columns())
             self.assertIn(StagingColumn.PATH, tab._visible_table_columns())
         finally:
-            from PySide6.QtCore import QSettings
-            settings = QSettings("UmU", "Unshuffle")
+            from gui.core.settings_controller import create_app_settings
+            settings = create_app_settings()
             settings.remove("table_column_visible_TYPE")
             settings.remove("table_column_visible_user_set_TYPE")
             settings.remove("table_column_visible_PATH")

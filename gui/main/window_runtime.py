@@ -40,6 +40,8 @@ def apply_runtime_model(window, model) -> None:
         window.tagging_controller.clear_state()
     if getattr(window, "coherence_controller", None):
         window.coherence_controller.clear_state()
+    if model is not None and hasattr(window, "_reset_page_history"):
+        window._reset_page_history()
     maybe_refresh_library_map(window)
     maybe_schedule_startup_coherence(window)
 

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QPropertyAnimation, QEasingCurve, QTimer
 from ..utils.styles import apply_style, footer_base_style, footer_cta_button_style, footer_draft_label_style, scaled_px
 from ..utils.layout_helpers import apply_layout_margins
+from ..utils.platform_labels import file_manager_name
 from ..utils.widget_helpers import apply_fixed_height, apply_fixed_width
 from ..utils.constants import (
     FOOTER_CANCEL_BUTTON_WIDTH,
@@ -41,6 +42,7 @@ class ModernFooter(QFrame):
         self._docked_suppressed_visibility = {}
         self._status_text = "Ready"
         self._busy = False
+        self._progress_visible = False
         self._draft_visible = False
         self._tagging_visible = False
         self._coherence_label_visible = False
@@ -130,14 +132,14 @@ class ModernFooter(QFrame):
         self.btn_open_build_target = QPushButton("Open Target")
         self.btn_open_build_target.setProperty("role", "secondary")
         apply_style(self.btn_open_build_target, footer_cta_button_style("secondary"))
-        self.btn_open_build_target.setToolTip("Open the built library in Explorer")
+        self.btn_open_build_target.setToolTip(f"Open the built library in {file_manager_name()}")
         self.btn_open_build_target.setVisible(False)
         self.btn_open_build_target.clicked.connect(self.openBuildTargetRequested.emit)
 
         self.btn_open_build_source = QPushButton("Open Source")
         self.btn_open_build_source.setProperty("role", "secondary")
         apply_style(self.btn_open_build_source, footer_cta_button_style("secondary"))
-        self.btn_open_build_source.setToolTip("Open the source library in Explorer")
+        self.btn_open_build_source.setToolTip(f"Open the source library in {file_manager_name()}")
         self.btn_open_build_source.setVisible(False)
         self.btn_open_build_source.clicked.connect(self.openBuildSourceRequested.emit)
 
@@ -190,6 +192,8 @@ class ModernFooter(QFrame):
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
+        self._progress_animation = QPropertyAnimation(self.progress_bar, b"value", self)
+        self._progress_animation.setEasingCurve(QEasingCurve.Type.Linear)
         
         h_progress = QHBoxLayout()
         self._progress_row = h_progress
@@ -208,8 +212,46 @@ class ModernFooter(QFrame):
             self.log_output.append(f"[{datetime.now().strftime('%H:%M:%S')}] {text}")
 
     def set_progress(self, current, total):
-        self.progress_bar.setMaximum(total)
-        self.progress_bar.setValue(current)
+        try:
+            current_value = max(0, int(current or 0))
+            total_value = max(0, int(total or 0))
+        except (TypeError, ValueError):
+            current_value = 0
+            total_value = 0
+        if total_value <= 0:
+            self._progress_animation.stop()
+            self.progress_bar.setRange(0, 0)
+            self._progress_visible = False
+            self.progress_bar.setVisible(False)
+            return
+        self._progress_visible = True
+        self.progress_bar.setRange(0, 100)
+        percent = int(round((min(current_value, total_value) / total_value) * 100))
+        self._set_progress_value(percent)
+        self.progress_bar.setVisible(not self._docked_presentation)
+        if not self._busy:
+            self.toggle_footer(True)
+
+    def clear_progress(self) -> None:
+        self._progress_animation.stop()
+        self._progress_visible = False
+        if not self._busy:
+            self.progress_bar.setVisible(False)
+            self.toggle_footer(False)
+
+    def _set_progress_value(self, value: int) -> None:
+        target = max(0, min(100, int(value)))
+        current = self.progress_bar.value()
+        if current < 0 or target <= current:
+            self._progress_animation.stop()
+            self.progress_bar.setValue(target)
+            return
+
+        self._progress_animation.stop()
+        self._progress_animation.setStartValue(current)
+        self._progress_animation.setEndValue(target)
+        self._progress_animation.setDuration(max(120, (target - current) * 12))
+        self._progress_animation.start()
 
     def set_count(self, text):
         self.lbl_count.setText(text)
@@ -223,11 +265,15 @@ class ModernFooter(QFrame):
     def set_tagging_state(self, text, visible, can_filter=False):
         self._tagging_visible = bool(visible)
         self.lbl_tagging_status.setText(text)
+        if not visible or can_filter:
+            self.clear_progress()
         self._refresh_footer_presentation()
 
     def set_coherence_state(self, text, visible, can_review=False, can_build=False):
         self.lbl_coherence_status.setText(text)
         self._coherence_label_visible = bool(visible and not can_review and not can_build)
+        if not visible or can_review or can_build:
+            self.clear_progress()
         self._set_notification_visible(
             "review",
             bool(visible and can_review and not self._coherence_review_suppressed),
@@ -276,11 +322,14 @@ class ModernFooter(QFrame):
         self._busy = busy
         self.btn_reorg_discard.setEnabled(not busy)
         self.btn_reorg_save.setEnabled(not busy)
-        self.progress_bar.setVisible(busy)
+        if not busy:
+            self._progress_animation.stop()
+            self._progress_visible = False
+        self.progress_bar.setVisible(False)
         self.btn_cancel.setEnabled(busy)
         self.btn_cancel.setText("Cancel")
         self._refresh_footer_presentation()
-        self.toggle_footer(busy)
+        self.toggle_footer(False)
 
     def set_docked_presentation(self, enabled: bool) -> None:
         enabled = bool(enabled)
@@ -403,8 +452,8 @@ class ModernFooter(QFrame):
         self.lbl_build_handover.setVisible(self._build_handover_label_visible and not blocked)
         self.btn_reorg_discard.setVisible(self._draft_visible and not docked)
         self.btn_reorg_save.setVisible(self._draft_visible and not docked)
-        self.btn_cancel.setVisible(self._busy and not docked)
-        self.progress_bar.setVisible(self._busy and not docked)
+        self.btn_cancel.setVisible(False)
+        self.progress_bar.setVisible(self._progress_visible and not docked)
         for name, widget in self._notification_widgets.items():
             desired = bool(self._notification_desired.get(name, False))
             if name in self._timed_notifications and blocked:
@@ -432,7 +481,7 @@ class ModernFooter(QFrame):
             self.setMaximumHeight(target)
             if expand:
                 self.log_output.setVisible(False)
-                self.progress_bar.setVisible(self._busy and not self._docked_presentation)
+                self.progress_bar.setVisible(self._progress_visible and not self._docked_presentation)
             else:
                 self._finish_collapsed_state()
             return
@@ -440,7 +489,7 @@ class ModernFooter(QFrame):
         if self.height() == target:
             if expand:
                 self.log_output.setVisible(False)
-                self.progress_bar.setVisible(self._busy and not self._docked_presentation)
+                self.progress_bar.setVisible(self._progress_visible and not self._docked_presentation)
             if not expand:
                 self._finish_collapsed_state()
             return
@@ -471,7 +520,7 @@ class ModernFooter(QFrame):
         
         if expand:
             self.log_output.setVisible(False)
-            self.progress_bar.setVisible(self._busy and not self._docked_presentation)
+            self.progress_bar.setVisible(self._progress_visible and not self._docked_presentation)
         else:
             self._anim.finished.connect(self._on_collapsed)
 

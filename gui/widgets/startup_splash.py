@@ -18,7 +18,7 @@ class StartupSplash(QWidget):
     STATUS_BANNER_HEIGHT = 28
 
     def __init__(self):
-        super().__init__(None, Qt.SplashScreen | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        super().__init__(None, Qt.SplashScreen | Qt.FramelessWindowHint)
         apply_app_icon(self)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setFixedSize(scaled_px(356), scaled_px(316))

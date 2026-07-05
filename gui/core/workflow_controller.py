@@ -159,6 +159,7 @@ class WorkflowController(QObject):
         self.clear_build_handover_state()
         if getattr(self.app, "tagging_controller", None):
             self.app.tagging_controller.clear_state()
+        workflow_scan_finalization.clear_corrupt_filter_state(self.app)
         if getattr(self.app, "coherence_controller", None):
             self.app.coherence_controller.clear_state()
 
@@ -188,6 +189,9 @@ class WorkflowController(QObject):
 
         lib_hashes = set()
         existing_hashes = workflow_scan_start.existing_dedupe_keys(current_records, append=append)
+        use_operation_monitor = bool((self._pending_finalize_options or {}).get("use_operation_monitor", True))
+        if use_operation_monitor:
+            self._start_operation_monitor("Scanning Library", cancellable=True)
         started = self.worker_manager.start_scan(
             self._engine, 
             sources_paths, 
@@ -201,6 +205,7 @@ class WorkflowController(QObject):
         )
         if not started:
             self._pending_finalize_options = {}
+            self._fail_operation_monitor("Could not start scan.")
         return bool(started)
 
     def start_refresh(self, roots: list[Path]):
@@ -232,7 +237,11 @@ class WorkflowController(QObject):
 
     def start_undo(self, session_id: str, confirm_preserved: bool = False):
         self.clear_build_handover_state()
-        self.worker_manager.start_undo(session_id, confirm_preserved=confirm_preserved)
+        self._start_operation_monitor("Undoing Build", cancellable=True)
+        started = self.worker_manager.start_undo(session_id, confirm_preserved=confirm_preserved)
+        if not started:
+            self._fail_operation_monitor("Could not start undo.")
+        return started
 
     def _record_dedupe_key(self, rec):
         return record_dedupe_key(rec)
@@ -253,6 +262,7 @@ class WorkflowController(QObject):
             if options.get("restore_previous_session_on_cancel"):
                 if getattr(self.app, "footer", None) is not None:
                     self.app.footer.set_status("Refresh canceled. Restoring previous session...")
+                self._finish_operation_monitor("Refresh canceled.")
                 self.app._scan_finalizing = False
                 self.scanFinished.emit(stats)
                 self.restore_session()
@@ -261,6 +271,7 @@ class WorkflowController(QObject):
                 self._clear_workbench_for_cancelled_scan()
             if getattr(self.app, "footer", None) is not None:
                 self.app.footer.set_status("Scan canceled.")
+            self._finish_operation_monitor("Scan canceled.")
             self.app._scan_finalizing = False
             set_ui_busy(self.app, False)
             self.scanFinished.emit(stats)
@@ -274,6 +285,7 @@ class WorkflowController(QObject):
         options = self._pending_finalize_options or {}
         self._pending_finalize_options = {}
         options.pop("restore_previous_session_on_cancel", None)
+        options.pop("use_operation_monitor", None)
         options.setdefault("persist_staging", False)
         self.finalize_scan_data(new_records, is_append, stats, **options)
 
@@ -334,7 +346,36 @@ class WorkflowController(QObject):
         preview_player = getattr(audio_controller, "player", None)
         if preview_player is not None and hasattr(preview_player, "release"):
             preview_player.release()
-        self.worker_manager.start_commit(records, move, False, flat, no_px)
+        self._start_operation_monitor("Building Library", cancellable=True)
+        started = self.worker_manager.start_commit(records, move, False, flat, no_px)
+        if not started:
+            self._fail_operation_monitor("Could not start build.")
+        return started
+
+    def _start_operation_monitor(self, title: str, *, cancellable: bool = False) -> None:
+        monitor = getattr(self.app, "operation_monitor", None)
+        if monitor is None:
+            return
+        monitor.start(
+            title,
+            cancellable=cancellable,
+            on_cancel=self.worker_manager.request_cancel if cancellable else None,
+        )
+
+    def _update_operation_monitor(self, payload) -> None:
+        monitor = getattr(self.app, "operation_monitor", None)
+        if monitor is not None and getattr(monitor, "active", False):
+            monitor.update(payload)
+
+    def _finish_operation_monitor(self, text: str | None = None) -> None:
+        monitor = getattr(self.app, "operation_monitor", None)
+        if monitor is not None and getattr(monitor, "active", False):
+            monitor.finish(text)
+
+    def _fail_operation_monitor(self, message: str) -> None:
+        monitor = getattr(self.app, "operation_monitor", None)
+        if monitor is not None and getattr(monitor, "active", False):
+            monitor.fail(message)
 
     def clear_build_handover_state(self) -> None:
         workflow_handover.clear_build_handover_state(self)
@@ -388,7 +429,24 @@ class WorkflowController(QObject):
 
         self.app._scan_finalizing = True
         self.app.footer.set_busy_state(True)
-        self.app.footer.progress_bar.setRange(0, 0)
+        finalizing_total = 8
+
+        def _finalizing(step: int, message: str) -> None:
+            monitor = getattr(self.app, "operation_monitor", None)
+            if monitor is None or not getattr(monitor, "active", False):
+                self.app.footer.set_status(message)
+            self._update_operation_monitor(
+                {
+                    "phase": "Finalizing Scan",
+                    "message": message,
+                    "current": step,
+                    "total": finalizing_total,
+                }
+            )
+            if callable(status_callback):
+                status_callback(message)
+
+        _finalizing(0, "Finalizing scan...")
         if is_append and self.app.model:
             self.app.model.beginResetModel()
             self.app.model.records.extend(new_records)
@@ -407,18 +465,21 @@ class WorkflowController(QObject):
                 defer_background_work=defer_background_work,
             )
 
+        _finalizing(1, "Preparing session model...")
         workflow_scan_finalization.refresh_library_sources_and_suggestions(self.app)
+        _finalizing(2, "Refreshing library sources...")
             
         stats = workflow_scan_finalization.normalized_scan_stats(stats, new_records, scan_category_counts)
         self._last_scan_stats = stats
         self.app.footer.set_count(f"{len(self.app.model.records)} files ready")
 
         workflow_scan_finalization.update_corrupt_filter_state(self.app)
+        _finalizing(3, "Refreshing scan filters...")
 
-        self.app.footer.set_status("Finalizing scan...")
         if callable(summary_callback):
             summary_callback(stats)
         self.app.library_tab._refresh_search_button_state()
+        _finalizing(4, "Preparing library controls...")
 
         def _ready() -> None:
             self.app._scan_finalizing = False
@@ -428,13 +489,16 @@ class WorkflowController(QObject):
             if show_summary:
                 if hasattr(self.app.footer, "show_scan_summary_button"):
                     self.app.footer.show_scan_summary_button()
+            self._finish_operation_monitor("Scan complete.")
             if callable(on_ready):
                 on_ready()
 
         def _finish_scan_ui():
             try:
+                _finalizing(5, "Preparing enabled views...")
                 if not defer_background_work or not getattr(self.app, "_view_headers_initialized", False):
                     ui_helpers.setup_view_headers(self.app)
+                _finalizing(6, "Saving staged session...")
                 if persist_staging:
                     finalize_model_mutation(self.app, resort=True, refresh_search=False, tree_delay_ms=60)
                 else:
@@ -453,6 +517,7 @@ class WorkflowController(QObject):
                         workflow_session_persistence.persist_scan_session(self.app.settings, self.app.engine)
                     except Exception:
                         logging.exception("Failed to persist launcher last choice after scan.")
+                _finalizing(7, "Preparing background checks...")
 
                 if schedule_background_work:
                     if callable(on_background_work_start):
@@ -463,10 +528,12 @@ class WorkflowController(QObject):
                         status_callback=status_callback,
                     )
                 else:
+                    _finalizing(8, "Finalized scan.")
                     self.app._scan_finalizing = False
                     _ready()
             except Exception:
                 self.app._scan_finalizing = False
+                self._fail_operation_monitor("Scan finalization failed.")
                 raise
 
         QTimer.singleShot(0, _finish_scan_ui)
@@ -486,7 +553,10 @@ class WorkflowController(QObject):
         should_auto_check = getattr(self.app, "_should_auto_check_coherence_on_start", lambda: False)
 
         def _status(text: str) -> None:
-            self.app.footer.set_status(text)
+            monitor = getattr(self.app, "operation_monitor", None)
+            if monitor is None or not getattr(monitor, "active", False):
+                self.app.footer.set_status(text)
+            self._update_operation_monitor({"message": text})
             if callable(status_callback):
                 status_callback(text)
 
@@ -532,7 +602,11 @@ class WorkflowController(QObject):
                 _run_coherence()
 
             tagging.taggingFinished.connect(_after_tagging)
-            tagging.start_tagging_pass(schedule_coherence=False)
+            monitor = getattr(self.app, "operation_monitor", None)
+            tagging.start_tagging_pass(
+                schedule_coherence=False,
+                quiet=bool(defer_background_work and not getattr(monitor, "active", False)),
+            )
 
         delay_ms = 500 if defer_background_work else 0
         QTimer.singleShot(delay_ms, _run_tagging)
@@ -547,6 +621,11 @@ class WorkflowController(QObject):
             workflow_build_completion.apply_default_move_flag(res, opts)
             workflow_build_completion.apply_retry_display_counts(res, opts)
         error = res.get("error") if isinstance(res, dict) else None
+        self._finish_operation_monitor(
+            "Build canceled." if isinstance(res, dict) and res.get("cancelled") else
+            "Build needs attention." if error else
+            "Build complete."
+        )
         summary = build_result_summary(res) if isinstance(res, dict) else ""
         summary_lines = build_result_compact_lines(res) if isinstance(res, dict) and error else build_result_lines(res) if isinstance(res, dict) else [summary]
         committed_count = 0
@@ -662,6 +741,7 @@ class WorkflowController(QObject):
     def handle_undo_finished(self, res):
         from PySide6.QtWidgets import QMessageBox
         if isinstance(res, dict) and res.get("requires_preserved_confirmation"):
+            self._finish_operation_monitor("Undo needs confirmation.")
             items = res.get("items") or []
             details = []
             for item in items[:5]:
@@ -689,6 +769,7 @@ class WorkflowController(QObject):
             return res
 
         error = res.get("error") if isinstance(res, dict) else None
+        self._finish_operation_monitor("Undo needs attention." if error else "Undo complete.")
         rollback = getattr(self, "_cancelled_build_rollback", None)
         rollback_matches = workflow_undo_completion.rollback_matches_result(rollback, res)
         if error:

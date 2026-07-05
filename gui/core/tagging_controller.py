@@ -24,8 +24,9 @@ class TaggingController(QObject):
         self._active_worker = None
         self._running_workers = set()
         self._last_duplicate_count = 0
+        self._quiet_requests: set[int] = set()
 
-    def start_tagging_pass(self, *, schedule_coherence: bool = True) -> None:
+    def start_tagging_pass(self, *, schedule_coherence: bool = True, quiet: bool = False) -> None:
         if not getattr(self.app, "model", None):
             if schedule_coherence and getattr(self.app, "coherence_controller", None):
                 self.app.coherence_controller.schedule_after_render()
@@ -61,7 +62,10 @@ class TaggingController(QObject):
 
         self._request_id += 1
         request_id = self._request_id
-        self.app.footer.set_tagging_state("Checking possible duplicates...", True, can_filter=False)
+        if quiet:
+            self._quiet_requests.add(request_id)
+        elif getattr(self.app, "footer", None):
+            self.app.footer.set_tagging_state("Checking possible duplicates...", True, can_filter=False)
 
         from .workers import TaggingWorker
 
@@ -71,27 +75,54 @@ class TaggingController(QObject):
 
         def _finished(payload: dict) -> None:
             self._running_workers.discard(worker)
+            is_quiet = request_id in self._quiet_requests
+            self._quiet_requests.discard(request_id)
             if payload.get("request_id") != self._request_id:
                 self.taggingFinished.emit()
                 return
-            self.apply_tagging_result(payload, schedule_coherence=schedule_coherence)
+            self.apply_tagging_result(payload, schedule_coherence=schedule_coherence, quiet=is_quiet)
 
         def _error(message: str) -> None:
             self._running_workers.discard(worker)
+            self._quiet_requests.discard(request_id)
             if request_id != self._request_id:
                 self.taggingFinished.emit()
                 return
-            self.app.footer.set_tagging_state("", False)
-            self.app.footer.set_status(f"Tagging failed: {message}")
+            if getattr(self.app, "footer", None):
+                self.app.footer.set_tagging_state("", False)
+                if not quiet:
+                    self.app.footer.set_status(f"Tagging failed: {message}")
             if schedule_coherence and getattr(self.app, "coherence_controller", None):
                 self.app.coherence_controller.schedule_after_render()
             self.taggingFinished.emit()
 
         worker.finished.connect(_finished)
         worker.finished.connect(worker.deleteLater)
+        worker.progress.connect(self._handle_progress)
         worker.error.connect(_error)
         worker.error.connect(worker.deleteLater)
         worker.start()
+
+    def _handle_progress(self, payload: dict) -> None:
+        request_id = int(payload.get("request_id") or self._request_id or 0) if isinstance(payload, dict) else self._request_id
+        if request_id in self._quiet_requests:
+            return
+        footer = getattr(self.app, "footer", None)
+        monitor = getattr(self.app, "operation_monitor", None)
+        if monitor is not None and getattr(monitor, "active", False):
+            monitor.update(payload)
+            return
+        if footer is None:
+            return
+        from unshuffle.core.progress import progress_message
+
+        status_text = progress_message(payload)
+        if status_text:
+            footer.set_status(status_text)
+        if "current" in payload and "total" in payload:
+            footer.set_progress(payload["current"], payload["total"])
+        elif "percent" in payload:
+            footer.set_progress(int(payload["percent"]), 100)
 
     def clear_state(self) -> None:
         self._request_id += 1
@@ -103,7 +134,7 @@ class TaggingController(QObject):
         if getattr(self.app, "filter_controller", None):
             self.app.filter_controller.refresh_dock_filters()
 
-    def apply_tagging_result(self, payload: dict, *, schedule_coherence: bool = True) -> None:
+    def apply_tagging_result(self, payload: dict, *, schedule_coherence: bool = True, quiet: bool = False) -> None:
         model = getattr(self.app, "model", None)
         if model is None:
             self.taggingFinished.emit()
@@ -152,11 +183,12 @@ class TaggingController(QObject):
             self.app.library_tab.set_possible_duplicate_filter_enabled(bool(duplicate_count))
         if getattr(self.app, "filter_controller", None):
             self.app.filter_controller.refresh_dock_filters()
-        self.app.footer.set_tagging_state(
-            summary,
-            bool(duplicate_count),
-            can_filter=bool(duplicate_count),
-        )
+        if getattr(self.app, "footer", None):
+            self.app.footer.set_tagging_state(
+                "" if quiet else summary,
+                False if quiet else bool(duplicate_count),
+                can_filter=False if quiet else bool(duplicate_count),
+            )
         request_id = self._request_id
         if duplicate_count:
             QTimer.singleShot(5000, lambda: self._hide_tagging_notice(request_id))

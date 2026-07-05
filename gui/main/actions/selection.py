@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QInputDialog, QMessageBox
 from unshuffle.core.constants import CATEGORIES
 
 from ...utils import ui_helpers
+from ...utils.platform_labels import view_in_file_manager_label
 
 
 def refresh_selection_menu(app):
@@ -24,7 +25,7 @@ def refresh_selection_menu(app):
     act_preview.setEnabled(not busy)
     app.custom_menu_bar.menu_selection.addAction(act_preview)
 
-    act_explorer = QAction("Show in Explorer", app)
+    act_explorer = QAction(view_in_file_manager_label(), app)
     act_explorer.setShortcut("Ctrl+E")
     act_explorer.triggered.connect(lambda checked=False: open_selection_in_explorer(app))
     act_explorer.setEnabled(not busy)

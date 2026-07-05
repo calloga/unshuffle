@@ -42,6 +42,9 @@ def record_current_page(window) -> None:
     key = window._current_page_key()
     if key is None:
         return
+    if key == ("dock", None):
+        window._refresh_page_nav_buttons()
+        return
     window._page_history, window._page_history_index, changed = record_page_history(
         window._page_history,
         window._page_history_index,
@@ -66,6 +69,12 @@ def refresh_page_nav_buttons(window) -> None:
         window.page_carousel.set_current_value(page)
         window.page_carousel.blockSignals(False)
         window._style_page_carousel()
+
+
+def reset_page_history(window) -> None:
+    window._page_history = []
+    window._page_history_index = -1
+    window._record_current_page()
 
 
 def select_carousel_page(window, page: str) -> None:

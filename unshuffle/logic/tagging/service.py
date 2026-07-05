@@ -6,11 +6,12 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from ...core.assets import asset_path
 from ...core.features import calculate_similarity_distance, vector_from_blob
 from ...core.models import PlanRecord
+from ...core.progress import PhaseProgress
 from ...core.tags import normalize_tags
 from ...core.tokenizer import tokenize
 
@@ -64,6 +65,7 @@ def compute_tagging_pass(
     include_genres: bool = True,
     duplicate_threshold: float = DEFAULT_DUPLICATE_DISTANCE,
     duration_window_seconds: float = DEFAULT_DURATION_WINDOW_SECONDS,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> TaggingPassResult:
     """Compute generated secondary tags without mutating classification data."""
     candidates = load_genre_candidates(genre_metadata_path or GENRE_RELATIONSHIPS_PATH) if include_genres else []
@@ -72,6 +74,7 @@ def compute_tagging_pass(
         records,
         duplicate_threshold=duplicate_threshold,
         duration_window_seconds=duration_window_seconds,
+        progress_callback=progress_callback,
     )
 
     tags_by_path: dict[str, set[str]] = defaultdict(set)
@@ -144,21 +147,43 @@ def find_possible_duplicates(
     *,
     duplicate_threshold: float = DEFAULT_DUPLICATE_DISTANCE,
     duration_window_seconds: float = DEFAULT_DURATION_WINDOW_SECONDS,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> list[DuplicateMatch]:
     buckets: dict[tuple[int, tuple[float, ...]], list[tuple[str, list[float], float]]] = defaultdict(list)
-    for rec in records:
+    bucket_progress = PhaseProgress(
+        progress_callback,
+        "Checking Possible Duplicates",
+        total=len(records),
+        message="Preparing possible duplicate groups...",
+        update_every=500,
+    )
+    bucket_progress.emit(0, force=True)
+    for index, rec in enumerate(records, 1):
         if _is_non_audio(rec):
+            bucket_progress.emit(index)
             continue
         vec = vector_from_blob(getattr(rec, "feature_vector", None) or getattr(rec, "acoustic_vector", None))
         if not vec:
+            bucket_progress.emit(index)
             continue
         duration = _vector_duration(vec, getattr(rec, "duration", 0.0))
         bucket = (_duration_bucket(duration, duration_window_seconds), _vector_signature(vec))
         buckets[bucket].append((_path_key(rec), vec, duration))
+        bucket_progress.emit(index)
+    bucket_progress.emit(len(records), force=True)
 
     matches: list[DuplicateMatch] = []
-    for entries in buckets.values():
+    compare_progress = PhaseProgress(
+        progress_callback,
+        "Checking Possible Duplicates",
+        total=max(1, len(buckets)),
+        message=f"Checking {len(buckets)} possible duplicate groups...",
+        update_every=100,
+    )
+    compare_progress.emit(0, force=True)
+    for bucket_index, entries in enumerate(buckets.values(), 1):
         if len(entries) < 2:
+            compare_progress.emit(bucket_index)
             continue
         entries = sorted(entries, key=lambda item: item[0])
         for left_index, (left_path, left_vec, left_duration) in enumerate(entries[:-1]):
@@ -173,6 +198,8 @@ def find_possible_duplicates(
                 )
                 if math.isfinite(distance) and distance <= duplicate_threshold:
                     matches.append(DuplicateMatch(left_path, right_path, round(distance, 6)))
+        compare_progress.emit(bucket_index)
+    compare_progress.emit(max(1, len(buckets)), force=True)
     return sorted(matches, key=lambda item: (item.left_path, item.right_path))
 
 

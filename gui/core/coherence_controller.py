@@ -84,6 +84,10 @@ class CoherenceController(QObject):
         self._request_id += 1
         request_id = self._request_id
         self._check_modes[request_id] = mode
+        if mode in {"manual", "continuous"}:
+            monitor = getattr(self.app, "operation_monitor", None)
+            if monitor is not None and not getattr(monitor, "active", False):
+                monitor.start("Checking Library", cancellable=False)
         self.app.footer.set_coherence_state("Checking library coherence...", True, can_review=False)
 
         from .workers import CoherenceWorker
@@ -107,13 +111,35 @@ class CoherenceController(QObject):
             self._check_modes.pop(request_id, None)
             self.app.footer.set_coherence_state("", False)
             self.app.footer.set_status(f"Coherence audit failed: {message}")
+            monitor = getattr(self.app, "operation_monitor", None)
+            if monitor is not None and getattr(monitor, "active", False) and not getattr(self.app, "_scan_finalizing", False):
+                monitor.fail(f"Coherence audit failed: {message}")
             self.coherenceFinished.emit()
 
         worker.finished.connect(_finished)
         worker.finished.connect(worker.deleteLater)
+        worker.progress.connect(self._handle_progress)
         worker.error.connect(_error)
         worker.error.connect(worker.deleteLater)
         worker.start()
+
+    def _handle_progress(self, payload: dict) -> None:
+        footer = getattr(self.app, "footer", None)
+        monitor = getattr(self.app, "operation_monitor", None)
+        if monitor is not None and getattr(monitor, "active", False):
+            monitor.update(payload)
+            return
+        if footer is None:
+            return
+        from unshuffle.core.progress import progress_message
+
+        status_text = progress_message(payload)
+        if status_text:
+            footer.set_status(status_text)
+        if "current" in payload and "total" in payload:
+            footer.set_progress(payload["current"], payload["total"])
+        elif "percent" in payload:
+            footer.set_progress(int(payload["percent"]), 100)
 
     def start_continuous_refinement(self) -> None:
         if self._running_workers:
@@ -125,6 +151,9 @@ class CoherenceController(QObject):
     def apply_coherence_result(self, payload: dict, *, mode: str = "background") -> None:
         if not payload.get("ran"):
             self.app.footer.set_coherence_state(str(payload.get("reason") or ""), False)
+            monitor = getattr(self.app, "operation_monitor", None)
+            if monitor is not None and getattr(monitor, "active", False) and not getattr(self.app, "_scan_finalizing", False):
+                monitor.finish(str(payload.get("reason") or "Coherence check complete."))
             self.coherenceFinished.emit()
             return
         auto_count = int(payload.get("auto_staged_candidate_count") or 0)
@@ -149,6 +178,9 @@ class CoherenceController(QObject):
         self._refresh_analyzer_page()
         if getattr(self.app, "view_controller", None):
             self.app.view_controller.prewarm_library_map(delay_ms=250)
+        monitor = getattr(self.app, "operation_monitor", None)
+        if monitor is not None and getattr(monitor, "active", False) and not getattr(self.app, "_scan_finalizing", False):
+            monitor.finish("Coherence check complete.")
         self.coherenceFinished.emit()
 
     def review_refinements(self, *, continuous: bool = False) -> None:

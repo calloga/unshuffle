@@ -51,8 +51,8 @@ from ..utils.constants import (
 POSSIBLE_DUPLICATE_FILTER_NAME = "Possible duplicates"
 POSSIBLE_DUPLICATE_FILTER_QUERY = 'tag:"possibleduplicate"'
 
-CORRUPT_SILENT_EMPTY_FILTER_NAME = "Corrupt / Silent / Empty"
-CORRUPT_SILENT_EMPTY_FILTER_QUERY = 'tag:"Silent" OR tag:"Empty" OR tag:"Corrupted"'
+CORRUPT_SILENT_EMPTY_FILTER_NAME = "Corrupt / Silent / Empty / Duplicate"
+CORRUPT_SILENT_EMPTY_FILTER_QUERY = 'tag:"Silent" OR tag:"Empty" OR tag:"Corrupted" OR tag:"duplicate"'
 
 class SignalFloorControl(QFrame):
     """

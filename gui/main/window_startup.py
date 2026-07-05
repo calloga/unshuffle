@@ -94,7 +94,7 @@ def frontload_startup(window, status_callback=None, done_callback=None) -> None:
             coherence.start_coherence_audit(mode="background")
 
         tagging.taggingFinished.connect(_after_tagging)
-        tagging.start_tagging_pass(schedule_coherence=False)
+        tagging.start_tagging_pass(schedule_coherence=False, quiet=True)
 
     def _prepare_final_map() -> None:
         write_launcher_event_log("frontload-prepare-final-map")

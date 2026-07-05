@@ -5,6 +5,7 @@ from collections import Counter
 from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from unshuffle.core.paths import DB_FILE_NAME, SYSTEM_FOLDER_NAME
+from unshuffle.core.progress import PhaseProgress
 from ..models.library_tree import active_tree_levels_for_sort, build_tree_payload
 from .search_engine import SearchEngine
 
@@ -127,10 +128,17 @@ class ScanWorker(QThread):
             
             from .workflow_records import dedupe_plan_records, scan_duplicate_stats
             from .workflow_controller import scan_category_counts
-            
+            duplicate_progress = PhaseProgress(
+                self.engine.progress_callback,
+                "Finding Duplicates",
+                total=max(1, len(plan)),
+                message="Finding duplicates...",
+            )
+            duplicate_progress.emit(0, force=True)
             new_records, lib_dupe_count, session_dupe_count = dedupe_plan_records(
                 plan, self.existing_hashes, self.lib_hashes
             )
+            duplicate_progress.emit(max(1, len(plan)), force=True)
             stats = scan_duplicate_stats(plan, new_records, lib_dupe_count, session_dupe_count)
             stats["category_counts"] = scan_category_counts(plan)
             
@@ -142,6 +150,14 @@ class ScanWorker(QThread):
                 db_conn = get_db(self.engine.target_dir)
                 owns_db_conn = True
             try:
+                session_progress = PhaseProgress(
+                    self.engine.progress_callback,
+                    "Creating Session",
+                    total=6,
+                    message="Creating session...",
+                    update_every=1,
+                )
+                session_progress.emit(0, force=True)
                 source_dir = self.sources[0] if self.sources else self.engine.target_dir
                 db_conn.register_session(
                     self.engine.session_id,
@@ -149,9 +165,12 @@ class ScanWorker(QThread):
                     target=self.engine.target_dir,
                     mode="pending"
                 )
+                session_progress.emit(1)
                 db_conn.clear_staging(self.engine.session_id)
+                session_progress.emit(2)
                 if hasattr(db_conn, "ensure_verified_anchors_for_session"):
                     db_conn.ensure_verified_anchors_for_session(self.engine.session_id)
+                session_progress.emit(3)
                 from gui.utils.state import build_staging_rows
                 all_records = list(self.current_records) + new_records if self.append else new_records
                 if hasattr(db_conn, "list_coherence_review_decisions"):
@@ -160,14 +179,17 @@ class ScanWorker(QThread):
                     applied_count = apply_target_review_decisions(db_conn, all_records)
                     if applied_count and hasattr(self.engine, "log"):
                         self.engine.log(f"Applied {applied_count} remembered outlier review field change(s).")
+                session_progress.emit(4)
                 rows = build_staging_rows(all_records)
                 if rows:
                     db_conn.add_staging_records_bulk(self.engine.session_id, rows)
+                session_progress.emit(5)
                 try:
                     if hasattr(db_conn, "prune_ephemeral_state"):
                         db_conn.prune_ephemeral_state({self.engine.session_id}, target_root=self.engine.target_dir)
                 except Exception:
                     logging.debug("Post-scan database maintenance skipped.", exc_info=True)
+                session_progress.emit(6, force=True)
             finally:
                 if owns_db_conn:
                     db_conn.close()
@@ -374,6 +396,7 @@ class SimilarityWorker(QThread):
 
 class TaggingWorker(QThread):
     """Computes secondary generated tags without blocking the library UI."""
+    progress = Signal(dict)
     finished = Signal(dict)
     error = Signal(str)
 
@@ -387,7 +410,11 @@ class TaggingWorker(QThread):
         try:
             from unshuffle.logic.tagging import compute_tagging_pass
 
-            result = compute_tagging_pass(self.records, include_genres=False)
+            result = compute_tagging_pass(
+                self.records,
+                include_genres=False,
+                progress_callback=lambda payload: self.progress.emit(payload),
+            )
             self.finished.emit(
                 {
                     "request_id": self.request_id,
@@ -410,6 +437,7 @@ class TaggingWorker(QThread):
 
 class CoherenceWorker(QThread):
     """Runs the post-classification coherence audit without blocking the UI."""
+    progress = Signal(dict)
     finished = Signal(dict)
     error = Signal(str)
 
@@ -425,7 +453,12 @@ class CoherenceWorker(QThread):
         try:
             from unshuffle.logic.coherence import run_coherence_audit
 
-            summary = run_coherence_audit(self.db, self.session_id, force=self.force)
+            summary = run_coherence_audit(
+                self.db,
+                self.session_id,
+                force=self.force,
+                progress_callback=lambda payload: self.progress.emit(payload),
+            )
             self.finished.emit(
                 {
                     "request_id": self.request_id,

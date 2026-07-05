@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer, Qt
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout, QWidget
 
 from ..utils.app_icon import apply_app_icon
 from ..utils.layout_helpers import apply_layout_margins, apply_layout_spacing
@@ -11,17 +11,17 @@ from ..utils.styles import ColorPalette, apply_style, button_style, scaled_px
 from unshuffle.core.progress import format_eta
 
 
-class StartupScanMonitor(QWidget):
-    """Small, normal window used while a scan-heavy launch is still running."""
+class OperationMonitorDialog(QDialog):
+    """Application-modal, non-blocking monitor for in-app long operations."""
 
-    def __init__(self):
-        super().__init__(None, Qt.Window | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowMinimizeButtonHint)
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Working")
+        self.setWindowModality(Qt.ApplicationModal)
         self.setAttribute(Qt.WA_StyledBackground, True)
         apply_app_icon(self)
-        self.setWindowTitle("Unshuffle scan")
         self.setFixedSize(scaled_px(420), scaled_px(176))
-        self._background_close_handler: Callable[[], bool] | None = None
-        self._background_minimize_handler: Callable[[], bool] | None = None
+        self._active = True
         self._cancel_handler: Callable[[], None] | None = None
         self._last_phase = ""
         self._phase_transition_id = 0
@@ -31,15 +31,15 @@ class StartupScanMonitor(QWidget):
         apply_layout_margins(layout, (scaled_px(16), scaled_px(14), scaled_px(16), scaled_px(14)))
         apply_layout_spacing(layout, scaled_px(8))
 
-        title_row = QHBoxLayout()
-        apply_layout_margins(title_row, (0, 0, 0, 0))
-        apply_layout_spacing(title_row, scaled_px(8))
-        self.title_label = QLabel("Preparing Scan")
-        self.title_label.setObjectName("StartupScanMonitorTitle")
-        title_row.addWidget(self.title_label, 1)
+        self.title_label = QLabel("Working")
+        self.title_label.setObjectName("OperationMonitorTitle")
 
-        self.status_label = QLabel("Preparing scan...")
-        self.status_label.setWordWrap(True)
+        self.phase_label = QLabel("")
+        self.phase_label.setObjectName("OperationMonitorPhase")
+
+        self.detail_label = QLabel("")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setVisible(False)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
@@ -48,34 +48,51 @@ class StartupScanMonitor(QWidget):
         self._progress_animation = QPropertyAnimation(self.progress, b"value", self)
         self._progress_animation.setEasingCurve(QEasingCurve.Type.Linear)
 
-        self.eta_label = QLabel("Remaining Time: --")
-        self.eta_label.setObjectName("StartupScanMonitorEta")
+        self.eta_label = QLabel("")
+        self.eta_label.setObjectName("OperationMonitorEta")
         self.eta_label.setVisible(False)
 
         button_row = QHBoxLayout()
-        self.button_row = button_row
         apply_layout_margins(button_row, (0, 0, 0, 0))
         apply_layout_spacing(button_row, scaled_px(8))
         button_row.addStretch(1)
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setObjectName("danger")
-        self.btn_cancel.clicked.connect(self.cancel_scan)
+        self.btn_cancel.clicked.connect(self._on_cancel)
         button_row.addWidget(self.btn_cancel, 0)
-        self.btn_minimize = QPushButton("Minimize")
-        self.btn_minimize.setObjectName("primary")
-        self.btn_minimize.clicked.connect(self.minimize_to_background)
-        self.btn_minimize.setVisible(False)
-        button_row.addWidget(self.btn_minimize, 0)
 
-        layout.addLayout(title_row)
-        layout.addWidget(self.status_label)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.phase_label)
+        layout.addWidget(self.detail_label)
         layout.addWidget(self.progress)
         layout.addWidget(self.eta_label)
         layout.addLayout(button_row)
 
         self.refresh_theme()
 
-    def set_status(self, payload) -> None:
+    def start(self, title: str, *, cancellable: bool = False, on_cancel: Callable[[], None] | None = None) -> None:
+        self._active = True
+        self._cancel_handler = on_cancel
+        self._last_phase = ""
+        self._phase_transition_id += 1
+        self._applying_deferred_phase = False
+        self.title_label.setText(title or "Working")
+        self.phase_label.setText("")
+        self.detail_label.setText("")
+        self.detail_label.setVisible(False)
+        self.eta_label.setText("")
+        self.eta_label.setVisible(False)
+        self.btn_cancel.setVisible(bool(cancellable))
+        self.btn_cancel.setEnabled(bool(cancellable))
+        self.btn_cancel.setText("Cancel")
+        self._progress_animation.stop()
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("")
+
+    def set_status(self, text: str) -> None:
+        self.update_progress({"message": text})
+
+    def update_progress(self, payload) -> None:
         text = ""
         phase = ""
         value = None
@@ -83,8 +100,6 @@ class StartupScanMonitor(QWidget):
         if isinstance(payload, dict):
             phase = str(payload.get("phase") or "").strip()
             text = str(payload.get("message") or payload.get("status") or payload.get("text") or "")
-            current = payload.get("current")
-            total = payload.get("total")
             if phase:
                 if phase != self._last_phase:
                     phase_changed = True
@@ -94,7 +109,7 @@ class StartupScanMonitor(QWidget):
                     self._progress_animation.stop()
                     self.progress.setValue(0)
                 self._last_phase = phase
-                self.title_label.setText(phase)
+                self.phase_label.setText(phase)
             eta_text = format_eta(payload.get("eta_seconds"))
             self.eta_label.setText(f"Remaining Time: {eta_text}" if eta_text else "")
             self.eta_label.setVisible(bool(eta_text))
@@ -114,13 +129,15 @@ class StartupScanMonitor(QWidget):
                 value = None
         else:
             text = str(payload or "")
+
         if text:
             if phase and self._status_repeats_phase(text, phase):
-                self.status_label.setText("")
-                self.status_label.setVisible(False)
+                self.detail_label.setText("")
+                self.detail_label.setVisible(False)
             else:
-                self.status_label.setText(text)
-                self.status_label.setVisible(True)
+                self.detail_label.setText(text)
+                self.detail_label.setVisible(True)
+
         if value is None or value < 0:
             self._progress_animation.stop()
             self.progress.setRange(0, 0)
@@ -129,43 +146,28 @@ class StartupScanMonitor(QWidget):
             self.progress.setRange(0, 100)
             self._set_progress_value(value, snap=phase_changed)
             self.progress.setFormat("%p%")
-        self._refresh_monitor_height()
 
-    def _refresh_monitor_height(self) -> None:
-        has_detail = not self.status_label.isHidden()
-        has_eta = not self.eta_label.isHidden()
-        height = 176 if has_detail and has_eta else 162 if has_detail or has_eta else 144
-        self.setFixedHeight(scaled_px(height))
+    def finish(self, text: str | None = None) -> None:
+        self._active = False
+        self._progress_animation.stop()
+        if text:
+            self.detail_label.setText(text)
+            self.detail_label.setVisible(True)
+        self.accept()
+
+    def fail(self, message: str) -> None:
+        self._active = False
+        self._progress_animation.stop()
+        self.detail_label.setText(message or "Operation failed.")
+        self.detail_label.setVisible(True)
+        self.reject()
 
     @staticmethod
     def _status_repeats_phase(text: str, phase: str) -> bool:
         def normalize(value: str) -> str:
             return "".join(char.lower() for char in value if char.isalnum())
 
-        normalized_text = normalize(text)
-        normalized_phase = normalize(phase)
-        return bool(normalized_phase and normalized_text == normalized_phase)
-
-    def _set_progress_value(
-        self,
-        value: int,
-        *,
-        snap: bool = False,
-        min_duration: int = 120,
-        ms_per_percent: int = 12,
-    ) -> None:
-        target = max(0, min(100, int(value)))
-        current = self.progress.value()
-        if snap or current < 0 or target <= current:
-            self._progress_animation.stop()
-            self.progress.setValue(target)
-            return
-
-        self._progress_animation.stop()
-        self._progress_animation.setStartValue(current)
-        self._progress_animation.setEndValue(target)
-        self._progress_animation.setDuration(max(min_duration, (target - current) * ms_per_percent))
-        self._progress_animation.start()
+        return bool(normalize(phase) and normalize(text) == normalize(phase))
 
     def _should_defer_phase_change(self) -> bool:
         return (
@@ -183,55 +185,44 @@ class StartupScanMonitor(QWidget):
         self._set_progress_value(100, min_duration=80, ms_per_percent=6)
 
         def _apply_deferred() -> None:
-            if transition_id != self._phase_transition_id:
+            if transition_id != self._phase_transition_id or not self._active:
                 return
             self._applying_deferred_phase = True
             try:
-                self.set_status(payload)
+                self.update_progress(payload)
             finally:
                 self._applying_deferred_phase = False
 
         QTimer.singleShot(duration, _apply_deferred)
 
-    def show_near_center(self) -> None:
-        screen = self.screen()
-        if screen is None:
-            from PySide6.QtWidgets import QApplication
-
-            screen = QApplication.primaryScreen()
-        if screen is not None:
-            geo = screen.availableGeometry()
-            self.move(geo.center().x() - self.width() // 2, geo.center().y() - self.height() // 2)
-        self.show()
-
-    def set_background_close_handler(self, handler: Callable[[], bool] | None) -> None:
-        self._background_close_handler = handler
-
-    def set_background_minimize_handler(self, handler: Callable[[], bool] | None) -> None:
-        self._background_minimize_handler = handler
-        self.btn_minimize.setVisible(handler is not None)
-
-    def set_cancel_handler(self, handler: Callable[[], None] | None) -> None:
-        self._cancel_handler = handler
-
-    def cancel_scan(self) -> None:
+    def _set_progress_value(
+        self,
+        value: int,
+        *,
+        snap: bool = False,
+        min_duration: int = 120,
+        ms_per_percent: int = 12,
+    ) -> None:
+        target = max(0, min(100, int(value)))
+        current = self.progress.value()
+        if snap or current < 0 or target <= current:
+            self._progress_animation.stop()
+            self.progress.setValue(target)
+            return
         self._progress_animation.stop()
+        self._progress_animation.setStartValue(current)
+        self._progress_animation.setEndValue(target)
+        self._progress_animation.setDuration(max(min_duration, (target - current) * ms_per_percent))
+        self._progress_animation.start()
+
+    def _on_cancel(self) -> None:
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.setText("Stopping")
-        self.status_label.setText("Canceling scan...")
-        self.status_label.setVisible(True)
-        self.eta_label.setText("")
-        self.eta_label.setVisible(False)
         if self._cancel_handler is not None:
             self._cancel_handler()
 
-    def minimize_to_background(self) -> None:
-        if self._background_minimize_handler is not None and self._background_minimize_handler():
-            return
-        self.showMinimized()
-
     def closeEvent(self, event) -> None:
-        if self._background_close_handler is not None and self._background_close_handler():
+        if self._active:
             event.ignore()
             return
         super().closeEvent(event)
@@ -240,7 +231,7 @@ class StartupScanMonitor(QWidget):
         apply_style(
             self,
             f"""
-            QWidget {{
+            QDialog {{
                 background: {ColorPalette.BG_DARK};
                 color: {ColorPalette.TEXT_LIGHT};
                 border: none;
@@ -249,11 +240,15 @@ class StartupScanMonitor(QWidget):
                 background: transparent;
                 border: none;
             }}
-            QLabel#StartupScanMonitorTitle {{
+            QLabel#OperationMonitorTitle {{
                 color: {ColorPalette.TEXT_LIGHT};
                 font-weight: 700;
             }}
-            QLabel#StartupScanMonitorEta {{
+            QLabel#OperationMonitorPhase {{
+                color: {ColorPalette.TEXT_LIGHT};
+                font-weight: 600;
+            }}
+            QLabel#OperationMonitorEta {{
                 color: {ColorPalette.TEXT_DIM};
             }}
             {button_style("primary", size="normal")}
@@ -281,4 +276,4 @@ class StartupScanMonitor(QWidget):
             }}
             """
         )
-        apply_style(self.status_label, f"color: {ColorPalette.TEXT_MUTED};")
+        apply_style(self.detail_label, f"color: {ColorPalette.TEXT_MUTED};")

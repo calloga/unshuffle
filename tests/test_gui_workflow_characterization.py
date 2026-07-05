@@ -170,7 +170,7 @@ class MainWindowDebounceTests(unittest.TestCase):
         self.assertEqual(request.roots, ("D:/Music/Drum Kits",))
         close_qt_window(dialog, app)
 
-    def test_startup_launcher_db_reset_turns_stale_restore_into_refresh(self):
+    def test_startup_launcher_uses_persisted_session_id_when_sources_fallback_to_last_root(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
         from gui.widgets.startup_launcher import StartupLauncherDialog
@@ -198,8 +198,8 @@ class MainWindowDebounceTests(unittest.TestCase):
 
         request = dialog.launch_request()
 
-        self.assertEqual(request.mode, "refresh")
-        self.assertEqual(request.session_id, "")
+        self.assertEqual(request.mode, "restore")
+        self.assertEqual(request.session_id, "deleted-session")
         self.assertEqual(request.roots, ("D:/Music/Drum Kits",))
         close_qt_window(dialog, app)
 
@@ -481,6 +481,7 @@ class MainWindowDebounceTests(unittest.TestCase):
             mock.patch("gui.main.launcher.QTimer.singleShot", side_effect=lambda _delay, func: func()),
             mock.patch("gui.main.launcher._show_window", side_effect=lambda _window, _splash=None: events.append("show-window")),
             mock.patch("gui.main.launcher.show_scan_summary_dialog", side_effect=lambda _window, _stats: events.append("summary-dialog")),
+            mock.patch("gui.main.launcher._undock_startup_refresh_window", side_effect=lambda _window: events.append("undock")),
         ):
             launcher._launch_refresh(window, request, app)
 
@@ -488,7 +489,7 @@ class MainWindowDebounceTests(unittest.TestCase):
             self.assertIn("status_callback", captured_options)
             self.assertFalse(captured_options["show_summary"])
             self.assertIn("summary_callback", captured_options)
-            self.assertEqual(events[:2], ["monitor-created", "monitor-status"])
+            self.assertEqual(events[:3], ["undock", "monitor-created", "monitor-status"])
 
             captured_options["on_background_work_start"]()
             captured_options["status_callback"]("Checking library suggestions...")
@@ -498,6 +499,8 @@ class MainWindowDebounceTests(unittest.TestCase):
         self.assertIn("splash-created", events)
         self.assertIn("splash-show", events)
         self.assertIn("show-window", events)
+        self.assertEqual(events.count("undock"), 2)
+        self.assertLess(events.index("undock", 1), events.index("show-window"))
         self.assertGreater(events.index("summary-dialog"), events.index("show-window"))
         self.assertFalse(app.quitOnLastWindowClosed())
 
@@ -679,8 +682,109 @@ class MainWindowDebounceTests(unittest.TestCase):
         root_layout = monitor.layout()
 
         self.assertIs(root_layout.itemAt(2).widget(), monitor.progress)
-        self.assertIs(root_layout.itemAt(3).layout(), monitor.button_row)
+        self.assertIs(root_layout.itemAt(3).widget(), monitor.eta_label)
+        self.assertIs(root_layout.itemAt(4).layout(), monitor.button_row)
         self.assertIs(monitor.button_row.itemAt(1).widget(), monitor.btn_cancel)
+
+    def test_startup_splash_is_not_always_on_top(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.startup_splash import StartupSplash
+
+        app = QApplication.instance() or QApplication([])
+        assert isinstance(app, QApplication)
+        splash = StartupSplash()
+
+        self.assertFalse(bool(splash.windowFlags() & Qt.WindowStaysOnTopHint))
+        close_qt_window(splash, app)
+
+    def test_startup_scan_monitor_renders_structured_phase_progress(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.startup_scan_monitor import StartupScanMonitor
+
+        app = QApplication.instance() or QApplication([])
+        assert isinstance(app, QApplication)
+        monitor = StartupScanMonitor()
+
+        monitor.set_status(
+            {
+                "phase": "Hashing",
+                "message": "Hashing samples...",
+                "current": 25,
+                "total": 100,
+                "eta_seconds": 65,
+            }
+        )
+
+        self.assertEqual(monitor.title_label.text(), "Hashing")
+        self.assertEqual(monitor.status_label.text(), "Hashing samples...")
+        self.assertEqual(monitor.eta_label.text(), "Remaining Time: 1m 05s")
+        self.assertFalse(monitor.eta_label.isHidden())
+        self.assertEqual(monitor.progress.minimum(), 0)
+        self.assertEqual(monitor.progress.maximum(), 100)
+        self.assertEqual(monitor.progress.value(), 25)
+        self.assertEqual(monitor.progress.format(), "%p%")
+
+        monitor.set_status(
+            {
+                "phase": "Hashing",
+                "message": "Hashing samples...",
+                "current": 50,
+                "total": 100,
+                "eta_seconds": 30,
+            }
+        )
+        self.assertEqual(monitor._progress_animation.endValue(), 50)
+        close_qt_window(monitor, app)
+
+    def test_startup_scan_monitor_hides_missing_eta(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.startup_scan_monitor import StartupScanMonitor
+
+        app = QApplication.instance() or QApplication([])
+        assert isinstance(app, QApplication)
+        monitor = StartupScanMonitor()
+
+        monitor.set_status(
+            {
+                "phase": "Creating Session",
+                "message": "Creating session...",
+                "current": 0,
+                "total": 4,
+                "eta_seconds": None,
+            }
+        )
+
+        self.assertEqual(monitor.eta_label.text(), "")
+        self.assertFalse(monitor.eta_label.isVisible())
+        close_qt_window(monitor, app)
+
+    def test_startup_scan_monitor_hides_repeated_phase_message(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.startup_scan_monitor import StartupScanMonitor
+
+        app = QApplication.instance() or QApplication([])
+        assert isinstance(app, QApplication)
+        monitor = StartupScanMonitor()
+
+        monitor.set_status(
+            {
+                "phase": "Classifying Samples",
+                "message": "Classifying samples...",
+                "current": 88,
+                "total": 100,
+            }
+        )
+
+        self.assertEqual(monitor.title_label.text(), "Classifying Samples")
+        self.assertEqual(monitor.status_label.text(), "")
+        self.assertFalse(monitor.status_label.isVisible())
+        self.assertLess(monitor.height(), 176)
+        close_qt_window(monitor, app)
 
     def test_startup_launcher_title_stays_plain_after_summary_refresh(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -1725,6 +1829,55 @@ class MainWindowDebounceTests(unittest.TestCase):
                     pass
             close_qt_window(window, app)
 
+    def test_docked_mode_does_not_enter_page_history(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.main.launcher import ModernApp
+
+        app = QApplication.instance() or QApplication([])
+        window = ModernApp()
+        try:
+            window._page_history = []
+            window._page_history_index = -1
+            window.open_library_workspace()
+            window.open_history_workspace()
+
+            window.view_controller.toggle_docked(True)
+
+            self.assertNotIn(("dock", None), window._page_history)
+            self.assertEqual(window._page_history, [("library", None), ("history", None)])
+        finally:
+            if getattr(window, "engine", None):
+                try:
+                    window.engine.close()
+                except Exception:
+                    pass
+            close_qt_window(window, app)
+
+    def test_runtime_model_resets_page_history_for_new_session(self):
+        from gui.main import window_runtime
+
+        window = SimpleNamespace(
+            model=None,
+            search_controller=SimpleNamespace(model=None),
+            acoustic_controller=SimpleNamespace(model=None),
+            drafting_controller=SimpleNamespace(
+                apply_table_edit=mock.Mock(),
+                apply_table_bulk_updates=mock.Mock(),
+            ),
+            tagging_controller=None,
+            coherence_controller=None,
+            maybe_refresh_library_map=mock.Mock(),
+            _reset_page_history=mock.Mock(),
+            _should_auto_check_coherence_on_start=mock.Mock(return_value=False),
+            _frontloading_startup=False,
+            _scan_finalizing=False,
+        )
+
+        window_runtime.apply_runtime_model(window, SimpleNamespace())
+
+        window._reset_page_history.assert_called_once_with()
+
     def test_unknown_system_section_restores_to_current_default(self):
         from gui.main import window as window_module
 
@@ -2047,11 +2200,11 @@ class MainWindowDebounceTests(unittest.TestCase):
     def test_confidence_range_min_restore_resets_on_startup(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
-        from PySide6.QtCore import QSettings
+        from gui.core.settings_controller import create_app_settings
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        settings = QSettings("UmU", "Unshuffle")
+        settings = create_app_settings()
         settings.remove("classification_range_min")
         settings.remove("classification_range_max")
         settings.remove("last_scan_session_id")
@@ -2422,6 +2575,34 @@ class SettingsControllerSavedFilterScopeTests(unittest.TestCase):
 
             self.assertFalse(state["default_view_tree"])
             self.assertEqual(state["default_view_mode"], "table")
+        finally:
+            settings.clear()
+
+    def test_save_app_settings_persists_current_non_docked_state(self):
+        from PySide6.QtCore import QSettings
+        from gui.core.settings_controller import DOCKED_MODE_KEY, SettingsController
+
+        org = "UmUTests"
+        app_name = f"Unshuffle-{uuid.uuid4().hex}"
+        settings = QSettings(org, app_name)
+        settings.clear()
+        try:
+            library_tab = object()
+            dock_view = object()
+            class _Parent(QObject):
+                def __init__(self):
+                    super().__init__()
+                    self.stack = SimpleNamespace(currentWidget=lambda: library_tab)
+                    self.dock_view = dock_view
+                    self.saveGeometry = mock.Mock(return_value=b"geometry")
+
+            parent = _Parent()
+            controller = SettingsController(settings, parent)
+            settings.setValue(DOCKED_MODE_KEY, True)
+
+            controller.save_app_settings()
+
+            self.assertFalse(settings.value(DOCKED_MODE_KEY, True, type=bool))
         finally:
             settings.clear()
 
@@ -3013,6 +3194,27 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         )
         self.assertEqual(controller._pending_finalize_options, {})
 
+    def test_scan_signal_strips_operation_monitor_internal_option(self):
+        from gui.core.workflow_controller import WorkflowController
+
+        parent = QObject()
+        controller = WorkflowController(None, mock.Mock(), mock.Mock(), parent)
+        controller._pending_finalize_options = {
+            "show_summary": False,
+            "use_operation_monitor": False,
+        }
+
+        with mock.patch.object(controller, "finalize_scan_data") as finalize_mock:
+            controller.finalize_scan_data_from_signal(["record"], False, {"total_scanned": 1})
+
+        finalize_mock.assert_called_once_with(
+            ["record"],
+            False,
+            {"total_scanned": 1},
+            show_summary=False,
+            persist_staging=False,
+        )
+
     def test_cancelled_scan_signal_does_not_finalize_partial_results(self):
         from gui.core.workflow_controller import WorkflowController
 
@@ -3408,6 +3610,7 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         self.assertEqual(stats["added_count"], 1)
         self.assertEqual(stats["total_dupe_count"], 0)
         self.assertFalse(finalize_mock.call_args.kwargs["persist_staging"])
+        self.assertFalse(finalize_mock.call_args.kwargs["schedule_background_work"])
 
     def test_restore_session_uses_local_db_as_active_search_db(self):
         from gui.core.workflow_controller import WorkflowController
@@ -3775,6 +3978,93 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
 
         self.assertTrue(started)
         parent.coherence_controller.clear_state.assert_called_once_with()
+
+    def test_start_scan_clears_stale_corrupt_silent_empty_filter_state(self):
+        from gui.core.workflow_controller import WorkflowController
+
+        class _Parent(QObject):
+            def __init__(self):
+                super().__init__()
+                self.settings = mock.Mock()
+                self.tagging_controller = mock.Mock()
+                self.coherence_controller = mock.Mock()
+                self.tree_organization_controller = None
+                self.undo_stack = mock.Mock()
+                self.model = None
+                self.library_tab = mock.Mock()
+                self.filter_controller = mock.Mock()
+
+        worker_manager = mock.Mock()
+        worker_manager.start_scan.return_value = True
+        parent = _Parent()
+        controller = WorkflowController(None, worker_manager, parent.undo_stack, parent)
+
+        engine = mock.Mock()
+        engine.db.get_committed_hashes.return_value = set()
+        with mock.patch("gui.core.workflow_controller.create_workflow_bridge", return_value=engine):
+            started = controller.start_scan(["D:/Samples"], require_clear_draft=False)
+
+        self.assertTrue(started)
+        parent.library_tab.set_corrupt_silent_empty_filter_enabled.assert_called_once_with(False)
+        parent.filter_controller.refresh_dock_filters.assert_called_once_with()
+
+    def test_corrupt_silent_empty_filter_includes_duplicate_records(self):
+        from gui.core.workflow_scan_finalization import records_include_corrupt_silent_or_empty
+        from gui.widgets.sidebar import CORRUPT_SILENT_EMPTY_FILTER_QUERY
+
+        self.assertTrue(records_include_corrupt_silent_or_empty([SimpleNamespace(tags=["duplicate"])]))
+        self.assertIn('tag:"duplicate"', CORRUPT_SILENT_EMPTY_FILTER_QUERY)
+
+    def test_start_scan_opens_in_app_operation_monitor(self):
+        from gui.core.workflow_controller import WorkflowController
+
+        class _Parent(QObject):
+            def __init__(self):
+                super().__init__()
+                self.settings = mock.Mock()
+                self.tagging_controller = mock.Mock()
+                self.coherence_controller = mock.Mock()
+                self.tree_organization_controller = None
+                self.undo_stack = mock.Mock()
+                self.model = None
+                self.operation_monitor = mock.Mock()
+
+        worker_manager = mock.Mock()
+        worker_manager.start_scan.return_value = True
+        parent = _Parent()
+        controller = WorkflowController(None, worker_manager, parent.undo_stack, parent)
+
+        engine = mock.Mock()
+        engine.db.get_committed_hashes.return_value = set()
+        with mock.patch("gui.core.workflow_controller.create_workflow_bridge", return_value=engine):
+            started = controller.start_scan(["D:/Samples"], require_clear_draft=False)
+
+        self.assertTrue(started)
+        parent.operation_monitor.start.assert_called_once_with(
+            "Scanning Library",
+            cancellable=True,
+            on_cancel=worker_manager.request_cancel,
+        )
+
+    def test_worker_progress_routes_to_active_operation_monitor_before_footer_progress(self):
+        from gui.utils.ui_helpers import handle_progress
+
+        app = SimpleNamespace(
+            footer=SimpleNamespace(
+                set_status=mock.Mock(),
+                log=mock.Mock(),
+                set_progress=mock.Mock(),
+            ),
+            operation_monitor=SimpleNamespace(active=True, update=mock.Mock()),
+        )
+        payload = {"phase": "Hashing", "message": "Hashing samples...", "current": 4, "total": 8}
+
+        handle_progress(app, payload)
+
+        app.operation_monitor.update.assert_called_once_with(payload)
+        app.footer.set_status.assert_not_called()
+        app.footer.log.assert_not_called()
+        app.footer.set_progress.assert_not_called()
 
     def test_worker_manager_ignores_stale_finish_and_error_callbacks(self):
         from gui.core.worker_manager import WorkerManager
@@ -5024,11 +5314,11 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
     def test_library_view_menu_controls_toggle_and_prewarm(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
-        from PySide6.QtCore import QSettings
+        from gui.core.settings_controller import create_app_settings
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        settings = QSettings("UmU", "Unshuffle")
+        settings = create_app_settings()
         settings.remove("library_view_modes_json")
         window = ModernApp()
         try:
@@ -5065,11 +5355,11 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
     def test_library_map_is_created_lazily_when_enabled_and_opened(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
-        from PySide6.QtCore import QSettings
+        from gui.core.settings_controller import create_app_settings
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        settings = QSettings("UmU", "Unshuffle")
+        settings = create_app_settings()
         settings.remove("current_page")
         settings.remove("library_view_modes_json")
         window = ModernApp()
@@ -5092,12 +5382,12 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
     def test_library_table_column_visibility_persistence(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
-        from PySide6.QtCore import QSettings
+        from gui.core.settings_controller import create_app_settings
         from gui.main.launcher import ModernApp
         from gui.utils.constants import StagingColumn
 
         app = QApplication.instance() or QApplication([])
-        settings = QSettings("UmU", "Unshuffle")
+        settings = create_app_settings()
         # Remove any existing settings to run clean
         for col in StagingColumn:
             settings.remove(f"table_column_visible_{col.name}")
@@ -5154,9 +5444,9 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
     def test_default_hidden_columns_ignore_stale_visible_settings_without_user_marker(self):
         from gui.widgets.library_columns import load_column_visibility, save_column_visibility
         from gui.utils.constants import StagingColumn
-        from PySide6.QtCore import QSettings
+        from gui.core.settings_controller import create_app_settings
 
-        settings = QSettings("UmU", "Unshuffle")
+        settings = create_app_settings()
         try:
             for col in StagingColumn:
                 settings.remove(f"table_column_visible_{col.name}")

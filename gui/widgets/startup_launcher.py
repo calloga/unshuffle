@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
@@ -23,6 +24,7 @@ from gui.core.settings_controller import (
     normalize_library_view_modes,
 )
 from gui.styles import ThemeManager
+from unshuffle.diagnostics import write_launcher_event_log
 from unshuffle.core.assets import asset_path
 from gui.utils.app_icon import apply_app_icon
 from gui.utils.history import load_session_sources
@@ -410,20 +412,46 @@ class StartupLauncherDialog(QDialog):
     def _refresh_summary(self) -> None:
         self.setWindowTitle("Unshuffle Launcher")
 
+    def _fallback_session_id(self) -> str:
+        if self._force_refresh:
+            return ""
+        session_id = str(self._selected_session_id or self.settings.value("last_scan_session_id", "") or "").strip()
+        if session_id:
+            return session_id
+        choice = getattr(self.settings_controller, "get_startup_launcher_last_choice", None)
+        if callable(choice):
+            return str(choice().get("session_id") or "").strip()
+        return ""
+
     def _build_request(self) -> StartupLaunchRequest:
         roots = self._roots()
         view_modes = self._selected_view_modes()
         target = (roots[0] if self._new_session_requested and roots else "") or self._target() or (roots[0] if roots else "")
+        session_id = self._fallback_session_id()
         if not roots:
             mode = "empty"
-        elif _normalized_root_tuple(roots) == _normalized_root_tuple(self._initial_roots) and self._selected_session_id:
+        elif _normalized_root_tuple(roots) == _normalized_root_tuple(self._initial_roots) and session_id:
             mode = "restore"
         else:
             mode = "refresh"
+        debug_payload = {
+            "mode": mode,
+            "target": target,
+            "roots": list(roots),
+            "initial_roots": list(self._initial_roots),
+            "selected_session_id": self._selected_session_id,
+            "effective_session_id": session_id,
+            "new_session_requested": self._new_session_requested,
+        }
+        logging.info(
+            "Startup launcher request resolved.",
+            extra=debug_payload,
+        )
+        write_launcher_event_log("startup-launcher-request", **debug_payload)
         return StartupLaunchRequest(
             mode=mode,
             target=target,
-            session_id=self._selected_session_id if mode == "restore" else "",
+            session_id=session_id if mode == "restore" else "",
             roots=roots,
             view_modes=view_modes,
             show_launcher_next_time=not self.dont_show.isChecked(),

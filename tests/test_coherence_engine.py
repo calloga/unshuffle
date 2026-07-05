@@ -242,6 +242,25 @@ def test_coherence_engine_marks_small_groups_underrepresented():
     assert candidates == []
 
 
+def test_coherence_engine_emits_group_progress():
+    engine = CoherenceEngine(_EuclideanSimilarity())
+    payloads = []
+
+    engine.audit(
+        [
+            _record(1, 0.1, audio_type="Loops"),
+            _record(2, 0.11, audio_type="Loops"),
+            _record(3, 0.4, audio_type="Oneshots"),
+        ],
+        progress_callback=payloads.append,
+    )
+
+    assert payloads
+    assert all(payload["phase"] == "Checking Library Coherence" for payload in payloads)
+    assert any(payload.get("total") == 2 for payload in payloads)
+    assert payloads[-1]["current"] == payloads[-1]["total"]
+
+
 def test_verified_anchor_stabilizes_underrepresented_group():
     engine = CoherenceEngine(
         _EuclideanSimilarity(),

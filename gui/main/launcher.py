@@ -396,6 +396,7 @@ def _launch_refresh(window: Any, request: StartupLaunchRequest, app: QApplicatio
         if reopen_launcher:
             _reopen_startup_launcher()
             return
+        _undock_startup_refresh_window(window)
         _show_window(window, splash_ref["splash"])
         if summary_stats and _qt_object_alive(window):
             window.workflow_controller._last_scan_stats = summary_stats
@@ -482,6 +483,7 @@ def _launch_refresh(window: Any, request: StartupLaunchRequest, app: QApplicatio
                 last_target=request.target or None,
                 require_clear_draft=False,
                 finalize_options={
+                    "use_operation_monitor": False,
                     "show_summary": False,
                     "summary_callback": lambda stats: summary_stats.update(dict(stats or {})),
                     "defer_background_work": False,

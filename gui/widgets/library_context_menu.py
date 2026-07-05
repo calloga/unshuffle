@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QMenu
 from unshuffle.core.constants import CATEGORIES
 
 from ..utils.constants import COLUMN_CONFIG, StagingColumn
+from ..utils.platform_labels import view_in_file_manager_label
 from ..utils.styles import apply_style, menu_style
 
 
@@ -49,7 +50,7 @@ def show_library_context_menu(tab, pos) -> None:
         )
         menu.addAction(change_type_action)
 
-    explore_action = QAction("Show in Explorer", tab)
+    explore_action = QAction(view_in_file_manager_label(), tab)
     explore_action.triggered.connect(lambda checked=False: tab.openExplorerRequested.emit(selection[0]))
     menu.addAction(explore_action)
 

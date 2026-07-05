@@ -28,6 +28,7 @@ from gui.utils.styles import (
     tree_header_style,
     tree_view_style,
 )
+from gui.utils.platform_labels import view_in_file_manager_label
 from gui.widgets.library_filters import category_is_valid_for_audio_type, fallback_category_for_audio_type
 
 TREE_RECORD_MIME = "application/x-unshuffle-record-paths"
@@ -346,7 +347,7 @@ class LibraryTreeView(QTreeView):
         if rec:
             act_play = QAction("Play Preview (Space)", self); act_play.triggered.connect(lambda chk=False, r=rec: self.play_requested.emit(r)); menu.addAction(act_play)
             act_sim = QAction("Similarity Explorer", self); act_sim.triggered.connect(lambda chk=False, r=rec: self.similarity_requested.emit(r)); menu.addAction(act_sim)
-            act_explore = QAction("Show in Explorer", self); act_explore.triggered.connect(lambda chk=False, r=rec: self.open_explorer_requested.emit(r)); menu.addAction(act_explore)
+            act_explore = QAction(view_in_file_manager_label(), self); act_explore.triggered.connect(lambda chk=False, r=rec: self.open_explorer_requested.emit(r)); menu.addAction(act_explore)
             menu.addSeparator()
         qf_query = self._quick_filter_query_for_index(index)
         if qf_query:

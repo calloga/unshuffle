@@ -244,10 +244,9 @@ def connect_orchestrator_signals(app):
     
     app.worker_manager.progress.connect(lambda d: handle_progress(app, d))
     app.worker_manager.finished.connect(lambda wt, res: on_worker_finished(app, wt, res))
-    from PySide6.QtWidgets import QMessageBox
-    app.worker_manager.error.connect(lambda e: QMessageBox.critical(app, "Error", e))
+    app.worker_manager.error.connect(lambda e: on_worker_error(app, e))
     app.worker_manager.busyStateChanged.connect(lambda b: set_ui_busy(app, b))
-    app.worker_manager.cancelling.connect(lambda: app.footer.set_status("Stopping..."))
+    app.worker_manager.cancelling.connect(lambda: handle_cancelling(app))
 
     app.audio_controller.statusRequested.connect(app.footer.set_status)
     app.audio_controller.similaritySearchRequested.connect(lambda q: [app.library_tab.edit_search.setText(q), app.search_controller.execute_search()])
@@ -308,11 +307,37 @@ def set_ui_busy(app, busy):
         app.audio_controller.toggle_audio_bar(not busy if is_docked else True)
 
 def handle_progress(app, d):
-    if "message" in d: 
-        app.footer.log(d['message'], html=False)
-        app.footer.set_status(d['message'])
+    monitor = getattr(app, "operation_monitor", None)
+    if monitor is not None and getattr(monitor, "active", False):
+        monitor.update(d)
+        return
+
+    from unshuffle.core.progress import progress_message
+
+    status_text = progress_message(d)
+    if status_text:
+        app.footer.set_status(status_text)
+    if "message" in d:
+        app.footer.log(d["message"], html=False)
     if "current" in d and "total" in d:
-        app.footer.set_progress(d['current'], d['total'])
+        app.footer.set_progress(d["current"], d["total"])
+    elif "percent" in d:
+        app.footer.set_progress(int(d["percent"]), 100)
+
+def handle_cancelling(app) -> None:
+    monitor = getattr(app, "operation_monitor", None)
+    if monitor is not None and getattr(monitor, "active", False):
+        monitor.set_status("Stopping...")
+        return
+    app.footer.set_status("Stopping...")
+
+def on_worker_error(app, message: str) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    monitor = getattr(app, "operation_monitor", None)
+    if monitor is not None and getattr(monitor, "active", False):
+        monitor.fail(str(message or "Operation failed."))
+    QMessageBox.critical(app, "Error", message)
 
 def on_worker_finished(app, worker_type, res):
     from .history import invalidate_history_cache

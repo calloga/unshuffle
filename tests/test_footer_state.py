@@ -23,6 +23,27 @@ def test_footer_draft_state_does_not_expand_logs(monkeypatch):
     assert footer.progress_bar.isHidden()
 
 
+def test_footer_busy_state_does_not_expand_for_operation_progress(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets.footer import ModernFooter
+
+    _app = QApplication.instance() or QApplication([])
+    footer = ModernFooter()
+    calls = []
+    original_toggle = footer.toggle_footer
+
+    def record_toggle(expand):
+        calls.append(bool(expand))
+        original_toggle(expand)
+
+    footer.toggle_footer = record_toggle
+    footer.set_busy_state(True)
+
+    assert calls[-1] is False
+    assert footer.progress_bar.isHidden()
+
+
 def test_footer_status_labels_are_bounded_and_ctas_are_short(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
@@ -36,6 +57,26 @@ def test_footer_status_labels_are_bounded_and_ctas_are_short(monkeypatch):
     assert not hasattr(footer, "btn_filter_duplicates")
     assert footer.btn_review_coherence.text() == "Review Outliers"
     assert footer.btn_build.text() == "Build"
+
+
+def test_footer_progress_can_show_without_busy_cancel_mode(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets.footer import ModernFooter
+
+    _app = QApplication.instance() or QApplication([])
+    footer = ModernFooter()
+
+    footer.set_progress(2, 4)
+
+    assert footer._progress_visible is True
+    assert not footer.progress_bar.isHidden()
+    assert footer.btn_cancel.isHidden()
+
+    footer.set_coherence_state("Coherence looks stable.", True, can_build=True)
+
+    assert footer._progress_visible is False
+    assert footer.progress_bar.isHidden()
 
 
 def test_footer_build_handover_state_shows_persistent_ctas(monkeypatch):
@@ -188,8 +229,7 @@ def test_footer_build_cta_pauses_when_busy_starts(monkeypatch):
     assert footer.btn_build.isHidden()
     assert not footer._notification_timers["build"].isActive()
     assert footer._notification_remaining["build"] > 0
-    assert not footer.btn_cancel.isHidden()
-    assert footer.btn_cancel.isEnabled()
+    assert footer.btn_cancel.isHidden()
     assert footer._progress_row.count() == 1
 
     footer.set_busy_state(False)
@@ -234,7 +274,7 @@ def test_footer_docked_presentation_does_not_restore_finished_cancel(monkeypatch
     footer = ModernFooter()
 
     footer.set_busy_state(True)
-    assert not footer.btn_cancel.isHidden()
+    assert footer.btn_cancel.isHidden()
 
     footer.set_docked_presentation(True)
     footer.set_busy_state(False)
@@ -244,25 +284,17 @@ def test_footer_docked_presentation_does_not_restore_finished_cancel(monkeypatch
     assert footer.progress_bar.isHidden()
 
 
-def test_footer_cancel_button_disables_after_click(monkeypatch):
+def test_footer_busy_state_keeps_cancel_hidden(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
     from gui.widgets.footer import ModernFooter
 
     _app = QApplication.instance() or QApplication([])
     footer = ModernFooter()
-    calls = []
-    footer.cancelRequested.connect(lambda: calls.append("cancel"))
 
     footer.set_busy_state(True)
 
-    assert "background" in footer.btn_cancel.styleSheet()
-    assert footer.btn_cancel.styleSheet() == footer.btn_reorg_discard.styleSheet()
-    footer.btn_cancel.click()
-
-    assert calls == ["cancel"]
-    assert not footer.btn_cancel.isEnabled()
-    assert footer.btn_cancel.text() == "Stopping"
+    assert footer.btn_cancel.isHidden()
 
     footer.set_busy_state(False)
 
@@ -283,7 +315,7 @@ def test_footer_hides_review_cta_while_busy_and_restores_after(monkeypatch):
     footer.set_busy_state(True)
 
     assert footer.btn_review_coherence.isHidden()
-    assert not footer.btn_cancel.isHidden()
+    assert footer.btn_cancel.isHidden()
 
     footer.set_busy_state(False)
 

@@ -27,7 +27,7 @@ def normalized_scan_stats(stats, records, category_counts_fn) -> dict:
 def records_include_corrupt_silent_or_empty(records) -> bool:
     for rec in records or []:
         rec_tags = {str(tag).strip().lower() for tag in (getattr(rec, "tags", []) or [])}
-        if "silent" in rec_tags or "empty" in rec_tags or "corrupted" in rec_tags:
+        if rec_tags.intersection({"silent", "empty", "corrupted", "duplicate"}):
             return True
     return False
 
@@ -35,5 +35,16 @@ def records_include_corrupt_silent_or_empty(records) -> bool:
 def update_corrupt_filter_state(app) -> None:
     records = getattr(getattr(app, "model", None), "records", None)
     enabled = records_include_corrupt_silent_or_empty(records)
-    if hasattr(app.library_tab, "set_corrupt_silent_empty_filter_enabled"):
-        app.library_tab.set_corrupt_silent_empty_filter_enabled(enabled)
+    set_corrupt_filter_state(app, enabled)
+
+
+def clear_corrupt_filter_state(app) -> None:
+    set_corrupt_filter_state(app, False)
+
+
+def set_corrupt_filter_state(app, enabled: bool) -> None:
+    library_tab = getattr(app, "library_tab", None)
+    if hasattr(library_tab, "set_corrupt_silent_empty_filter_enabled"):
+        library_tab.set_corrupt_silent_empty_filter_enabled(enabled)
+    if getattr(app, "filter_controller", None):
+        app.filter_controller.refresh_dock_filters()

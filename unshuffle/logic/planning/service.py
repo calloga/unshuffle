@@ -25,6 +25,7 @@ from ...core.constants import (
 )
 from ...core.models import LibNode, NodeType, PlanRecord
 from ...core.logging import logger
+from ...core.progress import PhaseProgress
 from ...core.tags import extract_tags_from_name
 from ...logic.analysis import AnalysisContext, build_discovery_data, run_analysis
 from ...logic.classification import classify_node, compute_component_score, detect_audio_type, get_subcategory, tokenize
@@ -156,13 +157,13 @@ def run_plan(
 ) -> List[PlanRecord]:
     """Coordinates the multi-pass planning algorithm."""
     if progress_callback:
-        progress_callback({"message": f"Phase 1: Structural Analysis of {source_root.name}..."})
+        progress_callback({"phase": "Discovering Samples", "message": f"Discovering samples in {source_root.name}..."})
     context = run_analysis(source_root, progress_callback=progress_callback, db=db, target_dir=target_dir)
     if is_interrupted:
         context.is_interrupted = is_interrupted
 
     if progress_callback:
-        progress_callback({"message": "Phase 1.5: Finalizing Global Library Composition..."})
+        progress_callback({"phase": "Discovering Samples", "message": "Preparing sample groups..."})
     context.frequency_analyzer.finalize()
     global_boosts = context.frequency_analyzer.boosts
     runtime_config = get_runtime_config_snapshot()
@@ -239,7 +240,10 @@ def run_plan(
     cache_updates: List[tuple] = []
     if expensive_audio_nodes:
         if progress_callback:
-            progress_callback({"message": f"Audio feature analysis of {len(expensive_audio_nodes)} files..."})
+            progress_callback({
+                "phase": "Analyzing Audio Features",
+                "message": f"Checking audio feature cache for {len(expensive_audio_nodes)} files...",
+            })
         sim_engine = SimilarityEngine()
 
         to_extract: list[Path] = []
@@ -290,10 +294,14 @@ def run_plan(
             max_workers = _extractor_worker_count(len(batches))
             max_pending = max_workers * 2
             logger.info("Audio feature analysis")
-            if progress_callback:
-                progress_callback({
-                    "message": f"Audio feature analysis extracting {len(to_extract)} files.",
-                })
+            feature_progress = PhaseProgress(
+                progress_callback,
+                "Analyzing Audio Features",
+                total=len(to_extract),
+                message=f"Analyzing audio features for {len(to_extract)} files.",
+                update_every=100,
+            )
+            feature_progress.emit(0, force=True)
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 completed = 0
                 for _batch, payloads in bounded_map(
@@ -346,31 +354,45 @@ def run_plan(
                                     analysis_failure_tags[result_path] = failure_tag
                                     analysis_statuses[result_path] = failure_tag
                         completed += 1
-                        if progress_callback and completed % 100 == 0:
-                            progress_callback({"current": completed, "total": len(to_extract)})
+                        feature_progress.emit(completed)
+                feature_progress.emit(len(to_extract), force=True)
         if db and cache_updates:
             db.update_cache_bulk(cache_updates)
 
     duration_nodes = [node for node in expensive_audio_nodes if node.path not in durations]
     if duration_nodes:
-        if progress_callback:
-            progress_callback({"message": f"Detecting durations for {len(duration_nodes)} files..."})
+        duration_progress = PhaseProgress(
+            progress_callback,
+            "Analyzing Audio Features",
+            total=len(duration_nodes),
+            message=f"Detecting durations for {len(duration_nodes)} files.",
+            update_every=100,
+        )
+        duration_progress.emit(0, force=True)
         max_workers = max_scan_workers(len(duration_nodes))
         max_pending = max_workers * 2
         paths = [node.path for node in duration_nodes]
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            for path, duration in bounded_map(
+            for index, (path, duration) in enumerate(bounded_map(
                 executor,
                 get_audio_duration,
                 paths,
                 max_pending=max_pending,
                 is_interrupted=is_interrupted,
-            ):
+            ), 1):
                 durations[path] = duration
+                duration_progress.emit(index)
+        duration_progress.emit(len(duration_nodes), force=True)
 
     total_items = len(process_nodes)
-    if progress_callback:
-        progress_callback({"message": "Commencing final categorization..."})
+    classification_progress = PhaseProgress(
+        progress_callback,
+        "Classifying Samples",
+        total=total_items,
+        message="Classifying samples...",
+        update_every=5,
+    )
+    classification_progress.emit(0, force=True)
 
     for index, node in enumerate(process_nodes, start=1):
         if is_interrupted and is_interrupted():
@@ -477,8 +499,7 @@ def run_plan(
         if audio_type == "Metadata":
             continue
 
-        if progress_callback and index % 5 == 0:
-            progress_callback({"current": index, "total": total_items})
+        classification_progress.emit(index)
 
         tags = extract_tags_from_name(node.name)
         if failure_tag := analysis_failure_tags.get(path):
@@ -507,4 +528,5 @@ def run_plan(
             )
         )
 
+    classification_progress.emit(total_items, force=True)
     return records

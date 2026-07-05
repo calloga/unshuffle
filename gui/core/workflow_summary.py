@@ -81,7 +81,7 @@ def scan_summary_chart_pixmap(stats: dict):
         for index, (label, value) in enumerate(raw_segments)
     ]
 
-    pixmap = QPixmap(680, 176)
+    pixmap = QPixmap(590, 176)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -89,9 +89,10 @@ def scan_summary_chart_pixmap(stats: dict):
     start_angle = 90 * 16
     for _label, value, color in segments:
         span_angle = -round((value / total) * 360 * 16)
+        draw_span = span_angle - 6 if span_angle < 0 else span_angle + 6
         painter.setBrush(color)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawPie(pie_rect, start_angle, span_angle)
+        painter.drawPie(pie_rect, start_angle, draw_span)
         start_angle += span_angle
 
     painter.setPen(QColor(ColorPalette.TEXT_MAIN))
@@ -101,7 +102,7 @@ def scan_summary_chart_pixmap(stats: dict):
     for index, (label, value, color) in enumerate(segments):
         col_idx = index // 7
         row_idx = index % 7
-        x_offset = 154 + col_idx * 250
+        x_offset = 154 + col_idx * 220
         y_pos = 20 + row_idx * 22
 
         painter.setBrush(color)

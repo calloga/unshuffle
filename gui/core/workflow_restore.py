@@ -181,7 +181,7 @@ def restore_previous_session(controller, *, frontload: bool = False, bridge_fact
                 show_summary=False,
                 persist_staging=False,
                 defer_background_work=True,
-                schedule_background_work=not frontload,
+                schedule_background_work=False,
                 on_ready=_finish_restored_session,
             )
 

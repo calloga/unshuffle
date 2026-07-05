@@ -98,6 +98,7 @@ class PreviewControlBar(QFrame):
         layout = QHBoxLayout(self)
         apply_layout_margins(layout, (PREVIEW_BAR_MARGIN_H, 0, PREVIEW_BAR_MARGIN_H, 0))
         apply_layout_spacing(layout, PREVIEW_BAR_SPACING)
+        layout.setAlignment(Qt.AlignVCenter)
 
         from gui.core.audio_player import SoundPreviewPlayer
         self.player = SoundPreviewPlayer.instance()
@@ -115,9 +116,9 @@ class PreviewControlBar(QFrame):
         self.btn_mute = AnimatedIconButton(VOLUME_ICON, QSize(18, 18))
         self.btn_mute.setToolTip("Mute/Unmute")
 
-        layout.addWidget(self.btn_play_pause)
-        layout.addWidget(self.btn_stop)
-        layout.addWidget(self.btn_dragout)
+        layout.addWidget(self.btn_play_pause, 0, Qt.AlignVCenter)
+        layout.addWidget(self.btn_stop, 0, Qt.AlignVCenter)
+        layout.addWidget(self.btn_dragout, 0, Qt.AlignVCenter)
         layout.addStretch()
         
         from . import ModernKnob
@@ -128,8 +129,8 @@ class PreviewControlBar(QFrame):
         self.vol_slider.setValue(80)
         self.vol_slider.valueChanged.connect(lambda v: self.player.set_volume(v / 100.0))
         
-        layout.addWidget(self.vol_slider)
-        layout.addWidget(self.btn_mute)
+        layout.addWidget(self.vol_slider, 0, Qt.AlignVCenter)
+        layout.addWidget(self.btn_mute, 0, Qt.AlignVCenter)
 
         self.player.stateChanged.connect(self._update_play_pause_icon)
         self.player.positionChanged.connect(self._update_time)
