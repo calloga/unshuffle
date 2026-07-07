@@ -97,8 +97,9 @@ def test_coherence_audit_persistence_rolls_back_as_one_unit(tmp_path: Path):
             is_outlier=True,
         )
 
-        with mock.patch(
-            "unshuffle.persistence.stores.coherence_store.SqliteCoherenceStore.upsert_refinement_candidates",
+        with mock.patch.object(
+            type(db._coherence_store),
+            "upsert_refinement_candidates",
             side_effect=RuntimeError("forced failure"),
         ):
             try:

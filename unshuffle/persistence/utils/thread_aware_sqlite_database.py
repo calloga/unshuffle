@@ -27,3 +27,15 @@ class PeeweeStore:
     def _initialize_db_proxy(self, connection):
         self._db = ThreadAwareSqliteDatabase(connection)
         db_proxy.initialize(self._db)
+
+    def _bind_db_proxy(self):
+        """Re-point the shared db_proxy at this store's connection.
+
+        db_proxy is a single process-wide singleton, so when multiple
+        UnshuffleDB instances (each with its own sqlite3 connection) are
+        alive at once, constructing the newest one silently steals the
+        proxy from older ones. Call this before any Peewee query to make
+        sure it still targets this store's connection.
+        """
+        if db_proxy.obj is not self._db:
+            db_proxy.initialize(self._db)

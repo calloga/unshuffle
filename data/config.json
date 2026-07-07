@@ -135,7 +135,7 @@
         "coherence": "peewee",
         "learning":"sqlite",
         "lifecycle":"sqlite",
-        "maintenance":"sqlite",
+        "maintenance":"peewee",
         "sessions":"sqlite",
         "taxonomy":"sqlite"
     }

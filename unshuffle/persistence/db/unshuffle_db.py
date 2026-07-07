@@ -9,11 +9,12 @@ from unshuffle.core import get_config
 from unshuffle.persistence import (
     connection,
 )
-from unshuffle.persistence.storages import storage_taxonomy, storage_lifecycle, storage_coherence, storage_learning, \
-    storage_sessions, storage_maintenance, storage_scan
-from unshuffle.persistence.stores.cache_store import SqliteCacheStore, PeeweeCacheStore
-from unshuffle.persistence.stores.coherence_store import SqliteCoherenceStore, PeeweeCoherenceStore
-from unshuffle.persistence.utils import cache_utils
+from unshuffle.persistence.storages import storage_taxonomy, storage_lifecycle, storage_learning, storage_sessions, \
+    storage_maintenance, storage_scan
+from unshuffle.persistence.stores.cache_store import SqliteCacheStore, PeeweeCacheStore, CacheStore
+from unshuffle.persistence.stores.coherence_store import SqliteCoherenceStore, PeeweeCoherenceStore, CoherenceStore
+from unshuffle.persistence.stores.maintenance_store import SqliteMaintenanceStore, PeeweeMaintenanceStore, \
+    MaintenanceStorefrom unshuffle.persistence.utils import cache_utils
 from unshuffle.persistence.utils.cache_utils import normalize_cache_rows, cache_row
 from unshuffle.persistence.utils.enums import StoreName, DatabaseDriver
 
@@ -36,7 +37,10 @@ class UnshuffleDB:
         },
         StoreName.LEARNING: {},
         StoreName.LIFECYCLE: {},
-        StoreName.MAINTENANCE: {},
+        StoreName.MAINTENANCE: {
+            DatabaseDriver.PEEWEE: PeeweeMaintenanceStore,
+            DatabaseDriver.SQLITE: SqliteMaintenanceStore
+        },
         StoreName.SESSIONS: {},
         StoreName.TAXONOMY: {}
     }
@@ -65,6 +69,10 @@ class UnshuffleDB:
 
         self._coherence_store: CoherenceStore = self._migration_config.get(StoreName.COHERENCE).get(
             store_migration_config.get(StoreName.COHERENCE)
+        )(self.conn)
+
+        self._maintenance_store: MaintenanceStore = self._migration_config.get(StoreName.MAINTENANCE).get(
+            store_migration_config.get(StoreName.MAINTENANCE)
         )(self.conn)
 
     def __del__(self):
@@ -391,18 +399,18 @@ class UnshuffleDB:
             *,
             use_restorable_fallback: bool = True,
     ) -> Dict[str, Any]:
-        return storage_maintenance.prune_ephemeral_state(
-            self,
-            keep_session_ids,
-            target_root,
-            use_restorable_fallback=use_restorable_fallback,
-        )
+        with self._write_transaction():
+            return self._maintenance_store.prune_ephemeral_state(
+                keep_session_ids,
+                target_root,
+                use_restorable_fallback=use_restorable_fallback,
+            )
 
     def newest_restorable_staging_session(self, target_root: Path | str | None = None) -> str:
-        return storage_maintenance.newest_restorable_staging_session(self, target_root)
+        return self._maintenance_store.newest_restorable_staging_session(target_root)
 
     def database_size_stats(self) -> Dict[str, int]:
-        return storage_maintenance.database_size_stats(self)
+        return self._maintenance_store.database_size_stats()
 
     def compact_if_worthwhile(
             self,
@@ -410,14 +418,17 @@ class UnshuffleDB:
             min_reclaim_mb: int = 512,
             min_reclaim_ratio: float = 0.25,
     ) -> Dict[str, Any]:
-        return storage_maintenance.compact_if_worthwhile(
-            self,
-            min_reclaim_mb=min_reclaim_mb,
-            min_reclaim_ratio=min_reclaim_ratio,
-        )
+        with self._write_lock:
+            self.conn.commit()
+            return self._maintenance_store.compact_if_worthwhile(
+                min_reclaim_mb=min_reclaim_mb,
+                min_reclaim_ratio=min_reclaim_ratio,
+            )
 
     def force_compact(self) -> Dict[str, Any]:
-        return storage_maintenance.force_compact(self)
+        with self._write_lock:
+            self.conn.commit()
+            return self._maintenance_store.force_compact()
 
     def remove_staging_by_source(self, session_id: str, source_path: str):
         storage_sessions.remove_staging_by_source(self, session_id, source_path)
