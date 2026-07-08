@@ -25,14 +25,10 @@ def enrichment_rows(controller, rows: list[dict]) -> list[dict]:
     model = getattr(controller.app, "model", None)
     if model is None:
         return rows
-    record_by_id = {
-        str(getattr(rec, "staging_row_id", row) if getattr(rec, "staging_row_id", None) is not None else row): rec
-        for row, rec in enumerate(model.records)
-    }
-    source_row_by_id = {
-        str(getattr(rec, "staging_row_id", row) if getattr(rec, "staging_row_id", None) is not None else row): row
-        for row, rec in enumerate(model.records)
-    }
+    requested_ids = [str(row.get("record_id") or "") for row in rows]
+    record_by_id = _records_by_id(model, requested_ids)
+    db_backed = getattr(model, "store", None) is not None
+    source_row_by_id = {} if db_backed else _source_rows_by_id(model, requested_ids)
     enriched: list[dict] = []
     for row in rows:
         payload = dict(row)
@@ -48,11 +44,19 @@ def enrichment_rows(controller, rows: list[dict]) -> list[dict]:
             payload["classification_confidence"] = getattr(rec, "confidence", "")
             if hasattr(model, "_classification_tooltip"):
                 payload["classification_evidence"] = model._classification_tooltip(rec)
-            source_row = source_row_by_id.get(record_id)
-            if source_row is not None:
-                payload["display_index"] = str(model.record_id(source_row) + 1) if hasattr(model, "record_id") else str(source_row + 1)
-                if hasattr(model, "headerData"):
-                    payload["index_color"] = model.headerData(source_row, Qt.Vertical, Qt.BackgroundRole)
+            if db_backed:
+                try:
+                    payload["display_index"] = str(int(record_id) + 1)
+                except (TypeError, ValueError):
+                    payload["display_index"] = record_id
+                if hasattr(model, "_group_value_for_record") and hasattr(model, "_group_color"):
+                    payload["index_color"] = model._group_color(model._group_value_for_record(rec))
+            else:
+                source_row = source_row_by_id.get(record_id)
+                if source_row is not None:
+                    payload["display_index"] = str(model.record_id(source_row) + 1) if hasattr(model, "record_id") else str(source_row + 1)
+                    if hasattr(model, "headerData"):
+                        payload["index_color"] = model.headerData(source_row, Qt.Vertical, Qt.BackgroundRole)
         enriched.append(payload)
     return enriched
 
@@ -145,14 +149,12 @@ def derive_strong_outlier_rows(controller, active_refinement_record_ids: set[str
     if not hasattr(engine.db, "list_coherence_results"):
         return []
     ignored = controller._ignored_outlier_ids()
-    record_by_id = {
-        str(getattr(rec, "staging_row_id", row) if getattr(rec, "staging_row_id", None) is not None else row): rec
-        for row, rec in enumerate(model.records)
-    }
+    results = engine.db.list_coherence_results(engine.session_id)
+    result_record_ids = [str(row.get("record_id") or "") for row in results]
+    record_by_id = _records_by_id(model, result_record_ids)
     review_decisions = review_decisions_for_records(engine.db, list(record_by_id.values()))
     candidates_by_bucket: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     distances_by_bucket: dict[tuple[str, str, str], list[float]] = defaultdict(list)
-    results = engine.db.list_coherence_results(engine.session_id)
     for result in results:
         record_id = str(result.get("record_id") or "")
         rec = record_by_id.get(record_id)
@@ -234,3 +236,47 @@ def derive_strong_outlier_rows(controller, active_refinement_record_ids: set[str
         eligible.sort(key=lambda item: float(item.get("outlier_ratio") or 0.0), reverse=True)
         rows.extend(eligible)
     return rows
+
+
+def _records_by_id(model, record_ids: list[str]) -> dict[str, object]:
+    ids = []
+    seen = set()
+    for value in record_ids:
+        try:
+            row_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if row_id in seen:
+            continue
+        seen.add(row_id)
+        ids.append(row_id)
+
+    store = getattr(model, "store", None)
+    if store is not None and hasattr(store, "lightweight_rows_by_ids"):
+        from unshuffle.core import parse_tags, plan_record_from_staging_row
+
+        return {
+            str(int(row["row_id"])): plan_record_from_staging_row(row, parse_tags)
+            for row in store.lightweight_rows_by_ids(ids)
+            if row.get("row_id") is not None
+        }
+
+    return {
+        str(getattr(rec, "staging_row_id", row) if getattr(rec, "staging_row_id", None) is not None else row): rec
+        for row, rec in enumerate(model.records)
+    }
+
+
+def _source_rows_by_id(model, record_ids: list[str]) -> dict[str, int]:
+    row_ids = getattr(model, "_row_ids", None)
+    if isinstance(row_ids, list):
+        requested = {str(value) for value in record_ids}
+        return {
+            str(row_id): row
+            for row, row_id in enumerate(row_ids)
+            if str(row_id) in requested
+        }
+    return {
+        str(getattr(rec, "staging_row_id", row) if getattr(rec, "staging_row_id", None) is not None else row): row
+        for row, rec in enumerate(model.records)
+    }

@@ -5,7 +5,10 @@ from unittest import mock
 from PySide6.QtCore import QObject
 from unshuffle.core import PlanRecord
 from unshuffle.core.features import FEATURE_VECTOR_SIZE
+from unshuffle.persistence import UnshuffleDB
+from gui.core.staging_session_store import StagingSessionStore
 from gui.core.tagging_controller import TaggingController
+from gui.models.db_staging_table import DbBackedStagingTableModel
 from unshuffle.logic.tagging import (
     DuplicateMatch,
     GENRE_TAG_PREFIX,
@@ -29,6 +32,32 @@ def _record(name, *, pack="Pack", vector=None, duration=0.5):
         confidence="0.9",
         duration=duration,
         acoustic_vector=vector,
+    )
+
+
+def _staging_row(index: int, name: str):
+    return (
+        index,
+        f"D:/Samples/Pack/{name}",
+        name,
+        "Pack",
+        "Bass",
+        "",
+        "Oneshots",
+        "",
+        "0.9",
+        0.5,
+        f"hash-{index}",
+        f"fast-{index}",
+        "[]",
+        "{}",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
     )
 
 
@@ -238,6 +267,48 @@ def test_tagging_controller_syncs_generated_tags_by_stable_staging_row_id():
     )
 
     assert synced == [(109, "first.wav"), (1561, "second.wav")]
+
+
+def test_tagging_controller_persists_generated_tags_for_db_backed_model(tmp_path):
+    from types import SimpleNamespace
+
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_staging_row(10, "first.wav"), _staging_row(11, "second.wav")])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+
+        class _App(QObject):
+            def __init__(self):
+                super().__init__()
+                self.model = model
+                self.view_controller = SimpleNamespace(update_library_views=mock.Mock())
+                self.search_controller = SimpleNamespace(current_query='tag:"possibleduplicate"', execute_search=mock.Mock())
+                self.library_tab = mock.Mock()
+                self.filter_controller = mock.Mock()
+                self.footer = mock.Mock()
+
+        app = _App()
+        controller = TaggingController(app)
+
+        controller.apply_tagging_result(
+            {
+                "tags_by_path": {"D:/Samples/Pack/first.wav": [POSSIBLE_DUPLICATE_TAG]},
+                "duplicate_file_count": 1,
+            },
+            schedule_coherence=False,
+        )
+
+        row = db.conn.execute("SELECT tags FROM staging_records WHERE session_id = ? AND row_id = ?", ("session", 10)).fetchone()
+        assert "possibleduplicate" in (row[0] or "")
+        fts_count = db.conn.execute(
+            "SELECT COUNT(*) FROM staging_fts WHERE staging_fts MATCH ?",
+            ('tags : "possibleduplicate"*',),
+        ).fetchone()[0]
+        assert fts_count == 1
+        app.search_controller.execute_search.assert_called_once_with()
+    finally:
+        db.close()
 
 
 def test_sidebar_hides_possible_duplicate_filter_until_enabled():

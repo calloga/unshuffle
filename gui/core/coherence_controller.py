@@ -555,6 +555,7 @@ class CoherenceController(QObject):
     def _use_cached_coherence_state(self, engine) -> bool:
         results = engine.db.list_coherence_results(engine.session_id)
         if not results:
+            logging.info("Coherence cache miss for session %s: no cached results.", engine.session_id)
             return False
         session_state = getattr(self.app, "acoustic_session_state", None)
         staging_ids = session_state.staging_record_ids() if session_state is not None else {
@@ -562,7 +563,15 @@ class CoherenceController(QObject):
         }
         result_ids = {str(row.get("record_id")) for row in results}
         if not result_ids or not result_ids.issubset(staging_ids):
+            logging.info(
+                "Coherence cache miss for session %s: %s result id(s), %s staging id(s), missing %s.",
+                engine.session_id,
+                len(result_ids),
+                len(staging_ids),
+                len(result_ids - staging_ids),
+            )
             return False
+        logging.info("Coherence cache hit for session %s: %s result id(s).", engine.session_id, len(result_ids))
         auto_staged = engine.db.list_refinement_candidates(engine.session_id, state="auto_staged")
         if getattr(self.app, "system_controller", None):
             self.app.system_controller.refresh_anchor_candidates()

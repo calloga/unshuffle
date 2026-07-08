@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import math
 import logging
-from collections import defaultdict
+import math
+import time
+from collections import OrderedDict, defaultdict
 from typing import Iterable
 
 import numpy as np
@@ -62,6 +63,8 @@ class CoherenceMapWidget(QWidget):
         self._projected_clusters: dict[str, tuple[str, QPointF]] = {}
         self._projection_cache: dict[tuple[object, str, str], tuple[list[tuple[AnalyzerPoint, QPointF]], dict[str, tuple[str, QPointF]]]] = {}
         self._distance_payloads: dict[str, AnalyzerDistancePayload] = {}
+        self._projection_caches_by_version: OrderedDict[object, dict] = OrderedDict()
+        self._distance_payloads_by_version: OrderedDict[object, dict[str, AnalyzerDistancePayload]] = OrderedDict()
         self._background_layer_count = 0
         self._audio_type = "Loops"
         self._category_filter = ""
@@ -69,6 +72,9 @@ class CoherenceMapWidget(QWidget):
         self._zoom_level = 2
         self._cached_bg_pixmap = None
         self._cached_points_pixmap = None
+        self._background_pixmap_cache: OrderedDict[tuple, object] = OrderedDict()
+        self._points_pixmap_cache: OrderedDict[tuple, object] = OrderedDict()
+        self._visible_ids_signature: tuple[int, int] | None = None
         self.setMinimumHeight(scaled_px(260))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -81,16 +87,22 @@ class CoherenceMapWidget(QWidget):
     def set_category_filter(self, category: str) -> None:
         self.configure(category=category)
 
-    def _invalidate_cache(self) -> None:
+    def _invalidate_cache(self, *, clear_history: bool = False) -> None:
         self._cached_bg_pixmap = None
         self._cached_points_pixmap = None
+        if clear_history:
+            self._background_pixmap_cache.clear()
+            self._points_pixmap_cache.clear()
 
     def set_visible_record_ids(self, record_ids: set[str] | None) -> None:
         new_ids = set(record_ids) if record_ids is not None else None
         if self._visible_record_ids == new_ids:
             return
         self._visible_record_ids = new_ids
-        self._cached_points_pixmap = None  
+        self._visible_ids_signature = (
+            (len(new_ids), hash(frozenset(new_ids))) if new_ids is not None else None
+        )
+        self._cached_points_pixmap = None
         self.update()
 
     def configure(self, *, points=None, audio_type=None, category=None, version=None) -> None:
@@ -102,8 +114,16 @@ class CoherenceMapWidget(QWidget):
             if version != self._points_version:
                 self._points = new_points
                 self._points_version = version
-                self._projection_cache = {}
-                self._distance_payloads = _distance_payloads_for_points(new_points)
+                self._projection_cache = self._cache_for_version(
+                    self._projection_caches_by_version,
+                    version,
+                    dict,
+                )
+                self._distance_payloads = self._cache_for_version(
+                    self._distance_payloads_by_version,
+                    version,
+                    lambda: _distance_payloads_for_points(new_points),
+                )
                 changed = True
         if audio_type is not None:
             new_audio_type = str(audio_type or "")
@@ -118,9 +138,20 @@ class CoherenceMapWidget(QWidget):
         if changed:
             self._reproject()
 
+    @staticmethod
+    def _cache_for_version(cache: OrderedDict, version: object, factory):
+        value = cache.get(version)
+        if value is None:
+            value = factory()
+            cache[version] = value
+            while len(cache) > 3:
+                cache.popitem(last=False)
+        else:
+            cache.move_to_end(version)
+        return value
+
     def set_zoom_level(self, level: int) -> None:
         self._zoom_level = max(1, min(4, level))
-        self._invalidate_cache()
         self.update()
 
     def mousePressEvent(self, event):  
@@ -167,10 +198,11 @@ class CoherenceMapWidget(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._invalidate_cache()
+        self._invalidate_cache(clear_history=True)
         self.update()
 
     def _reproject(self) -> None:
+        started = time.perf_counter()
         cache_key = (self._points_version, self._audio_type, self._category_filter)
         cached = self._projection_cache.get(cache_key)
         if cached is not None:
@@ -178,12 +210,26 @@ class CoherenceMapWidget(QWidget):
             self._background_layer_count = coherence_projection._background_layer_count(self._projected, self._category_filter)
             self._invalidate_cache()
             self.update()
+            logging.getLogger("unshuffle").debug(
+                "Sound map projection reuse: type=%r category=%r points=%s elapsed=%.1fms",
+                self._audio_type,
+                self._category_filter,
+                len(self._projected),
+                (time.perf_counter() - started) * 1000,
+            )
             return
         self._projected, self._projected_clusters = self._project_for(self._audio_type, self._category_filter)
         self._background_layer_count = coherence_projection._background_layer_count(self._projected, self._category_filter)
         self._projection_cache[cache_key] = (self._projected, self._projected_clusters)
         self._invalidate_cache()
         self.update()
+        logging.getLogger("unshuffle").debug(
+            "Sound map projection build: type=%r category=%r points=%s elapsed=%.1fms",
+            self._audio_type,
+            self._category_filter,
+            len(self._projected),
+            (time.perf_counter() - started) * 1000,
+        )
 
     def prewarm_projection(self, audio_type: str, category: str = "") -> None:
         cache_key = (self._points_version, (audio_type or ""), (category or ""))
@@ -294,56 +340,89 @@ class CoherenceMapWidget(QWidget):
             return 10.0
         return max(0.0, distance)
 
-    def paintEvent(self, _event): 
+    def paintEvent(self, _event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), make_qcolor(ColorPalette.BG_LIST))
-        rect = self.rect().adjusted(scaled_px(14), scaled_px(14), -scaled_px(14), -scaled_px(14))
-        if not self._projected:
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.fillRect(self.rect(), make_qcolor(ColorPalette.BG_LIST))
+            rect = self.rect().adjusted(scaled_px(14), scaled_px(14), -scaled_px(14), -scaled_px(14))
+            if not self._projected:
+                painter.setPen(make_qcolor(ColorPalette.TEXT_MUTED))
+                scope = f"{self._audio_type.lower()} " if self._audio_type else ""
+                painter.drawText(rect, Qt.AlignCenter, f"No {scope}sound-map points yet.")
+                return
+
+            zoom = _map_zoom_factor(self._zoom_level)
+
+            background_key = self._background_pixmap_key()
+            self._cached_bg_pixmap = self._background_pixmap_cache.get(background_key)
+            if self._cached_bg_pixmap is None:
+                from PySide6.QtGui import QPixmap
+
+                self._cached_bg_pixmap = QPixmap(self.size())
+                self._cached_bg_pixmap.fill(Qt.transparent)
+                bg_painter = QPainter(self._cached_bg_pixmap)
+                try:
+                    bg_painter.setRenderHint(QPainter.Antialiasing)
+                    self._paint_layer_backgrounds(bg_painter, QRectF(rect), zoom)
+                finally:
+                    bg_painter.end()
+                self._cache_pixmap(self._background_pixmap_cache, background_key, self._cached_bg_pixmap)
+
+            painter.drawPixmap(0, 0, self._cached_bg_pixmap)
+
+            points_key = self._points_pixmap_key()
+            self._cached_points_pixmap = self._points_pixmap_cache.get(points_key)
+            if self._cached_points_pixmap is None:
+                from PySide6.QtGui import QPixmap
+
+                self._cached_points_pixmap = QPixmap(self.size())
+                self._cached_points_pixmap.fill(Qt.transparent)
+                pts_painter = QPainter(self._cached_points_pixmap)
+                try:
+                    pts_painter.setRenderHint(QPainter.Antialiasing)
+
+                    rect_w = float(rect.width())
+                    rect_h = float(rect.height())
+                    side = min(rect_w, rect_h)
+                    left = float(rect.left()) + (rect_w - side) / 2.0
+                    top = float(rect.top()) + (rect_h - side) / 2.0
+
+                    points = []
+                    for point, pos in self._projected:
+                        cx = (pos.x() - 0.5) * zoom + 0.5
+                        cy = (pos.y() - 0.5) * zoom + 0.5
+                        points.append((point, QPointF(left + cx * side, top + cy * side)))
+
+                    self._paint_points(pts_painter, points)
+                finally:
+                    pts_painter.end()
+                self._cache_pixmap(self._points_pixmap_cache, points_key, self._cached_points_pixmap)
+
+            painter.drawPixmap(0, 0, self._cached_points_pixmap)
             painter.setPen(make_qcolor(ColorPalette.TEXT_MUTED))
-            scope = f"{self._audio_type.lower()} " if self._audio_type else ""
-            painter.drawText(rect, Qt.AlignCenter, f"No {scope}sound-map points yet.")
-            return
+        finally:
+            painter.end()
 
-        zoom = _map_zoom_factor(self._zoom_level)
+    def _background_pixmap_key(self) -> tuple:
+        return (
+            self._points_version,
+            self._audio_type,
+            self._category_filter,
+            self._zoom_level,
+            self.width(),
+            self.height(),
+        )
 
-        # 1. Concentric backgrounds caching
-        if self._cached_bg_pixmap is None or self._cached_bg_pixmap.size() != self.size():
-            from PySide6.QtGui import QPixmap
-            self._cached_bg_pixmap = QPixmap(self.size())
-            self._cached_bg_pixmap.fill(Qt.transparent)
-            bg_painter = QPainter(self._cached_bg_pixmap)
-            bg_painter.setRenderHint(QPainter.Antialiasing)
-            self._paint_layer_backgrounds(bg_painter, QRectF(rect), zoom)
-            bg_painter.end()
+    def _points_pixmap_key(self) -> tuple:
+        return (*self._background_pixmap_key(), self._visible_ids_signature)
 
-        painter.drawPixmap(0, 0, self._cached_bg_pixmap)
-
-        # 2. Points caching
-        if self._cached_points_pixmap is None or self._cached_points_pixmap.size() != self.size():
-            from PySide6.QtGui import QPixmap
-            self._cached_points_pixmap = QPixmap(self.size())
-            self._cached_points_pixmap.fill(Qt.transparent)
-            pts_painter = QPainter(self._cached_points_pixmap)
-            pts_painter.setRenderHint(QPainter.Antialiasing)
-            
-            rect_w = float(rect.width())
-            rect_h = float(rect.height())
-            side = min(rect_w, rect_h)
-            left = float(rect.left()) + (rect_w - side) / 2.0
-            top = float(rect.top()) + (rect_h - side) / 2.0
-            
-            points = []
-            for point, pos in self._projected:
-                cx = (pos.x() - 0.5) * zoom + 0.5
-                cy = (pos.y() - 0.5) * zoom + 0.5
-                points.append((point, QPointF(left + cx * side, top + cy * side)))
-                
-            self._paint_points(pts_painter, points)
-            pts_painter.end()
-
-        painter.drawPixmap(0, 0, self._cached_points_pixmap)
-        painter.setPen(make_qcolor(ColorPalette.TEXT_MUTED))
+    @staticmethod
+    def _cache_pixmap(cache: OrderedDict, key: tuple, pixmap) -> None:
+        cache[key] = pixmap
+        cache.move_to_end(key)
+        while len(cache) > 4:
+            cache.popitem(last=False)
 
     def _screen_point(self, pos: QPointF, rect, zoom: float) -> QPointF:
         centered_x = (pos.x() - 0.5) * zoom + 0.5
@@ -443,6 +522,12 @@ class CoherenceAnalyzerPage(QFrame):
         self._records: list[AnalyzerPoint] = []
         self._results: list[dict] = []
         self._data_key = None
+        self._data_scope_audio_type = ""
+        self._data_scope_category = ""
+        self._data_source_signature = None
+        self._data_priority_row_ids: frozenset[int] = frozenset()
+        self._source_cache: OrderedDict[tuple, tuple[list[AnalyzerPoint], list[dict], object]] = OrderedDict()
+        self._prewarmed_projection_key = None
         self._selected_audio_type = "Loops"
         self._selected_category = ""
         self._settings = None
@@ -549,7 +634,17 @@ class CoherenceAnalyzerPage(QFrame):
     def set_auto_checked(self, checked: bool) -> None:
         return
 
-    def refresh_from_app(self, app, *, force: bool = False, audio_type: str | None = None, category: str | None = None) -> None:
+    def refresh_from_app(
+        self,
+        app,
+        *,
+        force: bool = False,
+        audio_type: str | None = None,
+        category: str | None = None,
+        fetch_scope: bool = False,
+        priority_row_ids: set[int] | None = None,
+    ) -> None:
+        started = time.perf_counter()
         try:
             try:
                 self._settings = getattr(app, "settings", None)
@@ -559,9 +654,58 @@ class CoherenceAnalyzerPage(QFrame):
                     self._selected_audio_type = (audio_type or "")
                 if category is not None:
                     self._selected_category = (category or "")
-                records, results = coherence_points_from_app(app)
+                fetch_audio_type = self._selected_audio_type if (self._show_filters or fetch_scope) else ""
+                fetch_category = self._selected_category if (self._show_filters or fetch_scope) else ""
+                priority_ids = set(priority_row_ids or self._priority_row_ids_from_selection(app))
+                session_id = getattr(getattr(app, "engine", None), "session_id", "")
+                source_signature = (
+                    str(session_id or ""),
+                    id(getattr(app, "model", None)),
+                    self._map_point_limit(),
+                    fetch_audio_type,
+                    fetch_category,
+                    frozenset(priority_ids),
+                )
+                cached_source = self._source_cache.get(source_signature)
+                if cached_source is not None and not force:
+                    self._source_cache.move_to_end(source_signature)
+                    self._records, self._results, self._data_key = cached_source
+                    self._data_scope_audio_type = fetch_audio_type
+                    self._data_scope_category = fetch_category
+                    self._data_source_signature = source_signature
+                    self._data_priority_row_ids = frozenset(priority_ids)
+                    self._refresh_category_options()
+                    self._sync_analyzer_data()
+                    self.status.setText(f"{len(self._results)} sound-map results loaded.")
+                    return
+                if not force and self._can_reuse_source_data(
+                    app,
+                    fetch_audio_type=fetch_audio_type,
+                    fetch_category=fetch_category,
+                    priority_ids=priority_ids,
+                ):
+                    self._refresh_category_options()
+                    self._sync_analyzer_data()
+                    self.status.setText(f"{len(self._results)} sound-map results loaded.")
+                    return
+                records, results = coherence_points_from_app(
+                    app,
+                    limit=self._map_point_limit(),
+                    audio_type=fetch_audio_type,
+                    category=fetch_category,
+                    priority_row_ids=priority_ids,
+                )
+                logging.getLogger("unshuffle").debug(
+                    "Sound map data fetch: type=%r category=%r records=%s results=%s elapsed=%.1fms",
+                    fetch_audio_type,
+                    fetch_category,
+                    len(records),
+                    len(results),
+                    (time.perf_counter() - started) * 1000,
+                )
                 data_key = analyzer_data_key(app, records, results)
                 if not force and data_key == self._data_key:
+                    self._data_source_signature = source_signature
                     self._refresh_category_options()
                     self._sync_analyzer_data()
                     self.status.setText(f"{len(results)} sound-map results loaded.")
@@ -569,6 +713,15 @@ class CoherenceAnalyzerPage(QFrame):
                 self._records = records
                 self._results = results
                 self._data_key = data_key
+                self._data_scope_audio_type = fetch_audio_type
+                self._data_scope_category = fetch_category
+                self._data_source_signature = source_signature
+                self._data_priority_row_ids = frozenset(priority_ids)
+                self._source_cache[source_signature] = (records, results, data_key)
+                self._source_cache.move_to_end(source_signature)
+                while len(self._source_cache) > 2:
+                    self._source_cache.popitem(last=False)
+                self._prewarmed_projection_key = None
                 self._refresh_category_options()
                 self._sync_analyzer_data()
                 if not self._show_filters:
@@ -590,12 +743,54 @@ class CoherenceAnalyzerPage(QFrame):
                 self._records = []
                 self._results = []
                 self._data_key = None
+                self._data_scope_audio_type = ""
+                self._data_scope_category = ""
+                self._data_source_signature = None
+                self._data_priority_row_ids = frozenset()
+                self._prewarmed_projection_key = None
                 self.map.set_points([], version=None)
                 if self.category_carousel is not None:
                     self.category_carousel.set_options([("Global", "")])
                 self.status.setText("Sound map could not be refreshed.")
         finally:
             self.set_loading(False)
+
+    def _has_points_for_filter(self, audio_type: str, category: str = "") -> bool:
+        audio_type = (audio_type or "")
+        category = (category or "")
+        if self._data_scope_audio_type and self._data_scope_audio_type != audio_type:
+            return False
+        if self._data_scope_category and self._data_scope_category != category:
+            return False
+        if (not audio_type or not category) and (self._data_scope_audio_type or self._data_scope_category):
+            return False
+        return any(
+            (not audio_type or point.audio_type == audio_type)
+            and (not category or point.category == category)
+            for point in self._records
+        )
+
+    def _visible_ids_need_fetch(self, visible_record_ids: set[str] | None) -> bool:
+        if not visible_record_ids:
+            return False
+        visible = {str(value) for value in visible_record_ids}
+        loaded = {str(point.record_id) for point in self._records}
+        return not visible.issubset(loaded)
+
+    def _can_reuse_source_data(self, app, *, fetch_audio_type: str, fetch_category: str, priority_ids: set[int]) -> bool:
+        if not self._records:
+            return False
+        signature = self._data_source_signature
+        session_id = getattr(getattr(app, "engine", None), "session_id", "")
+        return (
+            isinstance(signature, tuple)
+            and len(signature) >= 6
+            and signature[0] == str(session_id or "")
+            and signature[1] == id(getattr(app, "model", None))
+            and signature[3] == (fetch_audio_type or "")
+            and signature[4] == (fetch_category or "")
+            and signature[5] == frozenset(priority_ids)
+        )
 
     def _refresh_category_options(self) -> None:
         if self.category_carousel is None:
@@ -689,10 +884,68 @@ class CoherenceAnalyzerPage(QFrame):
             version=self._data_key,
         )
 
+    def _map_point_limit(self) -> int:
+        hard_cap = 10000
+        rect = self.map.rect()
+        width = max(1, int(rect.width()))
+        height = max(1, int(rect.height()))
+        if width < scaled_px(160) or height < scaled_px(160):
+            return hard_cap
+        hit_radius = max(4, scaled_px(7))
+        packing_efficiency = 0.9069
+        accessible = int((width * height * packing_efficiency) / max(1.0, math.pi * hit_radius * hit_radius))
+        return max(1, min(hard_cap, accessible))
+
+    def can_reuse_current_data(self, app, *, audio_type: str = "", category: str = "") -> bool:
+        if not self._records:
+            return False
+        session_id = getattr(getattr(app, "engine", None), "session_id", "")
+        signature = self._data_source_signature
+        return (
+            isinstance(signature, tuple)
+            and len(signature) >= 6
+            and signature[0] == str(session_id or "")
+            and signature[1] == id(getattr(app, "model", None))
+            and signature[3] == ""
+            and signature[4] == ""
+            and signature[5] == frozenset()
+            and self._has_points_for_filter(audio_type, category)
+        )
+
+    def _priority_row_ids_from_selection(self, app) -> set[int]:
+        rows: set[int] = set()
+        try:
+            selected = app.selected_records()
+        except Exception:
+            selected = []
+        for rec in selected or []:
+            value = getattr(rec, "staging_row_id", None)
+            if value is None:
+                continue
+            try:
+                rows.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        return rows
+
+    @staticmethod
+    def _row_ids_from_visible_record_ids(visible_record_ids: set[str] | None) -> set[int]:
+        rows: set[int] = set()
+        for value in visible_record_ids or set():
+            try:
+                rows.add(int(value))
+            except (TypeError, ValueError):
+                continue
+        return rows
+
     def prewarm_library_projections(self, *, frontload: bool = False) -> None:
+        prewarm_key = (self._data_key, bool(frontload))
+        if self._prewarmed_projection_key == prewarm_key:
+            return
         if frontload:
-            for audio_type in ("Loops", "Oneshots"):
+            for audio_type in ("", "Loops", "Oneshots"):
                 self.map.prewarm_projection(audio_type, "")
+            self._prewarmed_projection_key = prewarm_key
             return
 
         categories_by_type: dict[str, set[str]] = {"Loops": set(), "Oneshots": set()}
@@ -701,16 +954,42 @@ class CoherenceAnalyzerPage(QFrame):
             category = str(getattr(point, "category", "") or "")
             if audio_type in categories_by_type and category:
                 categories_by_type[audio_type].add(category)
+        self.map.prewarm_projection("", "")
         for audio_type in ("Loops", "Oneshots"):
             self.map.prewarm_projection(audio_type, "")
             for category in sorted(categories_by_type[audio_type]):
                 self.map.prewarm_projection(audio_type, category)
+        self._prewarmed_projection_key = prewarm_key
 
     def set_library_filters(self, audio_type: str, category: str, visible_record_ids: set[str] | None = None) -> None:
         """Mirror the Library sidebar filters when embedded as a Library view."""
         new_audio_type = (audio_type or "")
         new_category = (category or "")
+        priority_row_ids = self._row_ids_from_visible_record_ids(visible_record_ids)
+        needs_fetch = (
+            self._records
+            and (
+                not self._has_points_for_filter(new_audio_type, new_category)
+                or self._visible_ids_need_fetch(visible_record_ids)
+                or (bool(new_category) and self._data_scope_category != new_category)
+            )
+        )
+        if needs_fetch:
+            parent = self.parent()
+            app = getattr(parent, "window", lambda: None)()
+            if app is not None:
+                self.refresh_from_app(
+                    app,
+                    force=False,
+                    audio_type=new_audio_type,
+                    category=new_category,
+                    fetch_scope=True,
+                    priority_row_ids=priority_row_ids,
+                )
+                self.map.set_visible_record_ids(visible_record_ids)
+                return
         if new_audio_type == self._selected_audio_type and new_category == self._selected_category:
+            self._sync_analyzer_data()
             self.map.set_visible_record_ids(visible_record_ids)
             return
         self._selected_audio_type = new_audio_type

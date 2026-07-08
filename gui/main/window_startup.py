@@ -101,7 +101,7 @@ def frontload_startup(window, status_callback=None, done_callback=None) -> None:
         if startup_done["value"]:
             return
         _status("Ready.")
-        QTimer.singleShot(120, _done)
+        _done()
 
     def _after_restore(restored: bool) -> None:
         write_launcher_event_log("frontload-after-restore", restored=restored)

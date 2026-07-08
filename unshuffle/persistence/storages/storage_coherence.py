@@ -1,11 +1,28 @@
-from typing import Any, Dict, List, Optional
+import sqlite3
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 from unshuffle.persistence.stores import coherence_store
 
 
+def _with_write_retry(db, callback: Callable[[], Any]) -> Any:
+    for attempt in range(5):
+        try:
+            with db._write_transaction():
+                return callback()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                raise
+            if attempt == 4:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+    return None
+
+
 def upsert_coherence_results(db, session_id: str, results: List[Any]) -> None:
-    with db._write_transaction():
+    def _write() -> None:
         coherence_store.upsert_coherence_results(db.conn, session_id, results)
+    _with_write_retry(db, _write)
 
 
 def list_coherence_results(db, session_id: str) -> List[Dict[str, Any]]:
@@ -13,8 +30,9 @@ def list_coherence_results(db, session_id: str) -> List[Dict[str, Any]]:
 
 
 def upsert_refinement_candidates(db, session_id: str, candidates: List[Any]) -> None:
-    with db._write_transaction():
+    def _write() -> None:
         coherence_store.upsert_refinement_candidates(db.conn, session_id, candidates)
+    _with_write_retry(db, _write)
 
 
 def list_refinement_candidates(db, session_id: str, state: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -52,15 +70,17 @@ def list_coherence_review_decisions(
 
 
 def upsert_anchor_candidates(db, session_id: str, anchors: List[Any]) -> None:
-    with db._write_transaction():
+    def _write() -> None:
         coherence_store.upsert_anchor_candidates(db.conn, session_id, anchors)
+    _with_write_retry(db, _write)
 
 
 def upsert_coherence_audit(db, session_id: str, results: List[Any], candidates: List[Any], anchors: List[Any]) -> None:
-    with db._write_transaction():
+    def _write() -> None:
         coherence_store.upsert_coherence_results(db.conn, session_id, results)
         coherence_store.upsert_refinement_candidates(db.conn, session_id, candidates)
         coherence_store.upsert_anchor_candidates(db.conn, session_id, anchors)
+    _with_write_retry(db, _write)
 
 
 def upsert_anchor_profiles(db, session_id: str, anchors: List[Any]) -> None:

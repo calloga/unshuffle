@@ -9,6 +9,55 @@ def normalized_model_path(model, row: int, record) -> str:
     return str(record.source_path.resolve()).replace("\\", "/").lower()
 
 
+def _refresh_after_db_delete(model) -> None:
+    if hasattr(model, "refresh_index"):
+        model.refresh_index()
+    refresh_model_caches(model)
+
+
+def _delete_db_path_prefix(model, exclude_path: Path) -> int | None:
+    store = getattr(model, "store", None)
+    if store is None:
+        return None
+    prefix = exclude_path.resolve().as_posix().rstrip("/").lower()
+    pattern = prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "/%"
+    cursor = store.conn.execute(
+        """
+        DELETE FROM staging_records
+        WHERE session_id = ?
+          AND (
+            LOWER(REPLACE(source_path, '\\', '/')) = ?
+            OR LOWER(REPLACE(source_path, '\\', '/')) LIKE ? ESCAPE '!'
+          )
+        """,
+        (store.session_id, prefix, pattern),
+    )
+    removed_count = int(getattr(cursor, "rowcount", 0) or 0)
+    _refresh_after_db_delete(model)
+    return removed_count
+
+
+def _delete_db_paths(model, deleted_paths: list[Path]) -> int | None:
+    store = getattr(model, "store", None)
+    if store is None:
+        return None
+    paths = [path.resolve().as_posix().lower() for path in deleted_paths]
+    if not paths:
+        return 0
+    placeholders = ", ".join("?" for _ in paths)
+    cursor = store.conn.execute(
+        f"""
+        DELETE FROM staging_records
+        WHERE session_id = ?
+          AND LOWER(REPLACE(source_path, '\\', '/')) IN ({placeholders})
+        """,
+        [store.session_id, *paths],
+    )
+    removed_count = int(getattr(cursor, "rowcount", 0) or 0)
+    _refresh_after_db_delete(model)
+    return removed_count
+
+
 def rebuild_model_after_filter(model, keep_record) -> int:
     if not model or not hasattr(model, "records"):
         return 0
@@ -34,10 +83,14 @@ def refresh_model_caches(model) -> None:
     else:
         if hasattr(model, "_rebuild_path_row_cache"):
             model._rebuild_path_row_cache()
-        model._precalculate_colors()
+        if hasattr(model, "_precalculate_colors"):
+            model._precalculate_colors()
 
 
 def remove_excluded_prefix(model, exclude_path: Path) -> int:
+    db_removed = _delete_db_path_prefix(model, exclude_path)
+    if db_removed is not None:
+        return db_removed
     prefix = exclude_path.as_posix().lower()
     return rebuild_model_after_filter(
         model,
@@ -49,6 +102,9 @@ def remove_excluded_prefix(model, exclude_path: Path) -> int:
 
 
 def remove_deleted_paths(model, deleted_paths: list[Path]) -> int:
+    db_removed = _delete_db_paths(model, deleted_paths)
+    if db_removed is not None:
+        return db_removed
     to_remove = {str(path.resolve()).replace("\\", "/").lower() for path in deleted_paths}
     return rebuild_model_after_filter(
         model,

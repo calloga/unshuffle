@@ -90,13 +90,14 @@ def _get_tinted_icon_for_tree(icon_path, color_name) -> QIcon:
     pixmap = QPixmap(str(asset_path(*str(icon_path).replace("\\", "/").split("/"))))
     if pixmap.isNull():
         return QIcon()
-    painter = QPainter(pixmap)
+    image = pixmap.toImage()
+    painter = QPainter(image)
     try:
         painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-        painter.fillRect(pixmap.rect(), color)
+        painter.fillRect(image.rect(), color)
     finally:
         painter.end()
-    return QIcon(pixmap)
+    return QIcon(QPixmap.fromImage(image))
 
 @lru_cache(maxsize=6)
 def tree_file_sequence_color(idx: int):
@@ -234,6 +235,8 @@ class LibraryTreeModel(QStandardItemModel):
         self._record_tags_cache: dict[int, list[str]] = {}
         self._folder_icon: QIcon | None = None
         self._file_icon: QIcon | None = None
+        self._session_store = None
+        self._session_query = None
         self.setColumnCount(2)
         self.setHorizontalHeaderLabels(["Name", "Info"])
 
@@ -251,6 +254,8 @@ class LibraryTreeModel(QStandardItemModel):
         self.custom_tree_profile = profile
 
     def rebuild(self, records: list[PlanRecord], skip_fields: set[str] | None = None):
+        self._session_store = None
+        self._session_query = None
         records = [record for record in records if not self._is_internal_system_record(record)]
         self._prepare_rebuild_caches(records)
         self.clear()
@@ -279,6 +284,35 @@ class LibraryTreeModel(QStandardItemModel):
 
         nodes = build_normal_resolved_tree(records, levels, self._group_records)
         self._append_resolved_nodes(root, nodes, folder_icon)
+        self.rebuildFinished.emit()
+
+    def rebuild_from_store(self, store, query=None, skip_fields: set[str] | None = None):
+        self._session_store = store
+        self._session_query = query
+        self._prepare_icons()
+        self.clear()
+        self.setColumnCount(2)
+        self.setHorizontalHeaderLabels(["Name", "Info"])
+        root = self.invisibleRootItem()
+        levels = [(field, node_type) for field, node_type in self._active_tree_levels() if field not in set(skip_fields or set())]
+        if not levels:
+            item = self._make_node_item("Library", "container", store.count(query), {}, [])
+            item.setData(False, POPULATED_ROLE)
+            item.appendRow([self._dummy_item(), QStandardItem("")])
+            root.appendRow([item, self._make_aux_item("")])
+            self.rebuildFinished.emit()
+            return
+        field, node_type = levels[0]
+        for row in store.child_group_counts({}, field, query):
+            name = self._store_group_display_name(field, row.get("value"))
+            count = int(row.get("count") or 0)
+            fields = {field: name}
+            item = self._make_node_item(name or "Other", node_type, count, fields, [])
+            item.setData(fields, FIELDS_ROLE)
+            item.setData(False, POPULATED_ROLE)
+            item.setIcon(self._folder_icon or QIcon())
+            item.appendRow([self._dummy_item(), QStandardItem("")])
+            root.appendRow([item, self._make_aux_item("")])
         self.rebuildFinished.emit()
 
     def _rebuild_custom(self, records: list[PlanRecord], folder_icon):
@@ -477,12 +511,7 @@ class LibraryTreeModel(QStandardItemModel):
         return active_tree_levels_for_sort(self._sort_column)
 
     def _prepare_rebuild_caches(self, records: list[PlanRecord]) -> None:
-        if self._folder_icon is None or self._file_icon is None:
-            from PySide6.QtWidgets import QFileIconProvider
-
-            icon_provider = QFileIconProvider()
-            self._folder_icon = icon_provider.icon(QFileIconProvider.Folder)
-            self._file_icon = icon_provider.icon(QFileIconProvider.File)
+        self._prepare_icons()
         self._preview_key_cache = {id(rec): canonical_preview_key(rec) for rec in records}
         preview_counts = Counter(self._preview_key_cache.values())
         self._global_collision_keys = {key for key, count in preview_counts.items() if count > 1}
@@ -496,6 +525,20 @@ class LibraryTreeModel(QStandardItemModel):
                 if value:
                     rec_tags.append(value)
             self._record_tags_cache[id(rec)] = rec_tags
+
+    def _prepare_icons(self) -> None:
+        if self._folder_icon is None or self._file_icon is None:
+            from PySide6.QtWidgets import QFileIconProvider
+
+            icon_provider = QFileIconProvider()
+            self._folder_icon = icon_provider.icon(QFileIconProvider.Folder)
+            self._file_icon = icon_provider.icon(QFileIconProvider.File)
+
+    def _dummy_item(self):
+        dummy = QStandardItem("Loading...")
+        dummy.setEnabled(False)
+        dummy.setData(True, DUMMY_ROLE)
+        return dummy
 
     def _preview_key_for_record(self, rec: PlanRecord):
         key = self._preview_key_cache.get(id(rec))
@@ -689,9 +732,59 @@ class LibraryTreeModel(QStandardItemModel):
             return
 
         item.removeRows(0, item.rowCount())
+        if self._session_store is not None:
+            self._populate_store_index(item)
+            item.setData(True, POPULATED_ROLE)
+            return
         records = item.data(RECORDS_ROLE) or []
         self._append_file_items(item, records)
         item.setData(True, POPULATED_ROLE)
+
+    def _populate_store_index(self, item) -> None:
+        fields = dict(item.data(FIELDS_ROLE) or {})
+        levels = self._active_tree_levels()
+        next_level = None
+        for field, node_type in levels:
+            if field not in fields:
+                next_level = (field, node_type)
+                break
+        if next_level is None:
+            records = self._session_store.records_for_fields(fields, self._session_query)
+            item.setData(records, RECORDS_ROLE)
+            self._append_file_items(item, records)
+            return
+        field, node_type = next_level
+        children = self._session_store.child_group_counts(fields, field, self._session_query)
+        # A category with no subcategories is a file leaf, not an "Other"
+        # folder containing the same files.  Keep "Other" only for mixed
+        # categories where empty and named subcategories coexist.
+        empty_subcategory_only = field == "subcategory" and children and all(
+            not str(row.get("value") or "").strip()
+            for row in children
+        )
+        if not children or empty_subcategory_only:
+            records = self._session_store.records_for_fields(fields, self._session_query)
+            item.setData(records, RECORDS_ROLE)
+            self._append_file_items(item, records)
+            return
+        for row in children:
+            name = self._store_group_display_name(field, row.get("value"))
+            count = int(row.get("count") or 0)
+            child_fields = dict(fields)
+            child_fields[field] = name
+            child = self._make_node_item(name or "Other", node_type, count, child_fields, [])
+            child.setData(child_fields, FIELDS_ROLE)
+            child.setData(False, POPULATED_ROLE)
+            child.setIcon(self._folder_icon or QIcon())
+            child.appendRow([self._dummy_item(), QStandardItem("")])
+            item.appendRow([child, self._make_aux_item("")])
+
+    @staticmethod
+    def _store_group_display_name(field: str, value) -> str:
+        name = str(value or ("Other" if field == "subcategory" else ""))
+        if field == "audio_type" and name == "Non-Audio Assets":
+            return "Utility"
+        return name
 
     def _search_text_for_records(self, name, records):
         parts = [str(name or "").lower()]

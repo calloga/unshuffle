@@ -203,14 +203,28 @@ def do_remove_folder(app, root: Path):
         QMessageBox.warning(app, "Remove Folder", "The current library session is not available. Start or load a session first.")
         return
     original_roots = list(getattr(app.engine, "session_source_roots", []) or [])
-    original_records = list(getattr(getattr(app, "model", None), "records", []) or [])
+    original_records = None
     model_reset = False
     try:
         root = Path(root).resolve()
         app.workflow_controller.detach_source_root(root)
         root_prefix = root.as_posix().lower()
 
+        session_store = getattr(app, "session_store", None)
+        if session_store is not None and hasattr(app.model, "refresh_index"):
+            removed_count = session_store.delete_source_root(root)
+            promoted_count = session_store.promote_duplicate_shadows_after_root_removal(root)
+            app.model.refresh_index()
+            if hasattr(app.library_tab, "set_sources"):
+                app.library_tab.set_sources(app.engine.session_source_roots)
+            app.footer.log(
+                f"<b>Removed:</b> {root.name} ({removed_count} staged files removed; {promoted_count} duplicate shadow(s) promoted)."
+            )
+            finalize_model_mutation(app, resort=True, refresh_search=True)
+            return
+
         if app.model:
+            original_records = list(getattr(app.model, "records", []) or [])
             app.model.beginResetModel()
             model_reset = True
             new_records = []
@@ -249,7 +263,7 @@ def do_remove_folder(app, root: Path):
                 app.model.endResetModel()
             except Exception:
                 logging.debug("Could not end failed model reset.", exc_info=True)
-        if getattr(app, "model", None) is not None:
+        if original_records is not None and getattr(app, "model", None) is not None:
             try:
                 app.model.beginResetModel()
                 app.model.records = original_records

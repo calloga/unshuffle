@@ -18,6 +18,20 @@ class AcousticSessionState:
         app = self.app
         model = getattr(app, "model", None)
         engine = getattr(app, "engine", None)
+        store = getattr(model, "store", None)
+        if store is not None and hasattr(store, "acoustic_state_rows"):
+            rows = store.acoustic_state_rows()
+            if not rows:
+                self._last_key = ""
+                return ""
+            payload = {
+                "session_id": str(getattr(engine, "session_id", "") or ""),
+                "count": len(rows),
+                "records": [self._row_token(row) for row in rows],
+            }
+            raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            self._last_key = hashlib.sha1(raw).hexdigest()
+            return self._last_key
         records = list(getattr(model, "records", []) or [])
         if not records:
             self._last_key = ""
@@ -55,6 +69,9 @@ class AcousticSessionState:
 
     def tagged_duplicate_count(self) -> int:
         model = getattr(self.app, "model", None)
+        store = getattr(model, "store", None)
+        if store is not None and hasattr(store, "generated_tag_count"):
+            return store.generated_tag_count(POSSIBLE_DUPLICATE_TAG)
         records = list(getattr(model, "records", []) or [])
         count = 0
         for rec in records:
@@ -65,6 +82,12 @@ class AcousticSessionState:
 
     def staging_record_ids(self) -> set[str]:
         model = getattr(self.app, "model", None)
+        store = getattr(model, "store", None)
+        if store is not None and hasattr(store, "row_ids"):
+            return {str(row_id) for row_id in store.row_ids(None)}
+        row_ids = getattr(model, "_row_ids", None)
+        if isinstance(row_ids, list):
+            return {str(row_id) for row_id in row_ids}
         records = list(getattr(model, "records", []) or [])
         ids = set()
         for row, rec in enumerate(records):
@@ -75,7 +98,7 @@ class AcousticSessionState:
     def _tagging_cache_prefix(self) -> str:
         engine = getattr(self.app, "engine", None)
         session_id = str(getattr(engine, "session_id", "") or "").strip()
-        return f"tagging_pass/{session_id}" if session_id else ""
+        return f"tagging_pass/v3/{session_id}" if session_id else ""
 
     @staticmethod
     def _record_token(rec, row: int) -> dict:
@@ -91,4 +114,17 @@ class AcousticSessionState:
             "category": str(getattr(rec, "category", "") or ""),
             "subcategory": str(getattr(rec, "subcategory", "") or ""),
             "vector_len": vector_len,
+        }
+
+    @staticmethod
+    def _row_token(row: dict) -> dict:
+        return {
+            "row": row.get("row_id"),
+            "path": str(row.get("source_path") or "").replace("\\", "/"),
+            "hash": str(row.get("hash") or ""),
+            "duration": round(float(row.get("duration") or 0.0), 6),
+            "type": str(row.get("audio_type") or ""),
+            "category": str(row.get("category") or ""),
+            "subcategory": str(row.get("subcategory") or ""),
+            "vector_len": int(row.get("vector_len") or 0),
         }

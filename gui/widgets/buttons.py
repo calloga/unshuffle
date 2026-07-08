@@ -135,15 +135,17 @@ class AnimatedIconButton(QPushButton):
         if pixmap.isNull():
             return None
             
-        pixmap = pixmap.scaled(self.icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pixmap = pixmap.scaled(self.icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation).copy()
         
         if self.color:
-            painter = QPainter(pixmap)
+            image = pixmap.toImage()
+            painter = QPainter(image)
             try:
                 painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-                painter.fillRect(pixmap.rect(), self.color)
+                painter.fillRect(image.rect(), self.color)
             finally:
                 painter.end()
+            pixmap = QPixmap.fromImage(image)
             
         self._shared_icon_cache[cache_key] = pixmap
         return pixmap

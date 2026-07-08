@@ -83,13 +83,14 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
         pixmap = QPixmap(str(icon_path))
         if pixmap.isNull():
             return QIcon()
-        painter = QPainter(pixmap)
+        image = pixmap.toImage()
+        painter = QPainter(image)
         try:
             painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(pixmap.rect(), color)
+            painter.fillRect(image.rect(), color)
         finally:
             painter.end()
-        return QIcon(pixmap)
+        return QIcon(QPixmap.fromImage(image))
 
     def _update_tinted_icons(self) -> None:
         self._icon_edit_light = self._get_tinted_icon(EDIT_ICON, ColorPalette.TEXT_LIGHT)

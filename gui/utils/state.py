@@ -60,6 +60,10 @@ def rewrite_staging_from_model(app):
         return
     if not app.engine or not app.engine.db or not app.model:
         return
+    if getattr(app, "session_store", None) is not None and hasattr(app.model, "refresh_index"):
+        app.settings.setValue("last_scan_session_id", app.engine.session_id)
+        app.settings.setValue("last_target", str(app.engine.target_dir))
+        return
     sid = app.engine.session_id
     
     source = app.engine.session_source_roots[0] if app.engine.session_source_roots else app.engine.target_dir
@@ -86,7 +90,7 @@ def finalize_model_mutation(app, *, resort=False, refresh_search=True, tree_dela
     if resort:
         app.view_controller.apply_current_sort_state(force=True)
     rewrite_staging_from_model(app)
-    app.footer.set_count(f"{len(app.model.records)} files ready")
+    app.footer.set_count(f"{app.model.rowCount()} files ready")
     if app.engine and hasattr(app.library_tab, "set_sources"):
         app.library_tab.set_sources(app.engine.session_source_roots)
     if refresh_search:

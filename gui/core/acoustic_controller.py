@@ -51,10 +51,9 @@ class AcousticController(QObject):
             if not source_index.isValid():
                 return None
             row = source_index.row()
-            records = getattr(self.model, "records", [])
-            if row < 0 or row >= len(records):
+            if row < 0 or row >= self.model.rowCount():
                 return None
-            rec = records[row]
+            rec = self.model.record(row)
         elif hasattr(target, "acoustic_vector"):
             rec = target
         elif isinstance(target, Path):
@@ -78,6 +77,13 @@ class AcousticController(QObject):
             self.app.dock_view.set_vibe_state(anchor_text, value, self.app.vibe_bar.isVisible())
 
     def anchor_similarity(self, anchor_rec):
+        session_store = getattr(self.app, "session_store", None)
+        if session_store is not None and not getattr(anchor_rec, "acoustic_vector", None):
+            row_id = getattr(anchor_rec, "staging_row_id", None)
+            if row_id is not None:
+                hydrated = session_store.record_by_row_id(int(row_id))
+                if hydrated is not None:
+                    anchor_rec = hydrated
         if not self.model or not anchor_rec or not anchor_rec.acoustic_vector:
             self._clear_similarity_state()
             self._refresh_similarity_views()
@@ -90,13 +96,32 @@ class AcousticController(QObject):
         category = anchor_rec.category
         audio_type = getattr(anchor_rec, "audio_type", "")
       
-        cat_records = [
-            (i, r)
-            for i, r in enumerate(self.model.records)
-            if r.category == category
-            and getattr(r, "audio_type", "") == audio_type
-            and r.acoustic_vector
-        ]
+        if session_store is not None:
+            cursor = session_store.conn.execute(
+                """
+                SELECT row_id, feature_vector, duration
+                FROM staging_records
+                WHERE session_id = ?
+                  AND category = ?
+                  AND audio_type = ?
+                  AND feature_vector IS NOT NULL
+                ORDER BY row_id ASC
+                """,
+                (session_store.session_id, category, audio_type),
+            )
+            cat_records = [
+                (int(row["row_id"]), row["feature_vector"], float(row["duration"] or 0.0))
+                for row in cursor.fetchall()
+                if row["row_id"] is not None
+            ]
+        else:
+            cat_records = [
+                (i, r.acoustic_vector, getattr(r, "duration", 0.0))
+                for i, r in enumerate(self.model.records)
+                if r.category == category
+                and getattr(r, "audio_type", "") == audio_type
+                and r.acoustic_vector
+            ]
 
         if not cat_records:
             self._clear_similarity_state()
@@ -108,10 +133,18 @@ class AcousticController(QObject):
         anchor_row = -1
         candidates = []
 
-        for i, rec in cat_records:
-            if rec == anchor_rec:
+        anchor_id = getattr(anchor_rec, "staging_row_id", None)
+        if not isinstance(anchor_id, int):
+            anchor_id = None
+        if anchor_id is None and session_store is None:
+            try:
+                anchor_id = list(self.model.records).index(anchor_rec)
+            except ValueError:
+                anchor_id = None
+        for i, blob, duration in cat_records:
+            if i == anchor_id:
                 anchor_row = i
-            candidates.append((i, rec.acoustic_vector, getattr(rec, "duration", 0.0)))
+            candidates.append((i, blob, duration))
 
         if not candidates or anchor_row < 0:
             self._clear_similarity_state()

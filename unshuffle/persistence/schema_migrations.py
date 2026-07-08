@@ -90,6 +90,20 @@ def ensure_feature_schema_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE anchor_profiles ADD COLUMN feature_schema_json TEXT")
 
 
+def ensure_staging_view_indexes(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_audio_type ON staging_records(session_id, audio_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_category ON staging_records(session_id, category)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_subcategory ON staging_records(session_id, subcategory)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_pack ON staging_records(session_id, pack)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_confidence ON staging_records(session_id, confidence)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_pack_order ON staging_records(session_id, pack COLLATE NOCASE, sample_name COLLATE NOCASE, row_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_category_order ON staging_records(session_id, category COLLATE NOCASE, sample_name COLLATE NOCASE, row_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_subcategory_order ON staging_records(session_id, subcategory COLLATE NOCASE, sample_name COLLATE NOCASE, row_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_audio_type_order ON staging_records(session_id, audio_type COLLATE NOCASE, sample_name COLLATE NOCASE, row_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_filename_order ON staging_records(session_id, sample_name COLLATE NOCASE, row_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_confidence_order ON staging_records(session_id, CAST(confidence AS REAL), sample_name COLLATE NOCASE, row_id)")
+
+
 def ensure_fast_hash_columns(conn: sqlite3.Connection) -> None:
     def columns(table: str) -> set[str]:
         return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -106,3 +120,9 @@ def ensure_fast_hash_columns(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cache_fast_hash ON file_cache(fast_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_records_status_fast_hash ON records(status, fast_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_fast_hash ON staging_records(fast_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_audio_type ON staging_records(session_id, audio_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_category ON staging_records(session_id, category)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_subcategory ON staging_records(session_id, subcategory)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_pack ON staging_records(session_id, pack)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_confidence ON staging_records(session_id, confidence)")
+    ensure_staging_view_indexes(conn)

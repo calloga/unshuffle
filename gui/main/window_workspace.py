@@ -141,17 +141,29 @@ def open_build_workspace(window, *, build_page_cls, message_box) -> None:
 
 
 def build_workspace_signature(records, source_roots, active_profile) -> tuple:
-    record_signature = tuple(
-        (
-            getattr(record, "staging_row_id", None),
-            str(getattr(record, "source_path", "") or ""),
-            str(getattr(record, "audio_type", "") or ""),
-            str(getattr(record, "category", "") or ""),
-            str(getattr(record, "subcategory", "") or ""),
-            str(getattr(record, "pack", "") or ""),
+    store = getattr(records, "store", None)
+    if store is not None:
+        row = store.conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(MAX(row_id), -1), COALESCE(MAX(id), -1)
+            FROM staging_records
+            WHERE session_id = ?
+            """,
+            (store.session_id,),
+        ).fetchone()
+        record_signature = ("db", store.session_id, *(row or (0, -1, -1)))
+    else:
+        record_signature = tuple(
+            (
+                getattr(record, "staging_row_id", None),
+                str(getattr(record, "source_path", "") or ""),
+                str(getattr(record, "audio_type", "") or ""),
+                str(getattr(record, "category", "") or ""),
+                str(getattr(record, "subcategory", "") or ""),
+                str(getattr(record, "pack", "") or ""),
+            )
+            for record in records
         )
-        for record in records
-    )
     roots_signature = tuple(str(root) for root in source_roots or [])
     profile_signature = (
         getattr(active_profile, "id", None),

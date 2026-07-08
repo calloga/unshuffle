@@ -32,16 +32,17 @@ class TaggingController(QObject):
                 self.app.coherence_controller.schedule_after_render()
             self.taggingFinished.emit()
             return
-        records = [rec for rec in self.app.model.records if getattr(rec, "is_duplicate_shadow", False) is not True]
-        if not records:
+        model = self.app.model
+        store = getattr(model, "store", None)
+        has_records = (store.count(None) if store is not None and hasattr(store, "count") else model.rowCount()) > 0
+        if not has_records:
             self.clear_state()
             if schedule_coherence and getattr(self.app, "coherence_controller", None):
                 self.app.coherence_controller.schedule_after_render()
             self.taggingFinished.emit()
             return
         session_state = getattr(self.app, "acoustic_session_state", None)
-        cached = session_state.cached_tagging_state() if session_state is not None else self._cached_state(self._records_fingerprint(records))
-        skip_pass = False
+        cached = session_state.cached_tagging_state() if session_state is not None else None
         if cached is not None:
             duplicate_count = int(cached.get("duplicate_count") or 0)
             tagged_count = session_state.tagged_duplicate_count() if session_state is not None else self._tagged_duplicate_count(records)
@@ -59,6 +60,33 @@ class TaggingController(QObject):
                     self.app.coherence_controller.schedule_after_render()
                 self.taggingFinished.emit()
                 return
+
+        records = [rec for rec in model.records if getattr(rec, "is_duplicate_shadow", False) is not True]
+        if not records:
+            self.clear_state()
+            if schedule_coherence and getattr(self.app, "coherence_controller", None):
+                self.app.coherence_controller.schedule_after_render()
+            self.taggingFinished.emit()
+            return
+        if session_state is None:
+            cached = self._cached_state(self._records_fingerprint(records))
+            if cached is not None:
+                duplicate_count = int(cached.get("duplicate_count") or 0)
+                tagged_count = self._tagged_duplicate_count(records)
+                if duplicate_count == 0 or tagged_count > 0:
+                    if tagged_count:
+                        duplicate_count = tagged_count
+                    self._last_duplicate_count = duplicate_count
+                    if getattr(self.app, "library_tab", None):
+                        self.app.library_tab.set_possible_duplicate_filter_enabled(bool(duplicate_count))
+                    if getattr(self.app, "filter_controller", None):
+                        self.app.filter_controller.refresh_dock_filters()
+                    if getattr(self.app, "footer", None):
+                        self.app.footer.set_tagging_state("", False)
+                    if schedule_coherence and getattr(self.app, "coherence_controller", None):
+                        self.app.coherence_controller.schedule_after_render()
+                    self.taggingFinished.emit()
+                    return
 
         self._request_id += 1
         request_id = self._request_id
@@ -141,6 +169,8 @@ class TaggingController(QObject):
             return
         tags_by_path = payload.get("tags_by_path") or {}
         changed_rows: list[int] = []
+        changed_row_ids: list[int] = []
+        store = getattr(model, "store", None)
 
         with model.suspended_sync():
             for row, rec in enumerate(model.records):
@@ -156,9 +186,27 @@ class TaggingController(QObject):
                     evidence = getattr(rec, "evidence", None)
                     if isinstance(evidence, dict):
                         evidence["generated_tags"] = list(generated_tags)
-                changed_rows.append(row)
+                row_id = getattr(rec, "staging_row_id", None)
+                if store is not None and row_id is not None:
+                    row_id = int(row_id)
+                    store.update_record(row_id, rec, commit=False)
+                    cache = getattr(model, "_record_cache", None)
+                    if cache is not None and hasattr(cache, "put_many"):
+                        cache.put_many({row_id: rec})
+                    changed_row_ids.append(row_id)
+                else:
+                    changed_rows.append(row)
+            if changed_row_ids and store is not None:
+                store.conn.commit()
 
-        if changed_rows:
+        if changed_row_ids:
+            model._invalidate_unique_values(StagingColumn.TAGS)
+            visible_by_id = {int(row_id): row for row, row_id in enumerate(getattr(model, "_row_ids", []))}
+            changed_rows = [visible_by_id[row_id] for row_id in changed_row_ids if row_id in visible_by_id]
+            if changed_rows:
+                first, last = min(changed_rows), max(changed_rows)
+                model.dataChanged.emit(model.index(first, StagingColumn.TAGS), model.index(last, StagingColumn.TAGS))
+        elif changed_rows:
             model._invalidate_unique_values(StagingColumn.TAGS)
             first, last = min(changed_rows), max(changed_rows)
             model.dataChanged.emit(model.index(first, StagingColumn.TAGS), model.index(last, StagingColumn.TAGS))
@@ -219,7 +267,7 @@ class TaggingController(QObject):
     def _session_cache_prefix(self) -> str:
         engine = getattr(self.app, "engine", None)
         session_id = str(getattr(engine, "session_id", "") or "").strip()
-        return f"tagging_pass/{session_id}" if session_id else ""
+        return f"tagging_pass/v3/{session_id}" if session_id else ""
 
     def _records_fingerprint(self, records) -> str:
         import hashlib

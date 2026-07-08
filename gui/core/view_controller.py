@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import cast
 
 from PySide6.QtCore import QObject, Signal, Qt, QTimer
@@ -31,6 +32,7 @@ class ViewController(QObject):
         self._tree_rebuild_pending = False
         self._map_prewarm_scheduled = False
         self._tree_prewarm_scheduled = False
+        self._tree_build_signature = None
 
     def apply_current_sort_state(self, *, force: bool = False):
         """Applies sidebar sort using source-model ordering, then refreshes views."""
@@ -56,7 +58,7 @@ class ViewController(QObject):
         if callable(set_group_column):
             set_group_column(column)
         self._set_tree_sort_column(column)
-        if self.app.proxy_model.sortColumn() != -1:
+        if hasattr(self.app.proxy_model, "sortColumn") and self.app.proxy_model.sortColumn() != -1:
             self.app.proxy_model.sort(-1)
         self.update_library_views(tree_delay_ms=0)
 
@@ -68,15 +70,11 @@ class ViewController(QObject):
 
     def set_view_mode(self, mode):
         view_mode = self._normalize_view_mode(mode)
-        if view_mode == "map":
-            page = self.app._ensure_library_map() if hasattr(self.app, "_ensure_library_map") else None
-            if page is not None and hasattr(page, "set_loading"):
-                page.set_loading(True, "Preparing map...")
         self.app.library_tab.set_view_mode(view_mode)
         self.viewModeChanged.emit(view_mode == "tree")
         if view_mode == "tree":
             has_library_data = bool(getattr(self.app, "model", None) and getattr(self.app, "proxy_model", None))
-            if self._tree_rebuild_pending or has_library_data:
+            if self._tree_rebuild_pending or (has_library_data and self._tree_build_signature != self._current_tree_signature()):
                 self.schedule_tree_rebuild(delay_ms=0)
         elif view_mode == "map":
             QTimer.singleShot(0, self.refresh_library_map)
@@ -97,19 +95,43 @@ class ViewController(QObject):
         self.set_view_mode(next_view_mode(self.app.library_tab.current_view_mode(), self._view_available))
 
     def refresh_library_map(self, *, force: bool = False) -> None:
+        started = time.perf_counter()
         library_tab = getattr(self.app, "library_tab", None)
         if library_tab is None or not self._view_available("map"):
             self._map_prewarm_scheduled = False
             return
         page = self.app._ensure_library_map() if hasattr(self.app, "_ensure_library_map") else getattr(library_tab, "coherence_map", None)
         if page is not None and hasattr(page, "refresh_from_app"):
-            if hasattr(page, "set_loading"):
+            audio_type = library_tab._current_audio_type_filter()
+            category = library_tab._current_category_filter()
+            point_limit = 10000
+            map_point_limit = getattr(page, "_map_point_limit", None)
+            if callable(map_point_limit):
+                try:
+                    point_limit = max(1, int(map_point_limit()))
+                except (TypeError, ValueError):
+                    point_limit = 10000
+            visible_ids_from_proxy = getattr(library_tab, "_visible_record_ids_from_proxy", None)
+            visible_ids = None
+            if callable(visible_ids_from_proxy):
+                try:
+                    visible_ids = visible_ids_from_proxy(limit=point_limit)
+                except TypeError:
+                    visible_ids = visible_ids_from_proxy()
+            can_reuse = getattr(page, "can_reuse_current_data", None)
+            warm = bool(
+                callable(can_reuse)
+                and not force
+                and can_reuse(self.app, audio_type=audio_type, category=category)
+            )
+            if not warm and hasattr(page, "set_loading"):
                 page.set_loading(True, "Preparing map...")
             page.refresh_from_app(
                 self.app,
                 force=force,
-                audio_type=library_tab._current_audio_type_filter(),
-                category=library_tab._current_category_filter(),
+                audio_type=audio_type,
+                category=category,
+                priority_row_ids=page._row_ids_from_visible_record_ids(visible_ids) if hasattr(page, "_row_ids_from_visible_record_ids") else None,
             )
             if hasattr(page, "prewarm_library_projections"):
                 is_frontload = getattr(self.app, "_frontloading_startup", False)
@@ -119,10 +141,20 @@ class ViewController(QObject):
                     page.prewarm_library_projections()
             if hasattr(page, "set_library_filters"):
                 page.set_library_filters(
-                    library_tab._current_audio_type_filter(),
-                    library_tab._current_category_filter(),
-                    library_tab._visible_record_ids_from_proxy(),
+                    audio_type,
+                    category,
+                    visible_ids,
                 )
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logging.getLogger("unshuffle").debug(
+                "Library map refresh: warm=%s force=%s type=%r category=%r visible_ids=%s elapsed=%.1fms",
+                warm,
+                force,
+                audio_type,
+                category,
+                "none" if visible_ids is None else len(visible_ids),
+                elapsed_ms,
+            )
         self._map_prewarm_scheduled = False
 
     def prewarm_library_map(self, *, delay_ms: int = 1200) -> None:
@@ -161,8 +193,12 @@ class ViewController(QObject):
             return
         if self.is_tree_visible():
             return
-        filtered = filtered_source_records(self.app.model, self.app.proxy_model)
-        self.app.library_tab.tree_model.rebuild(filtered)
+        session_store = getattr(self.app, "session_store", None)
+        if session_store is not None and hasattr(self.app.library_tab.tree_model, "rebuild_from_store"):
+            self.app.library_tab.tree_model.rebuild_from_store(session_store, getattr(self.app.model, "query", None))
+        else:
+            filtered = filtered_source_records(self.app.model, self.app.proxy_model)
+            self.app.library_tab.tree_model.rebuild(filtered)
         self._tree_rebuild_pending = False
 
     def frontload_library_views(self, *, include_map: bool = True) -> None:
@@ -301,6 +337,16 @@ class ViewController(QObject):
         self._tree_rebuild_pending = True
         self._tree_rebuild_timer.start(delay_ms)
 
+    def _current_tree_signature(self):
+        model = getattr(self.app, "model", None)
+        tree_model = getattr(getattr(self.app, "library_tab", None), "tree_model", None)
+        return (
+            id(model),
+            getattr(model, "query", None),
+            getattr(model, "group_column", None),
+            getattr(tree_model, "sort_column", None),
+        )
+
     def do_tree_rebuild(self):
         self._tree_rebuild_pending = False
         if not self._view_available("tree") and self.app.stack.currentWidget() is not self.app.dock_view:
@@ -324,16 +370,23 @@ class ViewController(QObject):
             return
         states = {view: view.snapshot_state() for view in tree_views}
 
-        try:
-            filtered = filtered_source_records(self.app.model, self.app.proxy_model)
-        except TypeError:
-            logging.debug("Skipped tree rebuild because the proxy model is not ready.", exc_info=True)
-            return
+        session_store = getattr(self.app, "session_store", None)
+        if session_store is None:
+            try:
+                int(self.app.proxy_model.rowCount())
+            except (TypeError, ValueError):
+                logging.debug("Skipped tree rebuild because the proxy model is not ready.", exc_info=True)
+                return
 
         for view in tree_views:
             view.setUpdatesEnabled(False)
         try:
-            self.app.library_tab.tree_model.rebuild(filtered)
+            if session_store is not None and hasattr(self.app.library_tab.tree_model, "rebuild_from_store"):
+                self.app.library_tab.tree_model.rebuild_from_store(session_store, getattr(self.app.model, "query", None))
+            else:
+                filtered = filtered_source_records(self.app.model, self.app.proxy_model)
+                self.app.library_tab.tree_model.rebuild(filtered)
+            self._tree_build_signature = self._current_tree_signature()
             for view in tree_views:
                 view.restore_state(states[view])
         finally:
@@ -344,9 +397,12 @@ class ViewController(QObject):
         if not getattr(self.app, "footer", None):
             return
         if self.app.proxy_model is not None:
-            count = self.app.proxy_model.rowCount()
+            try:
+                count = int(self.app.proxy_model.rowCount())
+            except (TypeError, ValueError):
+                count = 0
         elif self.app.model is not None:
-            count = len(self.app.model.records)
+            count = self.app.model.rowCount() if hasattr(self.app.model, "rowCount") else len(self.app.model.records)
         else:
             count = 0
         self.app.footer.set_count(f"{count} files ready")
@@ -365,14 +421,12 @@ class ViewController(QObject):
         ):
             self.refresh_docked_map(force=False)
         
-        system_controller = getattr(self.app, "system_controller", None)
-        if system_controller is not None:
-            system_controller.refresh_discovery()
-
         if self.is_tree_visible():
             self.schedule_tree_rebuild(tree_delay_ms)
         else:
-            self._tree_rebuild_pending = True
+            self._tree_rebuild_pending = (
+                self._tree_build_signature != self._current_tree_signature()
+            )
 
     def is_tree_visible(self):
         if self.app.stack.currentWidget() is self.app.dock_view:

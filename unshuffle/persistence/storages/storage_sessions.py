@@ -87,6 +87,10 @@ def get_staging_records(db, session_id: str) -> List[Dict]:
     return staging_store.get_staging_records(db.conn, session_id)
 
 
+def get_coherence_staging_records(db, session_id: str) -> List[Dict]:
+    return staging_store.get_coherence_staging_records(db.conn, session_id)
+
+
 def update_staging_record(db, session_id: str, row_id: int, data: Dict[str, str]) -> None:
     with db._write_transaction():
         staging_store.update_staging_record(db.conn, session_id, row_id, data)

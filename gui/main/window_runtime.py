@@ -32,8 +32,20 @@ def apply_runtime_engine(window, engine) -> None:
 def apply_runtime_model(window, model) -> None:
     window.model = model
     if model is not None:
-        model.draft_edit_callback = window.drafting_controller.apply_table_edit
-        model.draft_bulk_callback = window.drafting_controller.apply_table_bulk_updates
+        if hasattr(model, "draft_edit_callback"):
+            model.draft_edit_callback = window.drafting_controller.apply_table_edit
+        if hasattr(model, "draft_bulk_callback"):
+            model.draft_bulk_callback = window.drafting_controller.apply_table_bulk_updates
+    if model is not None and hasattr(model, "sourceModel"):
+        window.proxy_model = model
+        window.search_controller.proxy_model = model
+        window.acoustic_controller.proxy_model = model
+        if getattr(window, "library_tab", None) is not None:
+            window.library_tab.set_proxy_model(model)
+    elif model is not None and getattr(window, "proxy_model", None) is not None:
+        window.proxy_model.setSourceModel(model)
+        if getattr(window, "library_tab", None) is not None:
+            window.library_tab.set_proxy_model(window.proxy_model)
     window.search_controller.model = model
     window.acoustic_controller.model = model
     if getattr(window, "tagging_controller", None):

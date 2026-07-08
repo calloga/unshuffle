@@ -206,13 +206,14 @@ class StartupLauncherDialog(QDialog):
             return QIcon()
         pixmap = pixmap.scaled(QSize(scaled_px(14), scaled_px(14)), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         tint = make_qcolor(ColorPalette.TEXT_MAIN)
-        painter = QPainter(pixmap)
+        image = pixmap.toImage()
+        painter = QPainter(image)
         try:
             painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(pixmap.rect(), tint)
+            painter.fillRect(image.rect(), tint)
         finally:
             painter.end()
-        return QIcon(pixmap)
+        return QIcon(QPixmap.fromImage(image))
 
     def _apply_theme(self) -> None:
         manager = ThemeManager()
@@ -371,11 +372,12 @@ class StartupLauncherDialog(QDialog):
         if not pixmap.isNull():
             tint = make_qcolor(ColorPalette.TEXT_MAIN)
             tint.setAlpha(150)
-            painter = QPainter(pixmap)
+            image = pixmap.toImage()
+            painter = QPainter(image)
             painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(pixmap.rect(), tint)
+            painter.fillRect(image.rect(), tint)
             painter.end()
-            button.setIcon(QIcon(pixmap))
+            button.setIcon(QIcon(QPixmap.fromImage(image)))
         button.setFixedSize(22, 22)
         button.setIconSize(button.size())
         button.clicked.connect(lambda _checked=False, value=root: self._remove_root(value))
@@ -386,13 +388,15 @@ class StartupLauncherDialog(QDialog):
         modes = [mode for mode, check in self.view_checks.items() if check.isChecked()]
         return tuple(normalize_library_view_modes(modes))
 
-    def _add_folder(self) -> None:
+    def _add_folder(self) -> bool:
         start = self._roots()[0] if self._roots() else str(self.settings.value("last_scan_source", "") or "")
         folder = QFileDialog.getExistingDirectory(self, "Add Folder", start)
         if folder and folder not in self._roots():
             self._roots_values.append(folder)
             self._render_roots()
             self._refresh_summary()
+            return True
+        return False
 
     def _remove_root(self, root: str) -> None:
         self._roots_values = [value for value in self._roots_values if value != root]
@@ -400,8 +404,15 @@ class StartupLauncherDialog(QDialog):
         self._refresh_summary()
 
     def _new_session(self) -> None:
+        previous_roots = list(self._roots_values)
+        previous_initial_roots = self._initial_roots
+        previous_selected_session_id = self._selected_session_id
         self._mark_new_session()
-        self._add_folder()
+        if not self._add_folder():
+            self._new_session_requested = False
+            self._selected_session_id = previous_selected_session_id
+            self._initial_roots = previous_initial_roots
+            self._set_roots(previous_roots)
 
     def _mark_new_session(self) -> None:
         self._new_session_requested = True
@@ -430,6 +441,8 @@ class StartupLauncherDialog(QDialog):
         session_id = self._fallback_session_id()
         if not roots:
             mode = "empty"
+            target = ""
+            session_id = ""
         elif _normalized_root_tuple(roots) == _normalized_root_tuple(self._initial_roots) and session_id:
             mode = "restore"
         else:

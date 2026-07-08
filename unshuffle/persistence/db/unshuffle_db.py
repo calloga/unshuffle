@@ -257,6 +257,9 @@ class UnshuffleDB:
     def get_staging_records(self, session_id: str) -> List[Dict]:
         return storage_sessions.get_staging_records(self, session_id)
 
+    def get_coherence_staging_records(self, session_id: str) -> List[Dict]:
+        return storage_sessions.get_coherence_staging_records(self, session_id)
+
     def upsert_coherence_results(self, session_id: str, results: List[Any]):
         storage_coherence.upsert_coherence_results(self, session_id, results)
 

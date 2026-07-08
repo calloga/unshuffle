@@ -122,6 +122,8 @@ class SearchController(QObject):
         self._audio_types = types
         if self.proxy_model:
             self.proxy_model.set_audio_types(types)
+            if hasattr(self.proxy_model, "set_show_non_audio_assets"):
+                self.proxy_model.set_show_non_audio_assets(bool(all_files))
         if self.app and hasattr(self.app, "sync_type_filter_state"):
             self.app.sync_type_filter_state()
         
@@ -340,6 +342,16 @@ class SearchController(QObject):
             id_set = {int(value) for value in matched_ids}
         except (TypeError, ValueError):
             return []
+        store = getattr(self.model, "store", None)
+        if store is not None and hasattr(store, "lightweight_rows_by_ids"):
+            from unshuffle.core import parse_tags, plan_record_from_staging_row
+
+            try:
+                rows = store.lightweight_rows_by_ids(id_set)
+            except TypeError:
+                rows = None
+            if isinstance(rows, list):
+                return [plan_record_from_staging_row(row, parse_tags) for row in rows]
         records = []
         for row, record in enumerate(getattr(self.model, "records", []) or []):
             record_id = self.model.record_id(row) if hasattr(self.model, "record_id") else row

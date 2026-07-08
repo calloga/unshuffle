@@ -190,4 +190,5 @@ class StartupSplash(QWidget):
         painter.setPen(QPen(QColor(255, 255, 255, 30), 1))
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 8, 8)
+        painter.end()
         super().paintEvent(event)

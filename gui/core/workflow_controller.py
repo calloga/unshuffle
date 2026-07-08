@@ -418,7 +418,8 @@ class WorkflowController(QObject):
         status_callback=None,
         summary_callback=None,
     ):
-        from ..models import StagingTableModel
+        from ..models import DbBackedStagingTableModel, StagingTableModel
+        from .staging_session_store import StagingSessionStore
         from ..utils.state import finalize_model_mutation
         from ..utils import ui_helpers
         from PySide6.QtCore import QTimer
@@ -447,18 +448,37 @@ class WorkflowController(QObject):
                 status_callback(message)
 
         _finalizing(0, "Finalizing scan...")
-        if is_append and self.app.model:
+        db_model_attached = False
+        db_conn = getattr(getattr(self.app, "engine", None), "db", None)
+        session_id = str(getattr(getattr(self.app, "engine", None), "session_id", "") or "")
+        if db_conn is not None and session_id:
+            try:
+                session_store = StagingSessionStore(db_conn, session_id)
+                model = DbBackedStagingTableModel(
+                    session_store,
+                    self.app.undo_stack,
+                    sync_callback=self.app.data_manager.sync_record_to_db,
+                )
+                self.app.session_store = session_store
+                self.app.set_runtime_context(model=model)
+                db_model_attached = True
+            except Exception:
+                logging.exception("Failed to attach DB-backed staging model; falling back to in-memory model.")
+
+        if not db_model_attached and is_append and self.app.model:
             self.app.model.beginResetModel()
-            self.app.model.records.extend(new_records)
+            if hasattr(self.app.model, "records") and hasattr(self.app.model.records, "extend"):
+                self.app.model.records.extend(new_records)
             if hasattr(self.app.model, "_rebuild_row_and_color_caches"):
                 self.app.model._rebuild_row_and_color_caches()
-            else:
+            elif hasattr(self.app.model, "_precalculate_colors"):
                 self.app.model._precalculate_colors()
             self.app.model.endResetModel()
         else:
-            model = StagingTableModel(new_records, self.app.undo_stack, sync_callback=self.app.data_manager.sync_record_to_db)
-            self.app.set_runtime_context(model=model)
-            self.app.proxy_model.setSourceModel(self.app.model)
+            if not db_model_attached:
+                model = StagingTableModel(new_records, self.app.undo_stack, sync_callback=self.app.data_manager.sync_record_to_db)
+                self.app.set_runtime_context(model=model)
+                self.app.proxy_model.setSourceModel(self.app.model)
 
             workflow_scan_finalization.reset_library_search(
                 self.app,
@@ -471,7 +491,7 @@ class WorkflowController(QObject):
             
         stats = workflow_scan_finalization.normalized_scan_stats(stats, new_records, scan_category_counts)
         self._last_scan_stats = stats
-        self.app.footer.set_count(f"{len(self.app.model.records)} files ready")
+        self.app.footer.set_count(f"{self.app.model.rowCount()} files ready")
 
         workflow_scan_finalization.update_corrupt_filter_state(self.app)
         _finalizing(3, "Refreshing scan filters...")
@@ -503,7 +523,7 @@ class WorkflowController(QObject):
                     finalize_model_mutation(self.app, resort=True, refresh_search=False, tree_delay_ms=60)
                 else:
                     self.app.view_controller.apply_current_sort_state()
-                    self.app.footer.set_count(f"{len(self.app.model.records)} files ready")
+                    self.app.footer.set_count(f"{self.app.model.rowCount()} files ready")
                     if self.app.engine and hasattr(self.app.library_tab, "set_sources"):
                         self.app.library_tab.set_sources(self.app.engine.session_source_roots)
                     self.app.view_controller.update_library_views(tree_delay_ms=60)

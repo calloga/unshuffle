@@ -162,6 +162,33 @@ def get_staging_records(conn: sqlite3.Connection, session_id: str) -> list[dict]
     return [dict(row) for row in cursor.fetchall()]
 
 
+def get_coherence_staging_records(conn: sqlite3.Connection, session_id: str) -> list[dict]:
+    cursor = conn.execute(
+        """
+        SELECT
+            row_id,
+            id,
+            source_path,
+            pack,
+            category,
+            subcategory,
+            audio_type,
+            confidence,
+            feature_vector,
+            evidence_json,
+            is_preserved
+        FROM staging_records
+        WHERE session_id = ?
+          AND COALESCE(is_preserved, 0) = 0
+          AND COALESCE(category, '') NOT IN ('Non-Audio Assets', 'Metadata')
+          AND feature_vector IS NOT NULL
+        ORDER BY row_id ASC, id ASC
+        """,
+        (session_id,),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
 def update_staging_record(conn: sqlite3.Connection, session_id: str, row_id: int, data: dict[str, str]) -> None:
     fields = [f"{key} = ?" for key in data.keys()]
     params = list(data.values()) + [session_id, row_id]

@@ -69,6 +69,39 @@ class MainWindowDebounceTests(unittest.TestCase):
         self.assertEqual(request.view_modes, ("table", "tree", "map"))
         close_qt_window(dialog, app)
 
+    def test_startup_launcher_cancelled_new_session_restores_previous_restore_choice(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.startup_launcher import StartupLauncherDialog
+
+        app = QApplication.instance() or QApplication([])
+
+        settings = SimpleNamespace(
+            value=mock.Mock(
+                side_effect=lambda key, default="": {
+                    "last_scan_session_id": "last-session",
+                    "last_target": "D:/Music/Drum Kits",
+                    "last_scan_source": "D:/Music/Drum Kits",
+                }.get(key, default)
+            )
+        )
+        settings_controller = SimpleNamespace(
+            settings=settings,
+            get_library_view_modes=mock.Mock(return_value=("table", "tree")),
+        )
+
+        with mock.patch("gui.widgets.startup_launcher.load_session_sources", return_value=["D:/Music/Drum Kits"]), \
+             mock.patch("gui.widgets.startup_launcher.QFileDialog.getExistingDirectory", return_value=""):
+            dialog = StartupLauncherDialog(settings_controller)
+            dialog._new_session()
+
+        request = dialog.launch_request()
+
+        self.assertEqual(request.mode, "restore")
+        self.assertEqual(request.session_id, "last-session")
+        self.assertEqual(request.roots, ("D:/Music/Drum Kits",))
+        close_qt_window(dialog, app)
+
     def test_startup_launcher_uses_theme_without_logo_pixmap(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtGui import QColor
@@ -1779,7 +1812,7 @@ class MainWindowDebounceTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             window._page_history = []
             window._page_history_index = -1
@@ -1835,7 +1868,7 @@ class MainWindowDebounceTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             window._page_history = []
             window._page_history_index = -1
@@ -1952,7 +1985,7 @@ class MainWindowDebounceTests(unittest.TestCase):
         from gui.utils.constants import DOCKED_MAXIMUM_WIDTH, DOCKED_WINDOW_WIDTH
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             window.footer.set_docked_presentation(False)
             window.footer.set_coherence_state("Coherence looks stable. Library is ready to build.", True, can_build=True)
@@ -2011,7 +2044,7 @@ class MainWindowDebounceTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             window.apply_app_settings(
                 {
@@ -2173,7 +2206,7 @@ class MainWindowDebounceTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             class _DummyModel:
                 def record(self, row):
@@ -2211,7 +2244,7 @@ class MainWindowDebounceTests(unittest.TestCase):
         settings.remove("last_target")
         settings.setValue("classification_range_min", 0.42)
 
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             control = window.library_tab.sidebar.signal_floor_control
             self.assertEqual(control.slider.value(), 0)
@@ -4789,6 +4822,23 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         refresh_mock.assert_called_once_with(tree_delay_ms=0)
         parent.save_library_page_state.assert_called_once_with()
 
+    def test_library_tab_table_view_switch_does_not_invalidate_model(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtGui import QUndoStack
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.library_tab import LibraryTab
+
+        app = QApplication.instance() or QApplication([])
+        tab = LibraryTab(QUndoStack())
+        try:
+            tab.proxy_model = mock.Mock()
+            tab.set_view_mode("tree")
+            tab.set_view_mode("table")
+
+            tab.proxy_model.invalidate.assert_not_called()
+        finally:
+            close_qt_window(tab, app)
+
     def test_set_view_mode_map_refreshes_map_path(self):
         from gui.core.view_controller import ViewController
         from gui.core import view_controller as view_controller_module
@@ -4823,7 +4873,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
              ):
             controller.set_view_mode("map")
 
-        page.set_loading.assert_called_once_with(True, "Preparing map...")
+        page.set_loading.assert_not_called()
         refresh_mock.assert_called_once_with()
         parent.save_library_page_state.assert_called_once_with()
 
@@ -4863,6 +4913,41 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         page.refresh_from_app.assert_called_once()
         page.prewarm_library_projections.assert_called_once_with()
         page.set_library_filters.assert_called_once_with("", "", None)
+
+    def test_refresh_library_map_does_not_show_loader_for_warm_page(self):
+        from gui.core.view_controller import ViewController
+
+        class _LibraryTab:
+            def __init__(self):
+                self.coherence_map = None
+
+            def _current_audio_type_filter(self):
+                return ""
+
+            def _current_category_filter(self):
+                return ""
+
+            def _visible_record_ids_from_proxy(self):
+                return None
+
+            def is_view_available(self, mode):
+                return mode == "map"
+
+        page = mock.Mock()
+        page.can_reuse_current_data.return_value = True
+
+        class _Parent(QObject):
+            def __init__(self):
+                super().__init__()
+                self.model = mock.Mock()
+                self.library_tab = _LibraryTab()
+                self._ensure_library_map = mock.Mock(return_value=page)
+
+        controller = ViewController(_Parent())
+        controller.refresh_library_map()
+
+        page.set_loading.assert_not_called()
+        page.refresh_from_app.assert_called_once()
 
     def test_update_library_views_refreshes_docked_map_when_in_docked_map_mode(self):
         from gui.core.view_controller import ViewController
@@ -4981,7 +5066,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             with mock.patch.object(window.proxy_model, "clear_similarity") as clear_mock, \
                  mock.patch.object(window.view_controller, "update_library_views") as refresh_mock:
@@ -5002,7 +5087,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             window._on_confidence_range_changed(0.25, 1.0)
             self.assertIn('confidence:"25-100"', window.library_tab.edit_search.text())
@@ -5056,7 +5141,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.models.proxy import MultiFilterProxyModel
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             first = mock.Mock(spec=PlanRecord)
             first.pack = "Zulu"
@@ -5105,7 +5190,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             window.library_tab.edit_search.setText('cat:"Kicks", confidence:"25-100"')
             window.library_tab.category_carousel.set_active_values({"Kicks"})
@@ -5133,7 +5218,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             window.sync_search_ui_state(
                 query='category:"Kicks"',
@@ -5161,7 +5246,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             window.show()
             sidebar = window.library_tab.sidebar
@@ -5205,7 +5290,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
                 pass
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         record = PlanRecord(Path("D:/Samples/Pack/kick.wav"), "Pack", "Kicks", "Oneshots", "0.9")
         build_page = BuildPage(FakeSettings(), [record], [])
         try:
@@ -5236,7 +5321,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             window.show()
             app.processEvents()
@@ -5258,7 +5343,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             query = 'source:"D:/Samples/Pack"'
             window.dock_view.set_filters([("Dir: Pack", query)])
@@ -5287,7 +5372,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             carousel = window.library_tab.category_carousel
             self.assertIn("Full Drums", [value for _name, value in carousel.options])
@@ -5311,6 +5396,44 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
                     pass
             close_qt_window(window, app)
 
+    def test_type_toggle_syncs_map_after_proxy_filter_updates(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtGui import QUndoStack
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.library_tab import LibraryTab
+
+        app = QApplication.instance() or QApplication([])
+        tab = LibraryTab(QUndoStack())
+        try:
+            calls = []
+            page = tab.ensure_coherence_map()
+            page.set_library_filters = mock.Mock(side_effect=lambda audio_type, category, visible: calls.append(
+                (audio_type, category, set(visible or set()))
+            ))
+            tab.set_view_mode("map")
+            proxy_model = mock.Mock()
+            proxy_model.sourceModel.return_value = object()
+            proxy_model.rowCount.return_value = 1
+            proxy_model.index.return_value = mock.Mock()
+            proxy_model.mapToSource.return_value = mock.Mock(isValid=lambda: True, row=lambda: 42)
+
+            def _set_audio_types(_types):
+                proxy_model.mapToSource.return_value.row = lambda: 84
+
+            proxy_model.set_audio_types.side_effect = _set_audio_types
+            proxy_model.set_show_non_audio_assets = mock.Mock()
+            tab.proxy_model = proxy_model
+            tab.typeToggleClicked.connect(lambda _oneshots, _loops, all_files: proxy_model.set_audio_types(None if all_files else {"Loops"}))
+
+            tab.type_picker.btn_loops.click()
+            calls.clear()
+            tab.type_picker.btn_all.click()
+
+            assert calls
+            assert calls[-1] == ("", "", {"84"})
+        finally:
+            close_qt_window(tab, app)
+
     def test_library_view_menu_controls_toggle_and_prewarm(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
@@ -5318,39 +5441,46 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        settings = create_app_settings()
-        settings.remove("library_view_modes_json")
-        window = ModernApp()
-        try:
-            window.set_library_view_available("map", False)
-            window.set_library_view_available("tree", False)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "UNSHUFFLE_QSETTINGS_ORG": f"UnshuffleTests-{uuid.uuid4()}",
+                "UNSHUFFLE_QSETTINGS_APP": "workflow-characterization",
+            },
+        ):
+            settings = create_app_settings()
+            settings.clear()
+            window = ModernApp(defer_startup_restore=True)
+            try:
+                window.set_library_view_available("map", False)
+                window.set_library_view_available("tree", False)
 
-            self.assertFalse(window.library_tab.is_view_available("map"))
-            self.assertFalse(window.library_tab.is_view_available("tree"))
-            self.assertTrue(window.library_tab.is_view_available("table"))
-            self.assertFalse(window.library_tab.btn_map_view.isVisible())
-            self.assertFalse(window.library_tab.btn_tree_view.isVisible())
-            self.assertIsNone(window.library_tab.coherence_map)
+                self.assertFalse(window.library_tab.is_view_available("map"))
+                self.assertFalse(window.library_tab.is_view_available("tree"))
+                self.assertTrue(window.library_tab.is_view_available("table"))
+                self.assertFalse(window.library_tab.btn_map_view.isVisible())
+                self.assertFalse(window.library_tab.btn_tree_view.isVisible())
+                self.assertIsNone(window.library_tab.coherence_map)
 
-            with mock.patch.object(window.view_controller, "refresh_library_map") as refresh_map, \
-                 mock.patch.object(window.view_controller, "_prewarm_library_tree_now") as prewarm_tree:
-                window.view_controller.frontload_library_views()
+                with mock.patch.object(window.view_controller, "refresh_library_map") as refresh_map, \
+                     mock.patch.object(window.view_controller, "_prewarm_library_tree_now") as prewarm_tree:
+                    window.view_controller.frontload_library_views()
 
-            refresh_map.assert_not_called()
-            prewarm_tree.assert_not_called()
+                refresh_map.assert_not_called()
+                prewarm_tree.assert_not_called()
 
-            window.set_library_view_available("table", False)
-            self.assertTrue(window.library_tab.is_view_available("table"))
-            self.assertTrue(window.custom_menu_bar.library_view_actions["table"].isChecked())
-        finally:
-            settings.remove("library_view_modes_json")
-            settings.sync()
-            if getattr(window, "engine", None):
-                try:
-                    window.engine.close()
-                except Exception:
-                    pass
-            close_qt_window(window, app)
+                window.set_library_view_available("table", False)
+                self.assertTrue(window.library_tab.is_view_available("table"))
+                self.assertTrue(window.custom_menu_bar.library_view_actions["table"].isChecked())
+            finally:
+                settings.clear()
+                settings.sync()
+                if getattr(window, "engine", None):
+                    try:
+                        window.engine.close()
+                    except Exception:
+                        pass
+                close_qt_window(window, app)
 
     def test_library_map_is_created_lazily_when_enabled_and_opened(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -5359,25 +5489,30 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        settings = create_app_settings()
-        settings.remove("current_page")
-        settings.remove("library_view_modes_json")
-        window = ModernApp()
-        try:
-            self.assertIsNone(window.library_tab.coherence_map)
-            window.view_controller.set_view_mode("map")
-            self.assertIsNotNone(window.library_tab.coherence_map)
-            self.assertEqual(window.library_tab.current_view_mode(), "map")
-        finally:
-            settings.remove("current_page")
-            settings.remove("library_view_modes_json")
-            settings.sync()
-            if getattr(window, "engine", None):
-                try:
-                    window.engine.close()
-                except Exception:
-                    pass
-            close_qt_window(window, app)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "UNSHUFFLE_QSETTINGS_ORG": f"UnshuffleTests-{uuid.uuid4()}",
+                "UNSHUFFLE_QSETTINGS_APP": "workflow-characterization",
+            },
+        ):
+            settings = create_app_settings()
+            settings.clear()
+            window = ModernApp(defer_startup_restore=True)
+            try:
+                self.assertIsNone(window.library_tab.coherence_map)
+                window.view_controller.set_view_mode("map")
+                self.assertIsNotNone(window.library_tab.coherence_map)
+                self.assertEqual(window.library_tab.current_view_mode(), "map")
+            finally:
+                settings.clear()
+                settings.sync()
+                if getattr(window, "engine", None):
+                    try:
+                        window.engine.close()
+                    except Exception:
+                        pass
+                close_qt_window(window, app)
 
     def test_library_table_column_visibility_persistence(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -5394,7 +5529,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
             settings.remove(f"table_column_visible_user_set_{col.name}")
         settings.sync()
 
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         from gui.models.staging_table import StagingTableModel
         source_model = StagingTableModel([], undo_stack=None, sync_callback=None)
         window.proxy_model.setSourceModel(source_model)

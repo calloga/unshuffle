@@ -130,10 +130,12 @@ class LibrarySidebarItem(QFrame):
         semi_transparent_white.setAlpha(SIDEBAR_ICON_TINT_ALPHA)
         pixmap = QPixmap(str(asset_path("icons", "close.png")))
         if not pixmap.isNull():
-            painter = QPainter(pixmap)
+            image = pixmap.toImage()
+            painter = QPainter(image)
             painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(pixmap.rect(), semi_transparent_white)
+            painter.fillRect(image.rect(), semi_transparent_white)
             painter.end()
+            pixmap = QPixmap.fromImage(image)
 
         self.btn = QPushButton("")
         if not pixmap.isNull():

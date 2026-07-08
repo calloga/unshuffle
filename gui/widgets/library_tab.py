@@ -470,7 +470,6 @@ class LibraryTab(QWidget):
             self.category_carousel.set_active_values(set())
             for category in sorted(str(value) for value in invalid_active_values):
                 self.categoryFilterRequested.emit(category, False)
-        self.sync_map_filters()
 
     def _on_category_carousel_toggled(self, category, is_active):
         self.category_carousel.set_active_values({category} if is_active else set())
@@ -512,11 +511,11 @@ class LibraryTab(QWidget):
             )
             self.toolbar_layout.insertWidget(4, self.search_container, 1)
 
-    def _on_type_toggle_clicked(self, _):
+    def _on_type_toggle_clicked(self, *_args):
         oneshots, loops, all_files = self.type_picker.get_state()
         self._refresh_category_options_for_type(oneshots, loops, all_files)
-        self.sync_map_filters()
         self.typeToggleClicked.emit(oneshots, loops, all_files)
+        self.sync_map_filters()
 
     def _show_context_menu(self, pos):
         show_library_context_menu(self, pos)
@@ -702,11 +701,7 @@ class LibraryTab(QWidget):
         if view_mode == "table":
             self.apply_table_column_visibility()
             QTimer.singleShot(0, self._apply_proportional_column_widths)
-            if self.proxy_model is not None:
-                self.proxy_model.invalidate()
             self.view_table.viewport().update()
-        if is_map:
-            self.sync_map_filters()
         QTimer.singleShot(0, self._sync_view_scrollbar)
 
     def _normalize_view_mode(self, mode) -> str:
@@ -729,10 +724,20 @@ class LibraryTab(QWidget):
         page.set_library_filters(
             self._current_audio_type_filter(),
             self._current_category_filter(),
-            self._visible_record_ids_from_proxy(),
+            self._visible_record_ids_from_proxy(limit=self._map_visible_id_limit(page)),
         )
 
-    def _visible_record_ids_from_proxy(self) -> set[str] | None:
+    @staticmethod
+    def _map_visible_id_limit(page) -> int:
+        limit_fn = getattr(page, "_map_point_limit", None)
+        if callable(limit_fn):
+            try:
+                return max(1, int(limit_fn()))
+            except Exception:
+                pass
+        return 10000
+
+    def _visible_record_ids_from_proxy(self, *, limit: int | None = None) -> set[str] | None:
         proxy = getattr(self, "proxy_model", None)
         if proxy is None:
             return None
@@ -740,6 +745,12 @@ class LibraryTab(QWidget):
         if model is None:
             return None
         row_count = proxy.rowCount()
+        effective_limit = max(1, int(limit or 10000))
+        if row_count > effective_limit:
+            matched_ids = getattr(proxy, "matched_ids", None)
+            if matched_ids is not None and len(matched_ids) <= effective_limit:
+                return {str(row_id) for row_id in matched_ids}
+            return None
         if hasattr(model, "rowCount") and row_count == model.rowCount():
             matched_ids = getattr(proxy, "matched_ids", None)
             has_filters = bool(
@@ -754,7 +765,7 @@ class LibraryTab(QWidget):
             if not has_filters:
                 return None
         visible_ids: set[str] = set()
-        for row in range(row_count):
+        for row in range(min(row_count, effective_limit)):
             source_index = proxy.mapToSource(proxy.index(row, 0))
             if not source_index.isValid():
                 continue
@@ -863,6 +874,8 @@ class LibraryTab(QWidget):
                 if index.isValid()
             }
         )
+        if hasattr(model, "record"):
+            return [model.record(row) for row in rows if 0 <= row < model.rowCount()]
         return [model.records[row] for row in rows if 0 <= row < len(model.records)]
 
     def _on_row_resized(self, row, oldSize, newSize):
@@ -956,6 +969,9 @@ class LibraryTab(QWidget):
 
     def _records_for_search_suggestions(self) -> list[object]:
         model = self.proxy_model.sourceModel() if self.proxy_model and hasattr(self.proxy_model, "sourceModel") else None
+        store = getattr(model, "store", None)
+        if store is not None:
+            return []
         return list(getattr(model, "records", []) or [])
 
     def set_possible_duplicate_filter_enabled(self, enabled: bool):

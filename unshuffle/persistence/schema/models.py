@@ -224,6 +224,11 @@ class StagingRecord(BaseModel):
             (('session_id',), False),
             (('session_id', 'row_id', 'id'), False),
             (('session_id', 'source_path'), False),
+            (('session_id', 'audio_type'), False),
+            (('session_id', 'category'), False),
+            (('session_id', 'subcategory'), False),
+            (('session_id', 'pack'), False),
+            (('session_id', 'confidence'), False),
         )
 
 

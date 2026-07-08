@@ -119,6 +119,8 @@ def _startup_request(settings_controller: SettingsController) -> StartupLaunchRe
 
 
 def _persist_request_context(settings_controller: SettingsController, request: StartupLaunchRequest) -> None:
+    if request.mode == "empty":
+        return
     settings = settings_controller.settings
     if request.target:
         if request.mode in {"restore", "refresh"}:
@@ -140,12 +142,9 @@ def _dismiss_splash(splash: StartupSplash | None) -> None:
         if hasattr(splash, "close"):
             splash.close()
         if hasattr(splash, "deleteLater"):
-            splash.deleteLater()
+            QTimer.singleShot(0, splash.deleteLater)
     except Exception:
         pass
-    app = QApplication.instance()
-    if app is not None:
-        app.processEvents()
 
 
 def _show_window(window: ModernApp, splash: StartupSplash | None = None) -> None:

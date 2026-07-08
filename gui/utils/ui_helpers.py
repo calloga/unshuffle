@@ -66,7 +66,7 @@ def open_explorer(app, target):
     try:
         if isinstance(target, QModelIndex):
             row = app.proxy_model.mapToSource(target).row()
-            rec = app.model.records[row]
+            rec = app.model.record(row)
         else:
             rec = target
         path = str(rec.source_path.parent.absolute())
@@ -410,7 +410,11 @@ def export_csv(app):
     path, _ = QFileDialog.getSaveFileName(app, "Export CSV", default_dir, "CSV Files (*.csv)")
     if path:
         try:
-            exported = app.data_manager.export_to_csv(path, app.model.records)
+            session_store = getattr(app, "session_store", None)
+            if session_store is not None:
+                exported = session_store.export_csv(Path(path))
+            else:
+                exported = app.data_manager.export_to_csv(path, app.model.records)
         except Exception as exc:
             QMessageBox.warning(app, "Export CSV", f"Could not export CSV: {exc}")
             return

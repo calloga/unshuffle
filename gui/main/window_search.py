@@ -6,7 +6,7 @@ import shiboken6
 def current_records(window):
     if not window.model:
         return []
-    return list(window.model.records)
+    return getattr(window.model, "records", [])
 
 
 def set_search_status(window, text: str) -> None:

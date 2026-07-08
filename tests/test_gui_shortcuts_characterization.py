@@ -401,7 +401,7 @@ class MainWindowShortcutTests(unittest.TestCase):
         from gui.main.launcher import ModernApp
 
         app = QApplication.instance() or QApplication([])
-        window = ModernApp()
+        window = ModernApp(defer_startup_restore=True)
         try:
             undo_shortcuts = {seq.toString() for seq in window.act_undo.shortcuts()}
             redo_shortcuts = {seq.toString() for seq in window.act_redo.shortcuts()}

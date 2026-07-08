@@ -9,10 +9,7 @@ def refinement_updates(model, rows: list[dict]) -> list[tuple]:
     if model is None:
         return []
     updates = []
-    row_by_id = {
-        str(getattr(rec, "staging_row_id", row) if getattr(rec, "staging_row_id", None) is not None else row): rec
-        for row, rec in enumerate(model.records)
-    }
+    row_by_id = _records_by_id(model, [str(row.get("record_id") or "") for row in rows])
     for row in rows:
         rec = row_by_id.get(str(row.get("record_id")))
         if rec is None:
@@ -28,6 +25,35 @@ def refinement_updates(model, rows: list[dict]) -> list[tuple]:
             if current != new_value:
                 updates.append((rec, StagingColumn.CATEGORY, new_value))
     return updates
+
+
+def _records_by_id(model, record_ids: list[str]) -> dict[str, object]:
+    ids = []
+    seen = set()
+    for value in record_ids:
+        try:
+            row_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if row_id in seen:
+            continue
+        seen.add(row_id)
+        ids.append(row_id)
+
+    store = getattr(model, "store", None)
+    if store is not None and hasattr(store, "lightweight_rows_by_ids"):
+        from unshuffle.core import parse_tags, plan_record_from_staging_row
+
+        return {
+            str(int(row["row_id"])): plan_record_from_staging_row(row, parse_tags)
+            for row in store.lightweight_rows_by_ids(ids)
+            if row.get("row_id") is not None
+        }
+
+    return {
+        str(getattr(rec, "staging_row_id", row) if getattr(rec, "staging_row_id", None) is not None else row): rec
+        for row, rec in enumerate(model.records)
+    }
 
 
 def learning_adjustments_for_updates(updates: list[tuple]) -> list[tuple[str, str, float]]:

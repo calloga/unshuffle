@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from typing import Callable
 
 from .anchor_profiles import generate_anchor_candidates
@@ -15,10 +17,35 @@ def run_coherence_audit(
     force: bool = False,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> CoherenceRunSummary:
+    started_at = time.perf_counter()
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "phase": "Checking Library Coherence",
+                "message": "Loading coherence vectors...",
+                "current": 0,
+                "total": 3,
+            }
+        )
     if hasattr(db, "ensure_verified_anchors_for_session"):
         db.ensure_verified_anchors_for_session(session_id)
-    rows = db.get_staging_records(session_id)
+    ensure_elapsed = time.perf_counter()
+    if hasattr(db, "get_coherence_staging_records"):
+        rows = db.get_coherence_staging_records(session_id)
+    else:
+        rows = db.get_staging_records(session_id)
+    rows_elapsed = time.perf_counter()
     records, stats = records_from_staging_rows(rows)
+    index_elapsed = time.perf_counter()
+    logging.info(
+        "Coherence audit loaded %s row(s), %s eligible vector record(s) in %.2fs (anchors %.2fs, rows %.2fs, index %.2fs).",
+        len(rows),
+        stats.valid_vector_records,
+        index_elapsed - started_at,
+        ensure_elapsed - started_at,
+        rows_elapsed - ensure_elapsed,
+        index_elapsed - rows_elapsed,
+    )
     if not force and not stats.can_run:
         return CoherenceRunSummary(
             total_records=stats.total_records,
@@ -31,6 +58,13 @@ def run_coherence_audit(
 
     engine = CoherenceEngine(verified_anchors=_verified_anchors(db, session_id))
     results, candidates = engine.audit(records, progress_callback=progress_callback)
+    audit_elapsed = time.perf_counter()
+    logging.info(
+        "Coherence audit engine produced %s result(s) and %s candidate(s) in %.2fs.",
+        len(results),
+        len(candidates),
+        audit_elapsed - index_elapsed,
+    )
     if progress_callback is not None:
         progress_callback(
             {
@@ -41,6 +75,8 @@ def run_coherence_audit(
             }
         )
     anchors = generate_anchor_candidates(records, results, engine.similarity_engine)
+    anchors_elapsed = time.perf_counter()
+    logging.info("Coherence anchor generation produced %s anchor candidate(s) in %.2fs.", len(anchors), anchors_elapsed - audit_elapsed)
     if progress_callback is not None:
         progress_callback(
             {
@@ -56,6 +92,8 @@ def run_coherence_audit(
         db.upsert_coherence_results(session_id, results)
         db.upsert_refinement_candidates(session_id, candidates)
         db.upsert_anchor_candidates(session_id, anchors)
+    save_elapsed = time.perf_counter()
+    logging.info("Coherence audit save completed in %.2fs.", save_elapsed - anchors_elapsed)
     if progress_callback is not None:
         progress_callback(
             {
