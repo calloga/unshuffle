@@ -1,9 +1,12 @@
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from collections import OrderedDict
 from pathlib import Path
@@ -75,6 +78,7 @@ class SimilarityEngine:
     DEFAULT_WEIGHTS = DEFAULT_DISTANCE_WEIGHTS.copy()
     FEATURE_VECTOR_SIZE = FEATURE_VECTOR_SIZE
     EXTRACT_TIMEOUT_SECONDS = 15
+    FALLBACK_EXTRACTOR_WORKERS = 4
     EXTRACTOR_PATH_ENV = "UNSHUFFLE_EXTRACTOR_PATH"
     SUPPORTED_EXTS = AUDIO_EXTS - {".mid", ".midi", ".aas"}
     EXTRACTION_TAG_SILENT = "Silent"
@@ -249,6 +253,102 @@ class SimilarityEngine:
             options["startupinfo"] = startupinfo
         return options
 
+    def _run_batch_extractor(self, manifest_path: Path) -> subprocess.CompletedProcess[str]:
+        """Run a JSONL batch with a per-file inactivity watchdog."""
+        options = self._subprocess_options()
+        options.pop("capture_output", None)
+        options["stdout"] = subprocess.PIPE
+        options["stderr"] = subprocess.PIPE
+        process = subprocess.Popen(
+            [self.extractor_path, "--batch", str(manifest_path)],
+            **options,
+        )
+        output: queue.Queue[str | None] = queue.Queue()
+        stderr_lines: list[str] = []
+
+        def read_stdout() -> None:
+            try:
+                if process.stdout is not None:
+                    for line in process.stdout:
+                        output.put(line)
+            finally:
+                output.put(None)
+
+        def read_stderr() -> None:
+            if process.stderr is not None:
+                for line in process.stderr:
+                    stderr_lines.append(line)
+
+        reader = threading.Thread(target=read_stdout, name="unshuffle-extractor-output", daemon=True)
+        error_reader = threading.Thread(target=read_stderr, name="unshuffle-extractor-errors", daemon=True)
+        reader.start()
+        error_reader.start()
+        stdout_lines: list[str] = []
+        try:
+            while True:
+                try:
+                    line = output.get(timeout=self.EXTRACT_TIMEOUT_SECONDS)
+                except queue.Empty as exc:
+                    raise subprocess.TimeoutExpired(
+                        process.args,
+                        self.EXTRACT_TIMEOUT_SECONDS,
+                    ) from exc
+                if line is None:
+                    break
+                stdout_lines.append(line)
+            returncode = process.wait(timeout=self.EXTRACT_TIMEOUT_SECONDS)
+            error_reader.join(timeout=1)
+            return subprocess.CompletedProcess(
+                process.args,
+                returncode,
+                "".join(stdout_lines),
+                "".join(stderr_lines),
+            )
+        except Exception as exc:
+            if process.poll() is None:
+                process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logging.warning("C++ batch extractor did not exit after termination.")
+            if isinstance(exc, subprocess.TimeoutExpired):
+                exc.output = "".join(stdout_lines)
+                exc.stderr = "".join(stderr_lines)
+            raise
+
+    @staticmethod
+    def _should_retry_extraction_error(message: str) -> bool:
+        normalized = str(message or "").strip().lower()
+        definitive = (
+            "file is empty",
+            "file is silent",
+            "audio too short",
+            "nan or infinite",
+            "severe audio clipping",
+            "invalid wav format",
+        )
+        return not any(marker in normalized for marker in definitive)
+
+    def _fallback_individual_payloads(
+        self,
+        pending: List[Path],
+        results: Dict[Path, Optional[FeaturePayload]],
+    ) -> Dict[Path, Optional[FeaturePayload]]:
+        """Retry a failed batch without multiplying timeout by every file serially."""
+        if not pending:
+            return results
+        workers = max(1, min(self.FALLBACK_EXTRACTOR_WORKERS, len(pending)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="unshuffle-extractor-retry") as executor:
+            futures = {executor.submit(self.extract_feature_payload, path): path for path in pending}
+            for future in as_completed(futures):
+                path = futures[future]
+                try:
+                    results[path] = future.result()
+                except Exception as exc:
+                    logging.error("C++ extractor retry failed for %s: %s", path.name, exc)
+                    results[path] = self._cache_negative_and_return_none(path, str(exc))
+        return results
+
     def _payload_from_extractor_data(self, file_path: Path, data: dict) -> Optional[FeaturePayload]:
         vector = data.get("vector")
         if not vector and isinstance(data.get("features"), dict):
@@ -363,28 +463,32 @@ class SimilarityEngine:
 
         if not Path(self.extractor_path).exists():
             logging.error("Similarity Engine: Extractor not found at %s", self.extractor_path)
-            for file_path in pending:
-                results[file_path] = self.extract_feature_payload(file_path)
-            return results
+            return self._fallback_individual_payloads(pending, results)
 
         manifest_path: Path | None = None
+        batch_incomplete = False
         try:
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt") as manifest:
                 manifest_path = Path(manifest.name)
                 for file_path in pending:
                     manifest.write(str(file_path))
                     manifest.write("\n")
-            timeout = max(self.EXTRACT_TIMEOUT_SECONDS, self.EXTRACT_TIMEOUT_SECONDS * len(pending))
-            result = subprocess.run(
-                [self.extractor_path, "--batch", str(manifest_path)],
-                **self._subprocess_options(),
-                timeout=timeout,
+            result = self._run_batch_extractor(manifest_path)
+        except subprocess.TimeoutExpired as exc:
+            logging.warning(
+                "C++ batch extractor made no progress for %ss; retrying only unresolved files.",
+                self.EXTRACT_TIMEOUT_SECONDS,
             )
+            result = subprocess.CompletedProcess(
+                getattr(exc, "cmd", [self.extractor_path, "--batch", str(manifest_path)]),
+                -1,
+                str(getattr(exc, "output", "") or ""),
+                str(getattr(exc, "stderr", "") or ""),
+            )
+            batch_incomplete = True
         except Exception as exc:
             logging.info("C++ batch extractor unavailable; falling back to per-file extraction: %s", exc)
-            for file_path in pending:
-                results[file_path] = self.extract_feature_payload(file_path)
-            return results
+            return self._fallback_individual_payloads(pending, results)
         finally:
             if manifest_path is not None:
                 try:
@@ -392,17 +496,16 @@ class SimilarityEngine:
                 except Exception:
                     pass
 
-        if result.returncode != 0:
+        if result.returncode != 0 and not result.stdout.strip():
             logging.info(
                 "C++ batch extractor failed with %s; falling back to per-file extraction: %s",
                 result.returncode,
                 (result.stderr or "").strip(),
             )
-            for file_path in pending:
-                results[file_path] = self.extract_feature_payload(file_path)
-            return results
+            return self._fallback_individual_payloads(pending, results)
 
         seen: set[Path] = set()
+        retry_paths: set[Path] = set()
         try:
             for line in result.stdout.splitlines():
                 if not line.strip():
@@ -422,18 +525,28 @@ class SimilarityEngine:
                     results[file_path] = self._payload_from_extractor_data(file_path, payload_data)
                 else:
                     error_text = str(row.get("error") or "")
-                    logging.error("C++ Extractor Error for %s: %s", file_path.name, error_text.strip())
-                    results[file_path] = self._cache_negative_and_return_none(file_path, error_text)
+                    if self._should_retry_extraction_error(error_text):
+                        retry_paths.add(file_path)
+                        logging.warning(
+                            "C++ batch extractor could not decode %s; retrying once individually: %s",
+                            file_path.name,
+                            error_text.strip(),
+                        )
+                    else:
+                        logging.error("C++ Extractor Error for %s: %s", file_path.name, error_text.strip())
+                        results[file_path] = self._cache_negative_and_return_none(file_path, error_text)
         except Exception as exc:
-            logging.info("C++ batch extractor emitted invalid output; falling back to per-file extraction: %s", exc)
-            for file_path in pending:
-                results[file_path] = self.extract_feature_payload(file_path)
-            return results
+            logging.info("C++ batch extractor emitted invalid output; retrying unresolved files: %s", exc)
+            batch_incomplete = True
 
-        for file_path in pending:
-            if file_path not in seen:
-                results[file_path] = self.extract_feature_payload(file_path)
-        return results
+        unresolved = [
+            file_path
+            for file_path in pending
+            if file_path in retry_paths or file_path not in seen
+        ]
+        if batch_incomplete and not unresolved:
+            logging.debug("Incomplete batch output contained a result for every requested file.")
+        return self._fallback_individual_payloads(unresolved, results)
 
     def extract_features(self, file_path: Path) -> Optional[List[float]]:
         payload = self.extract_feature_payload(file_path)

@@ -430,7 +430,7 @@ class DraftingController(QObject):
         if not self.app.model:
             return False
 
-        if not self.has_changes():
+        if collision_check and not self.reorg_manager.collision_enabled:
             self.reorg_manager.init_counters(self.app.model.records)
         self._partial_refresh = bool(partial_tree_refresh)
 
@@ -451,7 +451,12 @@ class DraftingController(QObject):
             path for rec in touched_records.values() if (path := get_tree_branch_path_for_record(self.app, rec))
         }
 
-        profile_changed = self._stage_profile_node_move(move_profile_node_id, target_fields or {})
+        target_fields = target_fields or {}
+        profile_changed = self._stage_profile_node_move(
+            move_profile_node_id,
+            target_fields,
+            target_profile_node_id=str(target_fields.get("__target_profile_node_id") or ""),
+        )
         if profile_changed:
             self._partial_refresh = False
 
@@ -525,9 +530,15 @@ class DraftingController(QObject):
             StagingColumn.PACK,
         }
 
-    def _stage_profile_node_move(self, node_id: str | None, target_fields: dict[str, str]) -> bool:
+    def _stage_profile_node_move(
+        self,
+        node_id: str | None,
+        target_fields: dict[str, str],
+        *,
+        target_profile_node_id: str = "",
+    ) -> bool:
         node_id = (node_id or "").strip()
-        if not node_id or not target_fields:
+        if not node_id or (not target_fields and not target_profile_node_id):
             return False
         controller = getattr(self.app, "tree_organization_controller", None)
         profile = getattr(controller, "active_profile", None)
@@ -548,7 +559,13 @@ class DraftingController(QObject):
         if self._draft_profile_original is None:
             self._draft_profile_original = profile
 
-        parent_id, nodes = self._ensure_semantic_profile_path(profile, nodes, target_fields)
+        if target_profile_node_id:
+            target_node = by_id.get(target_profile_node_id)
+            if target_node is None:
+                return False
+            parent_id = target_node.id
+        else:
+            parent_id, nodes = self._ensure_semantic_profile_path(profile, nodes, target_fields)
         if parent_id == source.parent_id:
             return False
         if self._is_profile_descendant(parent_id, source.id, nodes):
@@ -774,19 +791,12 @@ class DraftingController(QObject):
     def handle_tree_reorganize(self, records, fields):
         from ..utils.constants import StagingColumn
         from gui.widgets.library_filters import category_is_valid_for_audio_type, fallback_category_for_audio_type
-        if not self.app.model or not records or not fields:
+        if not self.app.model or not fields:
             return
 
-        resolved = []
-        row_by_rec_id = {stable_record_identity(rec): row for row, rec in enumerate(self.app.model.records)}
-        for item in records:
-            if isinstance(item, int):
-                resolved.append(item)
-            else:
-                row = row_by_rec_id.get(stable_record_identity(item))
-                if row is not None: resolved.append(row)
+        resolved = self._normalize_records(records)
 
-        if not resolved:
+        if not resolved and not fields.get("__move_profile_node_id"):
             return
 
         labels = []
@@ -796,8 +806,7 @@ class DraftingController(QObject):
         if fields.get("pack"): labels.append(f"Pack: {fields['pack']}")
 
         updates = []
-        for row in resolved:
-            rec = self.app.model.records[row]
+        for rec in resolved:
             row_updates = []
             if fields.get("audio_type"):
                 row_updates.append((rec, StagingColumn.TYPE, fields["audio_type"]))
@@ -889,8 +898,6 @@ class DraftingController(QObject):
 
         apply_updates = [(rec, col, new_val) for rec, col, _old_val, new_val in normalized]
 
-        if not self.has_changes():
-            self.reorg_manager.init_counters(self.app.model.records)
         self.stage_updates(apply_updates, learn=learn)
         self.app.model._apply_bulk_values(apply_updates)
         self._reconcile_draft_originals(apply_updates)

@@ -114,6 +114,29 @@ class CacheStore(ABC):
                     result[str(row["hash"])] = row["feature_vector"]
         return result
 
+    def get_analysis_failures_bulk(self, file_hashes: list[str]) -> dict[str, str]:
+        hashes = [item for item in file_hashes if item]
+        if not hashes:
+            return {}
+        result: dict[str, str] = {}
+        for start in range(0, len(hashes), 900):
+            chunk = hashes[start:start + 900]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = self._conn.execute(
+                f"""
+                SELECT hash, analysis_status
+                FROM file_cache
+                WHERE hash IN ({placeholders})
+                  AND feature_vector IS NULL
+                  AND analysis_status IN ('Empty', 'Silent')
+                  AND extractor_version = ?
+                """,
+                [*chunk, CURRENT_EXTRACTOR_VERSION],
+            )
+            for row in cursor:
+                result[str(row["hash"])] = str(row["analysis_status"])
+        return result
+
     @abstractmethod
     def get_feature_vector(self, file_hash: str) -> Optional[bytes]:
         pass

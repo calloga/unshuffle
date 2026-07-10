@@ -104,6 +104,65 @@ def ensure_staging_view_indexes(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_confidence_order ON staging_records(session_id, CAST(confidence AS REAL), sample_name COLLATE NOCASE, row_id)")
 
 
+def ensure_custom_tree_memberships(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS custom_tree_memberships (
+            session_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            projection_signature TEXT NOT NULL,
+            route_key TEXT NOT NULL,
+            parent_route_key TEXT NOT NULL,
+            label TEXT NOT NULL,
+            node_type TEXT NOT NULL,
+            semantic_fields_json TEXT NOT NULL DEFAULT '{}',
+            source_node_id TEXT,
+            source_node_type TEXT,
+            read_only INTEGER NOT NULL DEFAULT 0,
+            residual INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            depth INTEGER NOT NULL,
+            row_id INTEGER NOT NULL,
+            PRIMARY KEY (session_id, profile_id, projection_signature, route_key, row_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+        )
+        """
+    )
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(custom_tree_memberships)").fetchall()
+    }
+    if "sort_order" not in columns:
+        conn.execute(
+            "ALTER TABLE custom_tree_memberships "
+            "ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_custom_tree_memberships_parent "
+        "ON custom_tree_memberships(session_id, profile_id, projection_signature, parent_route_key, depth, sort_order, label)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_custom_tree_memberships_row "
+        "ON custom_tree_memberships(session_id, profile_id, projection_signature, row_id)"
+    )
+    conn.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS custom_tree_memberships_staging_ai
+        AFTER INSERT ON staging_records BEGIN
+            DELETE FROM custom_tree_memberships WHERE session_id = new.session_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS custom_tree_memberships_staging_au
+        AFTER UPDATE ON staging_records BEGIN
+            DELETE FROM custom_tree_memberships WHERE session_id = new.session_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS custom_tree_memberships_staging_ad
+        AFTER DELETE ON staging_records BEGIN
+            DELETE FROM custom_tree_memberships WHERE session_id = old.session_id;
+        END;
+        """
+    )
+
+
 def ensure_fast_hash_columns(conn: sqlite3.Connection) -> None:
     def columns(table: str) -> set[str]:
         return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}

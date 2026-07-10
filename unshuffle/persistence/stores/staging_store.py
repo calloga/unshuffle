@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Optional
 
@@ -155,14 +156,37 @@ def add_staging_records_bulk(conn: sqlite3.Connection, session_id: str, records:
 
 
 def get_staging_records(conn: sqlite3.Connection, session_id: str) -> list[dict]:
+    return [row for batch in iter_staging_records(conn, session_id) for row in batch]
+
+
+def iter_staging_records(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    batch_size: int = 1000,
+) -> Iterator[list[dict]]:
     cursor = conn.execute(
         "SELECT * FROM staging_records WHERE session_id = ? ORDER BY row_id ASC, id ASC",
         (session_id,),
     )
-    return [dict(row) for row in cursor.fetchall()]
+    size = max(1, int(batch_size))
+    while True:
+        rows = cursor.fetchmany(size)
+        if not rows:
+            break
+        yield [dict(row) for row in rows]
 
 
 def get_coherence_staging_records(conn: sqlite3.Connection, session_id: str) -> list[dict]:
+    return [row for batch in iter_coherence_staging_records(conn, session_id) for row in batch]
+
+
+def iter_coherence_staging_records(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    batch_size: int = 1000,
+) -> Iterator[list[dict]]:
     cursor = conn.execute(
         """
         SELECT
@@ -186,7 +210,12 @@ def get_coherence_staging_records(conn: sqlite3.Connection, session_id: str) -> 
         """,
         (session_id,),
     )
-    return [dict(row) for row in cursor.fetchall()]
+    size = max(1, int(batch_size))
+    while True:
+        rows = cursor.fetchmany(size)
+        if not rows:
+            break
+        yield [dict(row) for row in rows]
 
 
 def update_staging_record(conn: sqlite3.Connection, session_id: str, row_id: int, data: dict[str, str]) -> None:

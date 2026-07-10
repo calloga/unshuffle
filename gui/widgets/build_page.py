@@ -67,7 +67,14 @@ class BuildPage(QWidget):
         super().__init__(parent)
         self.setObjectName("BuildPage")
         self.settings = settings
-        self.records = list(records or [])
+        source_records = records or []
+        self.total_record_count = len(source_records)
+        if isinstance(source_records, (list, tuple)):
+            self.records = list(source_records)
+        else:
+            # Build execution receives the complete DB-backed sequence later. This page
+            # only needs enough DTOs to fill its already-capped visual preview.
+            self.records = list(source_records[:MAX_COMPARE_FILE_ITEMS])
         self.source_roots = [Path(root) for root in (source_roots or [])]
         self._saved_target = str(settings.value("last_target", "")).strip()
         self.target_dir = Path(self._saved_target) if self._saved_target else Path.cwd()
@@ -227,7 +234,7 @@ class BuildPage(QWidget):
         roots = self._source_tree_roots()
         self.before_footer.setText(f"{len(roots)} source root(s) | Mode: {move_mode}")
         self.after_footer.setText(
-            f"{len(self.records)} projected files | {structure} | {prefix_mode}"
+            f"{self.total_record_count} projected files | {structure} | {prefix_mode}"
         )
 
     def _refresh_compare_views(self, *, refresh_before: bool = True):
@@ -453,7 +460,8 @@ class BuildPage(QWidget):
                 hidden_file_count += hidden_count
             file_items_remaining -= min(len(files), visible_limit)
 
-        target_info = f"{len(projected)} file(s)"
+        hidden_file_count += max(0, self.total_record_count - len(projected))
+        target_info = f"{self.total_record_count} file(s)"
         if hidden_file_count:
             target_info = f"{target_info}, preview capped"
         target_root.setText(1, target_info)

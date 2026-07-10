@@ -30,7 +30,7 @@ class TreeOrganizationProfileMixin:
         records: list,
     ) -> None:
         self._profiles = list(profiles)
-        self._records = list(records)
+        self._records = records
         self._active_profile_id = active_profile.id if active_profile is not None else ""
         known_ids = {profile.id for profile in self._profiles}
         if self._selected_profile_id not in known_ids and self._selected_profile_id != "":
@@ -93,8 +93,17 @@ class TreeOrganizationProfileMixin:
         if name_conflict:
             self.validation_label.setText(f'Another custom tree is already named "{profile.name}".')
             return False
-        records = self._records if full else []
+        app = self.parent() if hasattr(self, "parent") else None
+        controller = getattr(app, "tree_organization_controller", None)
+        store = getattr(app, "session_store", None)
+        records = self._records if full and store is None else []
         result = TreeOrganizationResolver().validate_profile(profile, records)
+        if result.valid and full and store is not None and controller is not None:
+            try:
+                controller._ensure_profile_projection(profile)
+            except ValueError as exc:
+                self.validation_label.setText(str(exc))
+                return False
         self.validation_label.setText("\n".join(result.blocking_messages[:6]) if result.blocking_messages else "Profile looks valid.")
         return result.valid
 

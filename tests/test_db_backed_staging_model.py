@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import replace
 import json
 import struct
 
@@ -8,11 +9,18 @@ from gui.core import workflow_model_cleanup
 from gui.core.staging_session_store import StagingSessionStore
 from gui.core.acoustic_session_state import AcousticSessionState
 from gui.models.db_staging_table import DbBackedStagingTableModel
-from gui.models.library_tree import FIELDS_ROLE, LibraryTreeModel, RAW_NAME_ROLE
+from gui.models.library_tree import (
+    FIELDS_ROLE,
+    LibraryTreeModel,
+    RAW_NAME_ROLE,
+    clear_tree_color_caches,
+    tree_file_sequence_icon,
+)
 from gui.utils.constants import StagingColumn
 from gui.widgets.coherence_view_model import coherence_points_from_app
 from unshuffle.core.features import FEATURE_VECTOR_SIZE
 from unshuffle.persistence import UnshuffleDB
+from unshuffle.logic.tree_organization import TreeOrganizationNode, TreeOrganizationProfile
 
 
 def _row(index: int, *, category: str = "Kicks", audio_type: str = "Oneshots", vector: bytes | None = None):
@@ -55,6 +63,288 @@ def test_store_counts_and_orders_rows(tmp_path):
             "sample_2.wav",
             "sample_3.wav",
         ]
+    finally:
+        db.close()
+
+
+def test_store_builds_append_dedupe_index_without_full_record_hydration(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        canonical = list(_row(0, category="Kicks"))
+        canonical[10] = "full-hash"
+        shadow = list(_row(1, category="Snares"))
+        shadow[10] = "shadow-hash"
+        shadow[13] = json.dumps({"duplicate_shadow": {"is_shadow": True}})
+        db.add_staging_records_bulk("session", [tuple(canonical), tuple(shadow)])
+        store = StagingSessionStore(db, "session")
+
+        index = store.scan_dedupe_index()
+
+        assert index["full_hashes"] == {"full-hash"}
+        record = index["full_hash_records"]["full-hash"]
+        assert record.category == "Kicks"
+        assert record.source_path.name == "sample_0.wav"
+        assert "shadow-hash" not in index["full_hashes"]
+    finally:
+        db.close()
+
+
+def test_tree_file_icons_cache_by_palette_slot(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "gui.models.library_tree._get_tinted_icon_for_tree",
+        lambda path, color: calls.append((path, color)) or object(),
+    )
+    clear_tree_color_caches()
+
+    for index in range(600):
+        tree_file_sequence_icon(index)
+
+    assert len(calls) == len(set(calls))
+    assert len(calls) <= 6
+    clear_tree_color_caches()
+
+
+def test_db_backed_private_bulk_apply_persists_in_one_transaction(tmp_path, monkeypatch):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(0), _row(1)])
+        store = StagingSessionStore(db, "session")
+        model = DbBackedStagingTableModel(store)
+        records = [model.record(0), model.record(1)]
+        bulk_calls = []
+        original_update = store.update_rows
+
+        def tracking_update(updates):
+            updates = list(updates)
+            bulk_calls.append(updates)
+            assert all("feature_vector" not in fields for _row_id, fields in updates)
+            return original_update(updates)
+
+        monkeypatch.setattr(store, "update_rows", tracking_update)
+        model._apply_bulk_values([
+            (records[0], StagingColumn.CATEGORY, "Snares"),
+            (records[1], StagingColumn.CATEGORY, "Claps"),
+        ])
+
+        rows = {row["row_id"]: row for row in db.get_staging_records("session")}
+        assert rows[records[0].staging_row_id]["category"] == "Snares"
+        assert rows[records[1].staging_row_id]["category"] == "Claps"
+        assert len(bulk_calls) == 1
+        assert len(bulk_calls[0]) == 2
+    finally:
+        db.close()
+
+
+def test_db_backed_draft_discard_restores_record_and_staging_row(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QObject
+    from PySide6.QtWidgets import QApplication
+    from gui.core.drafting_controller import DraftingController
+
+    _app = QApplication.instance() or QApplication([])
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(0, category="Kicks")])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+        record = model.record(0)
+
+        class FakeFooter:
+            def set_reorg_draft_state(self, *_args, **_kwargs):
+                pass
+
+            def log(self, _message):
+                pass
+
+            def toggle_footer(self, _visible):
+                pass
+
+        class FakeViewController:
+            def update_library_views(self, tree_delay_ms=0):
+                pass
+
+        class FakeApp(QObject):
+            def __init__(self):
+                super().__init__()
+                self.model = model
+                self.footer = FakeFooter()
+                self.view_controller = FakeViewController()
+
+        controller = DraftingController(FakeApp())
+        controller.stage_updates([(record, StagingColumn.CATEGORY, "Snares")])
+        model._apply_bulk_values([(record, StagingColumn.CATEGORY, "Snares")])
+
+        controller.discard_reorg_draft(confirm=False)
+
+        assert record.category == "Kicks"
+        assert db.get_staging_records("session")[0]["category"] == "Kicks"
+    finally:
+        db.close()
+
+
+def test_store_iterates_requested_rows_in_bounded_ordered_batches(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(index) for index in range(7)])
+        store = StagingSessionStore(db, "session")
+
+        batches = list(store.iter_rows_by_ids([6, 1, 4, 2], "row_id, sample_name", batch_size=2))
+
+        assert [len(batch) for batch in batches] == [2, 2]
+        assert [row["row_id"] for batch in batches for row in batch] == [6, 1, 4, 2]
+    finally:
+        db.close()
+
+
+def test_custom_tree_projection_is_invalidated_by_staging_update(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        row = list(_row(0, category="Kicks"))
+        row[7] = "favorite"
+        db.add_staging_records_bulk("session", [tuple(row)])
+        profile = TreeOrganizationProfile(
+            "profile",
+            "Custom",
+            "root",
+            [
+                TreeOrganizationNode("root", None, "Root", None, "system", 0, True),
+                TreeOrganizationNode("favorite", "root", "Favorite", 'tag:"favorite"', "custom", 1, True),
+            ],
+            "now",
+            "now",
+        )
+        store = StagingSessionStore(db, "session")
+        signature = store.ensure_custom_tree_projection(
+            profile,
+            [("audio_type", "type"), ("category", "category")],
+        )
+        assert store.custom_tree_child_counts(profile.id, signature, "", None)
+
+        store.update_row(0, {"tags": ""})
+
+        count = db.conn.execute(
+            "SELECT COUNT(*) FROM custom_tree_memberships WHERE session_id = ?",
+            ("session",),
+        ).fetchone()[0]
+        assert count == 0
+    finally:
+        db.close()
+
+
+def test_partial_custom_tree_projection_is_rebuilt_before_reuse(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(0), _row(1, category="Snares")])
+        profile = TreeOrganizationProfile(
+            "profile",
+            "Custom",
+            "root",
+            [
+                TreeOrganizationNode("root", None, "Root", None, "system", 0, True),
+                TreeOrganizationNode("kicks", "root", "Kicks", 'cat:"Kicks"', "custom", 1, True),
+            ],
+            "now",
+            "now",
+        )
+        store = StagingSessionStore(db, "session")
+        levels = [("audio_type", "type"), ("category", "category")]
+        signature = store.ensure_custom_tree_projection(profile, levels)
+        db.conn.execute(
+            "DELETE FROM custom_tree_memberships WHERE session_id = ? AND row_id = ?",
+            ("session", 0),
+        )
+        db.conn.commit()
+
+        assert not store.has_custom_tree_projection(profile.id, signature)
+        store.ensure_custom_tree_projection(profile, levels)
+
+        projected = db.conn.execute(
+            "SELECT COUNT(DISTINCT row_id) FROM custom_tree_memberships "
+            "WHERE session_id = ? AND profile_id = ? AND projection_signature = ?",
+            ("session", profile.id, signature),
+        ).fetchone()[0]
+        assert projected == 2
+    finally:
+        db.close()
+
+
+def test_custom_tree_projection_signature_ignores_profile_metadata():
+    profile = TreeOrganizationProfile(
+        "profile",
+        "First Name",
+        "root",
+        [
+            TreeOrganizationNode("root", None, "Root", None, "system", 0, True),
+            TreeOrganizationNode("kicks", "root", "Kicks", 'cat:"Kicks"', "custom", 1, True),
+        ],
+        "created-a",
+        "updated-a",
+    )
+    renamed = replace(profile, name="Second Name", updated_at="updated-b")
+    rerouted = replace(
+        profile,
+        nodes=[profile.nodes[0], replace(profile.nodes[1], filter_query='cat:"Snares"')],
+        updated_at="updated-c",
+    )
+    levels = [("audio_type", "type"), ("category", "category")]
+
+    original_signature = StagingSessionStore.custom_tree_projection_signature(
+        profile,
+        levels,
+        confidence_floor=0.0,
+        confidence_filter_enabled=True,
+    )
+
+    assert StagingSessionStore.custom_tree_projection_signature(
+        renamed,
+        levels,
+        confidence_floor=0.0,
+        confidence_filter_enabled=True,
+    ) == original_signature
+    assert StagingSessionStore.custom_tree_projection_signature(
+        rerouted,
+        levels,
+        confidence_floor=0.0,
+        confidence_filter_enabled=True,
+    ) != original_signature
+
+
+def test_custom_tree_preview_counts_do_not_write_projection_rows(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        favorite = list(_row(0, category="Kicks"))
+        favorite[7] = "favorite"
+        db.add_staging_records_bulk("session", [tuple(favorite), _row(1, category="Snares")])
+        store = StagingSessionStore(db, "session")
+        profile = TreeOrganizationProfile(
+            "profile",
+            "Custom",
+            "root",
+            [
+                TreeOrganizationNode("root", None, "Root", None, "system", 0, True),
+                TreeOrganizationNode("favorites", "root", "Favorites", 'tag:"favorite"', "custom", 1, True),
+                TreeOrganizationNode("other", "root", "Other", None, "fallback", 2, True),
+            ],
+            "now",
+            "now",
+        )
+
+        counts = store.preview_custom_tree_node_counts(
+            profile,
+            [("audio_type", "type"), ("category", "category")],
+        )
+
+        assert counts["root"] == 2
+        assert counts["favorites"] == 1
+        assert counts["other"] == 1
+        assert db.conn.execute("SELECT COUNT(*) FROM custom_tree_memberships").fetchone()[0] == 0
     finally:
         db.close()
 
@@ -117,6 +407,78 @@ def test_db_backed_tree_presents_non_audio_assets_as_utility(tmp_path):
         db.close()
 
 
+def test_db_backed_initial_all_query_includes_utility(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    _app = QApplication.instance() or QApplication([])
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        row = list(_row(0, audio_type="Non-Audio Assets", category="Non-Audio Assets"))
+        row[1] = "D:/Samples/Pack/cover.jpg"
+        row[2] = "cover.jpg"
+        db.add_staging_records_bulk("session", [tuple(row)])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+        tree = LibraryTreeModel()
+
+        tree.rebuild_from_store(model.store, model.query)
+
+        assert tree.invisibleRootItem().child(0, 0).data(RAW_NAME_ROLE) == "Utility"
+    finally:
+        db.close()
+
+
+def test_custom_utility_leaf_collapses_other_and_fetches_in_chunks(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    _app = QApplication.instance() or QApplication([])
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        rows = []
+        for index in range(600):
+            row = list(_row(index, audio_type="Non-Audio Assets", category="Non-Audio Assets"))
+            row[1] = f"D:/Samples/Docs/asset_{index}.pdf"
+            row[2] = f"asset_{index}.pdf"
+            rows.append(tuple(row))
+        db.add_staging_records_bulk("session", rows)
+        profile = TreeOrganizationProfile(
+            "profile",
+            "Custom",
+            "root",
+            [
+                TreeOrganizationNode("root", None, "Root", None, "system", 0, True),
+                TreeOrganizationNode("utility", "root", "Utility", 'type:"Non-Audio Assets"', "system", 1, True),
+                TreeOrganizationNode("assets", "utility", "Non-Audio Assets", 'cat:"Non-Audio Assets"', "system", 1, True),
+                TreeOrganizationNode("other", "assets", "Other", None, "fallback", 1, True),
+            ],
+            "now",
+            "now",
+        )
+        tree = LibraryTreeModel()
+        tree.set_custom_tree_profile(profile)
+        store = StagingSessionStore(db, "session")
+        tree.rebuild_from_store(store)
+        utility = tree.invisibleRootItem().child(0, 0)
+        tree.populate_index(tree.indexFromItem(utility))
+        assets = utility.child(0, 0)
+
+        tree.populate_index(tree.indexFromItem(assets))
+        pack = assets.child(0, 0)
+        assert pack.data(RAW_NAME_ROLE) == "Pack"
+        assert all(assets.child(row, 0).data(RAW_NAME_ROLE) != "Other" for row in range(assets.rowCount()))
+        tree.populate_index(tree.indexFromItem(pack))
+
+        assert pack.rowCount() == tree.LEAF_BATCH_SIZE
+        pack_index = tree.indexFromItem(pack)
+        assert len(tree.records_for_index(pack_index)) == 600
+        assert tree.canFetchMore(pack_index)
+        tree.fetchMore(pack_index)
+        assert pack.rowCount() == tree.LEAF_BATCH_SIZE * 2
+    finally:
+        db.close()
+
+
 def test_db_backed_tree_does_not_create_other_for_empty_subcategories(tmp_path):
     from PySide6.QtWidgets import QApplication
 
@@ -138,6 +500,58 @@ def test_db_backed_tree_does_not_create_other_for_empty_subcategories(tmp_path):
 
         assert category_item.rowCount() == 2
         assert all(category_item.child(row, 0).data(RAW_NAME_ROLE) != "Other" for row in range(category_item.rowCount()))
+    finally:
+        db.close()
+
+
+def test_db_backed_tree_applies_nested_custom_profile(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    _app = QApplication.instance() or QApplication([])
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        favorite = list(_row(0, category="Kicks"))
+        favorite[7] = "favorite"
+        ordinary = list(_row(1, category="Snares"))
+        db.add_staging_records_bulk("session", [tuple(favorite), tuple(ordinary)])
+        profile = TreeOrganizationProfile(
+            "profile",
+            "Custom",
+            "root",
+            [
+                TreeOrganizationNode("root", None, "Root", None, "system", 0, True),
+                TreeOrganizationNode("oneshots", "root", "Oneshots", 'type:"Oneshots"', "system", 1, True),
+                TreeOrganizationNode("favorites", "oneshots", "Favorites", 'tag:"favorite"', "custom", 1, True),
+            ],
+            "now",
+            "now",
+        )
+        tree = LibraryTreeModel()
+        tree.set_custom_tree_profile(profile)
+        tree.rebuild_from_store(StagingSessionStore(db, "session"))
+
+        root = tree.invisibleRootItem()
+        assert root.child(0, 0).data(RAW_NAME_ROLE) == "Oneshots"
+        oneshots = root.child(0, 0)
+        tree.populate_index(tree.indexFromItem(oneshots))
+        labels = {
+            oneshots.child(row, 0).data(RAW_NAME_ROLE)
+            for row in range(oneshots.rowCount())
+        }
+        assert {"Favorites", "Snares"} <= labels
+    finally:
+        db.close()
+
+
+def test_custom_tree_projection_table_is_available_without_rescan(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        columns = {
+            str(row[1])
+            for row in db.conn.execute("PRAGMA table_info(custom_tree_memberships)")
+        }
+        assert {"session_id", "profile_id", "projection_signature", "route_key", "row_id"} <= columns
     finally:
         db.close()
 

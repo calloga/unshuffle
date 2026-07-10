@@ -243,6 +243,7 @@ class SystemPage(QWidget):
         self._populating_anchor_rows = False
         self._anchor_preview_offsets: dict[str, int] = {}
         self._anchor_candidate_actions: dict[str, str] = {}
+        self._anchor_cell_widgets: dict[int, list[QWidget]] = {}
         self._setup_ui()
         self.set_mode(False)
 
@@ -852,6 +853,8 @@ class SystemPage(QWidget):
     def _set_anchor_rows(self, table: QTableWidget, rows: list[dict]) -> None:
         self._populating_anchor_rows = True
         table.setSortingEnabled(False)
+        table.setRowCount(0)
+        self._anchor_cell_widgets[id(table)] = []
         table.setRowCount(len(rows))
         include_action = bool(table.property("anchor_actions_enabled"))
         for row, payload in enumerate(rows):
@@ -925,6 +928,7 @@ class SystemPage(QWidget):
                 lambda _idx=0, source=table, combo=sound_group: self._anchor_sound_group_combo_changed(source, combo)
             )
             table.setCellWidget(row, 0, sound_group)
+            self._anchor_cell_widgets[id(table)].append(sound_group)
             if include_action:
                 self._set_anchor_action_widget(table, row, str(payload.get("anchor_id") or ""))
         table.setSortingEnabled(True)
@@ -956,6 +960,7 @@ class SystemPage(QWidget):
         layout.addWidget(combo, 0, Qt.AlignCenter)
         layout.addStretch(1)
         table.setCellWidget(row, 3, container)
+        self._anchor_cell_widgets.setdefault(id(table), []).extend((container, combo))
 
     @staticmethod
     def _anchor_action_combo_width(combo: QComboBox) -> int:

@@ -92,7 +92,10 @@ def reset_scoring_engine():
     SCORING_ENGINE_SIGNATURE = None
 
 
-def _scoring_runtime_signature(runtime: dict) -> tuple:
+def _scoring_runtime_signature(runtime: dict, *, trust_revision: bool = False) -> tuple:
+    revision = runtime.get("config_revision")
+    if trust_revision and revision is not None:
+        return ("config_revision", int(revision))
     alias_table = cast(Any, runtime["alias_table"])
     noise_words = cast(Any, runtime["noise_words"])
     aliases = tuple(
@@ -107,11 +110,13 @@ def _scoring_runtime_signature(runtime: dict) -> tuple:
     return aliases, tuple(sorted(str(word) for word in noise_words))
 
 
-def get_scoring_engine(runtime: Optional[dict] = None):
+def get_scoring_engine(runtime: Optional[dict] = None, *, trust_revision: bool = False):
     global SCORING_ENGINE, SCORING_ENGINE_SIGNATURE
 
-    runtime = runtime or get_runtime_config_snapshot()
-    signature = _scoring_runtime_signature(runtime)
+    if runtime is None:
+        runtime = get_runtime_config_snapshot()
+        trust_revision = True
+    signature = _scoring_runtime_signature(runtime, trust_revision=trust_revision)
     if SCORING_ENGINE is None or SCORING_ENGINE_SIGNATURE != signature:
         from .scoring import ScoringEngine
 
@@ -143,9 +148,12 @@ def classify_node(
     min_confidence: Optional[float] = None,
     debug: bool = False,
     runtime: Optional[dict] = None,
+    runtime_revision_trusted: bool = False,
 ) -> Tuple[str, float, dict]:
-    runtime = runtime or get_runtime_config_snapshot()
-    engine = get_scoring_engine(runtime=runtime)
+    if runtime is None:
+        runtime = get_runtime_config_snapshot()
+        runtime_revision_trusted = True
+    engine = get_scoring_engine(runtime=runtime, trust_revision=runtime_revision_trusted)
     global_boosts = global_boosts or {}
     detected_audio_type = _detect_audio_type(node, duration, runtime=runtime, features=features)
     excluded_categories = LOOP_EXCLUSIVE_CATEGORIES if detected_audio_type == "Oneshots" else set()

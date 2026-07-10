@@ -263,6 +263,9 @@ class TreeOrganizationResolver:
     def _semantic_fields_for_node_parent(self, profile: TreeOrganizationProfile, node_id: str) -> dict[str, str]:
         return dict(self._compile_profile(profile).parent_fields.get(node_id, {}))
 
+    def semantic_fields_for_node_parent(self, profile: TreeOrganizationProfile, node_id: str) -> dict[str, str]:
+        return self._semantic_fields_for_node_parent(profile, node_id)
+
     @staticmethod
     def _semantic_field_for_term(term: str) -> str | None:
         split = split_field_term(term)

@@ -30,16 +30,25 @@ def run_coherence_audit(
     if hasattr(db, "ensure_verified_anchors_for_session"):
         db.ensure_verified_anchors_for_session(session_id)
     ensure_elapsed = time.perf_counter()
-    if hasattr(db, "get_coherence_staging_records"):
+    if hasattr(db, "iter_coherence_staging_records"):
+        rows = (
+            row
+            for batch in db.iter_coherence_staging_records(session_id, batch_size=1000)
+            for row in batch
+        )
+        row_count = None
+    elif hasattr(db, "get_coherence_staging_records"):
         rows = db.get_coherence_staging_records(session_id)
+        row_count = len(rows)
     else:
         rows = db.get_staging_records(session_id)
+        row_count = len(rows)
     rows_elapsed = time.perf_counter()
     records, stats = records_from_staging_rows(rows)
     index_elapsed = time.perf_counter()
     logging.info(
         "Coherence audit loaded %s row(s), %s eligible vector record(s) in %.2fs (anchors %.2fs, rows %.2fs, index %.2fs).",
-        len(rows),
+        stats.total_records if row_count is None else row_count,
         stats.valid_vector_records,
         index_elapsed - started_at,
         ensure_elapsed - started_at,

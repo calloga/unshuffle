@@ -232,6 +232,36 @@ class StagingRecord(BaseModel):
         )
 
 
+class CustomTreeMembership(BaseModel):
+    """Derived DB-backed route membership for an active custom tree."""
+
+    session_id = TextField()
+    profile_id = TextField()
+    projection_signature = TextField()
+    route_key = TextField()
+    parent_route_key = TextField()
+    label = TextField()
+    node_type = TextField()
+    semantic_fields_json = TextField(default="{}")
+    source_node_id = TextField(null=True)
+    source_node_type = TextField(null=True)
+    read_only = IntegerField(default=0)
+    residual = IntegerField(default=0)
+    sort_order = IntegerField(default=0)
+    depth = IntegerField()
+    row_id = IntegerField()
+
+    class Meta:
+        table_name = "custom_tree_memberships"
+        primary_key = CompositeKey(
+            "session_id",
+            "profile_id",
+            "projection_signature",
+            "route_key",
+            "row_id",
+        )
+
+
 # ============================================================================
 # COHERENCE TABLES (002_initial_coherence_tables.sql)
 # ============================================================================

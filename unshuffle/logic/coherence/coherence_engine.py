@@ -82,8 +82,10 @@ class CoherenceEngine:
     ):
         self.similarity_engine = similarity_engine or SimilarityEngine()
         self.verified_anchors = list(verified_anchors or [])
-        self._vector_input_cache: dict[tuple[tuple[str, int, int], ...], dict[str, np.ndarray]] = {}
-        self._global_spatial_index_cache: dict[int, Any] = {}
+        self._last_vector_records: list[CoherenceRecord] | None = None
+        self._last_vector_inputs: dict[str, np.ndarray] | None = None
+        self._global_spatial_records: list[CoherenceRecord] | None = None
+        self._global_spatial_index: Any | None = None
         self._anchor_match_cache: dict[tuple[str, str, str], list[dict]] = {}
 
     def audit(
@@ -439,12 +441,11 @@ class CoherenceEngine:
         return distances.astype(float, copy=False)
 
     def _vectorized_inputs(self, records: list[CoherenceRecord]) -> dict[str, np.ndarray] | None:
+        if records is self._last_vector_records:
+            return self._last_vector_inputs
+        retain_as_primary = self._last_vector_records is None or len(records) >= len(self._last_vector_records)
         if any(len(record.vector) != CURRENT_FEATURE_VECTOR_SIZE for record in records):
             return None
-        key = tuple((record.record_id, id(record.vector), len(record.vector)) for record in records)
-        cached = self._vector_input_cache.get(key)
-        if cached is not None:
-            return cached
         try:
             vectors = np.asarray([normalize_distance_vector(record.vector) for record in records], dtype=np.float32)
         except (TypeError, ValueError):
@@ -460,7 +461,9 @@ class CoherenceEngine:
             "silent_feature": vectors[:, :IDX_CHROMA_START].sum(axis=1) < SILENCE_THRESHOLD,
             "fully_silent": vectors.sum(axis=1) < SILENCE_THRESHOLD,
         }
-        self._vector_input_cache[key] = payload
+        if retain_as_primary:
+            self._last_vector_records = records
+            self._last_vector_inputs = payload
         return payload
 
     def _knn_similarity(self, distances: np.ndarray, nearest: np.ndarray) -> np.ndarray:
@@ -479,8 +482,8 @@ class CoherenceEngine:
     def _cluster_labels(self, W: np.ndarray, n: int) -> np.ndarray:
         degree = W.sum(axis=1)
         safe_degree = np.where(degree > 1e-12, degree, 1.0)
-        inv_sqrt = np.diag(1.0 / np.sqrt(safe_degree))
-        L = np.eye(n) - inv_sqrt @ W @ inv_sqrt
+        inv_d = 1.0 / np.sqrt(safe_degree)
+        L = np.eye(n) - inv_d[:, None] * W * inv_d[None, :]
         values, vectors = np.linalg.eigh(L)
         order = np.argsort(values)
         values = values[order]
@@ -884,9 +887,8 @@ class CoherenceEngine:
         distances.sort(key=lambda item: item[1])
         return distances[:limit]
     def _get_global_spatial_index(self, records: list[CoherenceRecord]) -> Any | None:
-        key = id(records)
-        if key in self._global_spatial_index_cache:
-            return self._global_spatial_index_cache[key]
+        if records is self._global_spatial_records:
+            return self._global_spatial_index
             
         inputs = self._vectorized_inputs(records)
         if inputs is None:
@@ -898,7 +900,8 @@ class CoherenceEngine:
             spatial_index = SpatialIndex(vectors)
         except ModuleNotFoundError:
             return None
-        self._global_spatial_index_cache[key] = spatial_index
+        self._global_spatial_records = records
+        self._global_spatial_index = spatial_index
         return spatial_index
 
     def _global_neighbors_vectorized(

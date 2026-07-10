@@ -3160,6 +3160,43 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         self.assertEqual(app_for_remove.model.records, [shadow])
         self.assertFalse(shadow.is_duplicate_shadow)
 
+    def test_removed_source_filter_is_cleared(self):
+        from gui.main.actions.library import _clear_removed_source_filter
+
+        root = Path("D:/Samples")
+        sidebar = SimpleNamespace(
+            source_filter_active={"d:/samples"},
+            _sync_source_items=mock.Mock(),
+        )
+        search = SimpleNamespace(
+            current_query='source:"D:/Samples"',
+            set_query=mock.Mock(),
+        )
+        app = SimpleNamespace(
+            search_controller=search,
+            library_tab=SimpleNamespace(sidebar=sidebar),
+        )
+
+        _clear_removed_source_filter(app, root)
+
+        self.assertEqual(sidebar.source_filter_active, set())
+        search.set_query.assert_called_once_with("", immediate=True)
+
+    def test_possible_duplicate_filter_state_is_derived_from_staging_tags(self):
+        from gui.core.workflow_scan_finalization import update_possible_duplicate_filter_state
+
+        library_tab = SimpleNamespace(set_possible_duplicate_filter_enabled=mock.Mock())
+        app = SimpleNamespace(
+            session_store=SimpleNamespace(has_any_tags=mock.Mock(return_value=True)),
+            library_tab=library_tab,
+            filter_controller=SimpleNamespace(refresh_dock_filters=mock.Mock()),
+        )
+
+        update_possible_duplicate_filter_state(app)
+
+        app.session_store.has_any_tags.assert_called_once_with({"possibleduplicate"})
+        library_tab.set_possible_duplicate_filter_enabled.assert_called_once_with(True)
+
     def test_new_scan_clears_active_custom_tree(self):
         from gui.core.workflow_controller import WorkflowController
 
@@ -4510,9 +4547,11 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
              mock.patch("gui.core.workers.SessionLoadWorker", _FakeWorker):
             load_staging_session(app, sess)
 
-        app.workflow_controller.handle_scan_finished.assert_called_once()
-        args = app.workflow_controller.handle_scan_finished.call_args.args
+        app.workflow_controller.finalize_scan_data.assert_called_once()
+        args, kwargs = app.workflow_controller.finalize_scan_data.call_args
         self.assertEqual(len(args[0]), 1)
+        self.assertFalse(args[1])
+        self.assertFalse(kwargs["persist_staging"])
 
     def test_load_staging_session_keeps_current_engine_when_new_load_fails(self):
         from gui.main.actions.session import load_staging_session

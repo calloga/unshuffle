@@ -12,9 +12,9 @@ import json
 from unshuffle.core import tags_to_search_text
 
 
-def build_staging_rows(records):
+def build_staging_rows(records, *, start_index: int = 0):
     rows = []
-    for i, rec in enumerate(records):
+    for i, rec in enumerate(records, start=max(0, int(start_index))):
         if hasattr(rec, "staging_row_id"):
             rec.staging_row_id = i
         evidence = dict(getattr(rec, "evidence", {}) or {})

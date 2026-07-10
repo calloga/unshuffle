@@ -979,6 +979,42 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertIn("Silent", records[0].tags)
 
+    def test_run_plan_persists_and_reuses_deterministic_analysis_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "Source"
+            target = root / "Target"
+            source.mkdir()
+            target.mkdir()
+            sample = source / "silent_kick.wav"
+            sample.write_bytes(b"audio-a")
+            db = UnshuffleDB(root / "plan.db")
+
+            try:
+                with mock.patch(
+                    "unshuffle.logic.planning.service.SimilarityEngine.extract_feature_payloads_bulk",
+                    return_value={sample: None},
+                ) as first_extract, mock.patch(
+                    "unshuffle.logic.planning.service.SimilarityEngine.extraction_failure_tag",
+                    return_value="Silent",
+                ), mock.patch("unshuffle.logic.planning.service.get_audio_duration", return_value=0.0):
+                    first = run_plan(source, target, db=db, acoustic_index=True)
+
+                first_extract.assert_called_once()
+                self.assertIn("Silent", first[0].tags)
+
+                with mock.patch(
+                    "unshuffle.logic.planning.service.SimilarityEngine.extract_feature_payloads_bulk"
+                ) as second_extract, mock.patch(
+                    "unshuffle.logic.planning.service.get_audio_duration", return_value=0.0
+                ):
+                    second = run_plan(source, target, db=db, acoustic_index=True)
+
+                second_extract.assert_not_called()
+                self.assertIn("Silent", second[0].tags)
+            finally:
+                db.close()
+
     def test_run_plan_skips_classifier_and_acoustic_work_for_non_audio_assets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

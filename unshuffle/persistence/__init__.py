@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -68,9 +69,17 @@ def get_local_db(target_dir: Path):
 def load_json_meta(target_dir: Path, filename: str, is_dry_run: bool = False) -> Optional[Any]:
     file_path = get_system_dir(target_dir, is_dry_run) / filename
     if file_path.exists():
+        started = time.perf_counter()
         try:
             with open(file_path, "r", encoding="utf-8") as file_handle:
-                return json.load(file_handle)
+                payload = json.load(file_handle)
+            logging.debug(
+                "JSON metadata load: file=%s bytes=%d elapsed=%.3fs",
+                file_path.name,
+                file_path.stat().st_size,
+                time.perf_counter() - started,
+            )
+            return payload
         except (json.JSONDecodeError, OSError) as exc:
             logging.error("Failed to load %s: %s", filename, exc)
     return None

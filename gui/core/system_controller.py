@@ -55,6 +55,7 @@ class SystemController:
         self.page.exportAnchorsRequested.connect(self.export_anchors)
         self.page.previewAnchorRequested.connect(self.preview_anchor)
         self.page.anchorSoundGroupChanged.connect(self.update_anchor_sound_group)
+        self.page.sectionChanged.connect(lambda _section: QTimer.singleShot(0, self.refresh_current_section))
 
     def _bridge(self):
         return getattr(self.app.data_manager, "bridge", None)
@@ -78,10 +79,8 @@ class SystemController:
         can_write = self._session_write_enabled()
         self.page.set_mode(can_write)
         self.page.set_anchor_draft_state(len(self._anchor_draft_actions))
-        self.refresh_additions()
-        self.refresh_corrections()
-        self.refresh_discovery()
-        self.refresh_anchors()
+        # Section data is loaded on demand. Eagerly rebuilding every System table
+        # here made startup and unrelated runtime changes pay for hidden panels.
 
     def open_workspace(self) -> None:
         self.refresh_navigation_state()
@@ -141,12 +140,15 @@ class SystemController:
         self._prompt_rescan("Taxonomy additions were saved.")
 
     def refresh_discovery(self) -> None:
-        model = getattr(self.app, "model", None)
-        records = list(getattr(model, "records", []) or [])
-        uncategorized = [
-            rec for rec in records
-            if str(getattr(rec, "category", "") or "").strip() == "Uncategorized"
-        ]
+        store = getattr(self.app, "session_store", None)
+        if store is not None:
+            uncategorized = store.records_for_fields({"category": "Uncategorized"})
+        else:
+            model = getattr(self.app, "model", None)
+            uncategorized = [
+                rec for rec in list(getattr(model, "records", []) or [])
+                if str(getattr(rec, "category", "") or "").strip() == "Uncategorized"
+            ]
         rows = system_taxonomy.discovery_rows(uncategorized)
         gaps = self._probable_gaps(uncategorized)
         self.page.set_discovery_rows(rows, gaps)

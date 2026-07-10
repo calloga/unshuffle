@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from collections.abc import Iterator
 from typing import Any, Optional
 from pathlib import Path
 
@@ -48,11 +49,38 @@ def upsert_coherence_results(conn: sqlite3.Connection, session_id: str, results:
 
 
 def list_coherence_results(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    return [row for batch in iter_coherence_results(conn, session_id) for row in batch]
+
+
+def iter_coherence_results(
+    conn: sqlite3.Connection,
+    session_id: str,
+    *,
+    columns: str = "*",
+    batch_size: int = 1000,
+) -> Iterator[list[dict[str, Any]]]:
     cursor = conn.execute(
-        "SELECT * FROM coherence_results WHERE session_id = ? ORDER BY record_id",
+        f"SELECT {columns} FROM coherence_results WHERE session_id = ? ORDER BY record_id",
         (session_id,),
     )
-    return [dict(row) for row in cursor.fetchall()]
+    size = max(1, int(batch_size))
+    while True:
+        rows = cursor.fetchmany(size)
+        if not rows:
+            break
+        yield [dict(row) for row in rows]
+
+
+def list_coherence_result_clusters(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
+    return [
+        row
+        for batch in iter_coherence_results(
+            conn,
+            session_id,
+            columns="record_id, cluster_id",
+        )
+        for row in batch
+    ]
 
 
 def upsert_refinement_candidates(conn: sqlite3.Connection, session_id: str, candidates: list[Any]) -> None:

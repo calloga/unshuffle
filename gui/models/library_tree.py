@@ -32,6 +32,9 @@ READ_ONLY_ROLE = Qt.UserRole + 11
 RESIDUAL_ROLE = Qt.UserRole + 12
 SOURCE_NODE_ID_ROLE = Qt.UserRole + 13
 SOURCE_NODE_TYPE_ROLE = Qt.UserRole + 14
+ROUTE_KEY_ROLE = Qt.UserRole + 15
+LEAF_SOURCE_ROLE = Qt.UserRole + 16
+LEAF_LOADED_ROLE = Qt.UserRole + 17
 
 SEMANTIC_FIELD_NAMES = {"audio_type", "category", "subcategory", "pack"}
 INTERNAL_PATH_NAMES = {".unshuffle", ".unshuffle_hashes.json", "unshuffle.log", SYSTEM_FOLDER_NAME.lower()}
@@ -100,20 +103,32 @@ def _get_tinted_icon_for_tree(icon_path, color_name) -> QIcon:
     return QIcon(QPixmap.fromImage(image))
 
 @lru_cache(maxsize=6)
+def _tree_file_sequence_color(slot: int):
+    colors = ColorPalette.IDENTITY
+    if not colors:
+        return make_qcolor(ColorPalette.TEXT_LIGHT)
+    color_name = colors[slot]
+    return make_qcolor(color_name)
+
 def tree_file_sequence_color(idx: int):
     colors = ColorPalette.IDENTITY
     if not colors:
         return make_qcolor(ColorPalette.TEXT_LIGHT)
-    color_name = colors[idx % len(colors)]
-    return make_qcolor(color_name)
+    return _tree_file_sequence_color(idx % len(colors))
 
 @lru_cache(maxsize=6)
+def _tree_file_sequence_icon(slot: int):
+    colors = ColorPalette.IDENTITY
+    if not colors:
+        return QIcon()
+    color_name = colors[slot]
+    return _get_tinted_icon_for_tree("icons/waveform.png", color_name)
+
 def tree_file_sequence_icon(idx: int):
     colors = ColorPalette.IDENTITY
     if not colors:
         return QIcon()
-    color_name = colors[idx % len(colors)]
-    return _get_tinted_icon_for_tree("icons/waveform.png", color_name)
+    return _tree_file_sequence_icon(idx % len(colors))
 
 @lru_cache(maxsize=1)
 def text_inactive_color():
@@ -131,8 +146,8 @@ def clear_tree_color_caches():
     tree_category_color.cache_clear()
     tree_pack_color.cache_clear()
     text_inactive_color.cache_clear()
-    tree_file_sequence_color.cache_clear()
-    tree_file_sequence_icon.cache_clear()
+    _tree_file_sequence_color.cache_clear()
+    _tree_file_sequence_icon.cache_clear()
 
 def active_tree_levels_for_sort(sort_column: int):
     return list(TREE_LEVELS)
@@ -220,6 +235,7 @@ def canonical_preview_key(rec: PlanRecord):
 class LibraryTreeModel(QStandardItemModel):
     """Builds a type -> category -> pack tree from staged records."""
     rebuildFinished = Signal()
+    LEAF_BATCH_SIZE = 250
     def __init__(self, parent=None):
         super().__init__(parent)
         self.search_text = ""
@@ -237,6 +253,7 @@ class LibraryTreeModel(QStandardItemModel):
         self._file_icon: QIcon | None = None
         self._session_store = None
         self._session_query = None
+        self._custom_projection_signature = ""
         self.setColumnCount(2)
         self.setHorizontalHeaderLabels(["Name", "Info"])
 
@@ -295,6 +312,33 @@ class LibraryTreeModel(QStandardItemModel):
         self.setHorizontalHeaderLabels(["Name", "Info"])
         root = self.invisibleRootItem()
         levels = [(field, node_type) for field, node_type in self._active_tree_levels() if field not in set(skip_fields or set())]
+        if self.custom_tree_profile is not None:
+            try:
+                self._custom_projection_signature = store.ensure_custom_tree_projection(
+                    self.custom_tree_profile,
+                    levels,
+                    confidence_floor=self.confidence_floor,
+                    confidence_filter_enabled=self.confidence_filter_enabled,
+                )
+                rows = store.custom_tree_child_counts(
+                    self.custom_tree_profile.id,
+                    self._custom_projection_signature,
+                    "",
+                    query,
+                )
+                self._append_store_custom_rows(root, rows)
+                if not rows:
+                    item = self._make_node_item("No matching files", "empty", 0, {}, [])
+                    item.setEnabled(False)
+                    root.appendRow([item, self._make_aux_item("")])
+            except ValueError as exc:
+                item = self._make_node_item("Invalid Custom Tree", "custom", 0, {}, [])
+                item.setToolTip(str(exc))
+                item.setIcon(self._folder_icon or QIcon())
+                root.appendRow([item, self._make_aux_item("")])
+            self.rebuildFinished.emit()
+            return
+        self._custom_projection_signature = ""
         if not levels:
             item = self._make_node_item("Library", "container", store.count(query), {}, [])
             item.setData(False, POPULATED_ROLE)
@@ -314,6 +358,42 @@ class LibraryTreeModel(QStandardItemModel):
             item.appendRow([self._dummy_item(), QStandardItem("")])
             root.appendRow([item, self._make_aux_item("")])
         self.rebuildFinished.emit()
+
+    def _append_store_custom_rows(self, parent, rows: list[dict]) -> None:
+        import json
+
+        for row in rows:
+            try:
+                fields = json.loads(row.get("semantic_fields_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                fields = {}
+            fields = dict(fields) if isinstance(fields, dict) else {}
+            source_node_id = str(row.get("source_node_id") or "")
+            label = str(row.get("label") or "Other")
+            if source_node_id:
+                try:
+                    route_parts = json.loads(str(row.get("route_key") or "[]"))
+                    fields["custom_path"] = "/".join(str(part[1]) for part in route_parts)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    fields["custom_path"] = label
+            count = int(row.get("count") or 0)
+            item = self._make_node_item(
+                label,
+                str(row.get("node_type") or "custom"),
+                count,
+                fields,
+                [],
+            )
+            item.setData(fields, FIELDS_ROLE)
+            item.setData(bool(row.get("read_only")), READ_ONLY_ROLE)
+            item.setData(bool(row.get("residual")), RESIDUAL_ROLE)
+            item.setData(source_node_id, SOURCE_NODE_ID_ROLE)
+            item.setData(str(row.get("source_node_type") or ""), SOURCE_NODE_TYPE_ROLE)
+            item.setData(str(row.get("route_key") or ""), ROUTE_KEY_ROLE)
+            item.setData(False, POPULATED_ROLE)
+            item.setIcon(self._folder_icon or QIcon())
+            item.appendRow([self._dummy_item(), QStandardItem("")])
+            parent.appendRow([item, self._make_aux_item("")])
 
     def _rebuild_custom(self, records: list[PlanRecord], folder_icon):
         root = self.invisibleRootItem()
@@ -741,6 +821,20 @@ class LibraryTreeModel(QStandardItemModel):
         item.setData(True, POPULATED_ROLE)
 
     def _populate_store_index(self, item) -> None:
+        route_key = str(item.data(ROUTE_KEY_ROLE) or "")
+        if route_key and self.custom_tree_profile is not None and self._custom_projection_signature:
+            children = self._custom_children(route_key)
+            if children:
+                while self._single_residual_other(children):
+                    route_key = str(children[0].get("route_key") or "")
+                    children = self._custom_children(route_key)
+                    if not children:
+                        self._configure_store_leaf(item, {"kind": "custom", "route_key": route_key})
+                        return
+                self._append_store_custom_rows(item, children)
+                return
+            self._configure_store_leaf(item, {"kind": "custom", "route_key": route_key})
+            return
         fields = dict(item.data(FIELDS_ROLE) or {})
         levels = self._active_tree_levels()
         next_level = None
@@ -749,9 +843,7 @@ class LibraryTreeModel(QStandardItemModel):
                 next_level = (field, node_type)
                 break
         if next_level is None:
-            records = self._session_store.records_for_fields(fields, self._session_query)
-            item.setData(records, RECORDS_ROLE)
-            self._append_file_items(item, records)
+            self._configure_store_leaf(item, {"kind": "fields", "fields": fields})
             return
         field, node_type = next_level
         children = self._session_store.child_group_counts(fields, field, self._session_query)
@@ -763,9 +855,7 @@ class LibraryTreeModel(QStandardItemModel):
             for row in children
         )
         if not children or empty_subcategory_only:
-            records = self._session_store.records_for_fields(fields, self._session_query)
-            item.setData(records, RECORDS_ROLE)
-            self._append_file_items(item, records)
+            self._configure_store_leaf(item, {"kind": "fields", "fields": fields})
             return
         for row in children:
             name = self._store_group_display_name(field, row.get("value"))
@@ -778,6 +868,86 @@ class LibraryTreeModel(QStandardItemModel):
             child.setIcon(self._folder_icon or QIcon())
             child.appendRow([self._dummy_item(), QStandardItem("")])
             item.appendRow([child, self._make_aux_item("")])
+
+    def _custom_children(self, route_key: str) -> list[dict]:
+        return self._session_store.custom_tree_child_counts(
+            self.custom_tree_profile.id,
+            self._custom_projection_signature,
+            route_key,
+            self._session_query,
+        )
+
+    @staticmethod
+    def _single_residual_other(children: list[dict]) -> bool:
+        return (
+            len(children) == 1
+            and str(children[0].get("label") or "") == "Other"
+            and bool(children[0].get("residual"))
+        )
+
+    def _configure_store_leaf(self, item, source: dict) -> None:
+        item.setData(dict(source), LEAF_SOURCE_ROLE)
+        item.setData(0, LEAF_LOADED_ROLE)
+        self._fetch_store_leaf(item)
+
+    def _fetch_store_leaf(self, item) -> None:
+        source = dict(item.data(LEAF_SOURCE_ROLE) or {})
+        if not source:
+            return
+        offset = int(item.data(LEAF_LOADED_ROLE) or 0)
+        if source.get("kind") == "custom":
+            records = self._session_store.custom_tree_records(
+                self.custom_tree_profile.id,
+                self._custom_projection_signature,
+                str(source.get("route_key") or ""),
+                self._session_query,
+                limit=self.LEAF_BATCH_SIZE,
+                offset=offset,
+            )
+        else:
+            records = self._session_store.records_for_fields(
+                dict(source.get("fields") or {}),
+                self._session_query,
+                self.LEAF_BATCH_SIZE,
+                offset=offset,
+            )
+        self._append_file_items(item, records)
+        item.setData(offset + len(records), LEAF_LOADED_ROLE)
+
+    def records_for_index(self, index) -> list[PlanRecord]:
+        """Hydrate the complete logical branch for an explicit user operation."""
+        if not index.isValid():
+            return []
+        record = index.data(Qt.UserRole)
+        if record is not None:
+            return [record]
+        if self._session_store is None:
+            return list(index.data(RECORDS_ROLE) or [])
+        route_key = str(index.data(ROUTE_KEY_ROLE) or "")
+        if route_key and self.custom_tree_profile is not None and self._custom_projection_signature:
+            return self._session_store.custom_tree_records(
+                self.custom_tree_profile.id,
+                self._custom_projection_signature,
+                route_key,
+                self._session_query,
+            )
+        fields = dict(index.data(FIELDS_ROLE) or {})
+        return self._session_store.records_for_fields(fields, self._session_query)
+
+    def canFetchMore(self, parent) -> bool:
+        if parent.isValid():
+            item = self.itemFromIndex(parent)
+            if item is not None and item.data(LEAF_SOURCE_ROLE):
+                return int(item.data(LEAF_LOADED_ROLE) or 0) < int(item.data(COUNT_ROLE) or 0)
+        return super().canFetchMore(parent)
+
+    def fetchMore(self, parent) -> None:
+        if parent.isValid():
+            item = self.itemFromIndex(parent)
+            if item is not None and item.data(LEAF_SOURCE_ROLE):
+                self._fetch_store_leaf(item)
+                return
+        super().fetchMore(parent)
 
     @staticmethod
     def _store_group_display_name(field: str, value) -> str:

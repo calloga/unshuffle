@@ -185,10 +185,18 @@ class WorkflowController(QObject):
         sources_paths = [Path(s) for s in sources]
         self.scanStarted.emit([str(s) for s in sources_paths], append)
         current_records = self.app.model.records if append and self.app.model else None
-        skip_expensive_hashes = self._known_duplicate_hashes_for_scan(current_records, append=append)
+        session_store = getattr(self.app, "session_store", None)
+        if append and session_store is not None and hasattr(session_store, "scan_dedupe_index"):
+            existing_hashes = session_store.scan_dedupe_index()
+            skip_expensive_hashes = set(existing_hashes.get("full_hashes", set())) | set(
+                existing_hashes.get("fast_hash_records", {})
+            )
+            current_records = None
+        else:
+            skip_expensive_hashes = self._known_duplicate_hashes_for_scan(current_records, append=append)
+            existing_hashes = workflow_scan_start.existing_dedupe_keys(current_records, append=append)
 
         lib_hashes = set()
-        existing_hashes = workflow_scan_start.existing_dedupe_keys(current_records, append=append)
         use_operation_monitor = bool((self._pending_finalize_options or {}).get("use_operation_monitor", True))
         if use_operation_monitor:
             self._start_operation_monitor("Scanning Library", cancellable=True)
@@ -425,8 +433,15 @@ class WorkflowController(QObject):
         from PySide6.QtCore import QTimer
 
         if not new_records and is_append:
-             self.app.footer.log("<b>Notice:</b> No new files found to add.")
-             return
+            self.app.footer.log("<b>Notice:</b> No new files found to add.")
+            self.app._scan_finalizing = False
+            from ..utils.ui_helpers import set_ui_busy
+            set_ui_busy(self.app, False)
+            self.app.footer.set_status("Ready")
+            self._finish_operation_monitor("No new files found.")
+            if callable(on_ready):
+                on_ready()
+            return
 
         self.app._scan_finalizing = True
         self.app.footer.set_busy_state(True)
@@ -489,11 +504,20 @@ class WorkflowController(QObject):
         workflow_scan_finalization.refresh_library_sources_and_suggestions(self.app)
         _finalizing(2, "Refreshing library sources...")
             
+        if not new_records and getattr(self.app, "session_store", None) is not None:
+            stats.setdefault(
+                "category_counts",
+                {
+                    str(row.get("category") or "Uncategorized"): int(row.get("count") or 0)
+                    for row in self.app.session_store.group_counts(["category"], None)
+                },
+            )
         stats = workflow_scan_finalization.normalized_scan_stats(stats, new_records, scan_category_counts)
         self._last_scan_stats = stats
         self.app.footer.set_count(f"{self.app.model.rowCount()} files ready")
 
         workflow_scan_finalization.update_corrupt_filter_state(self.app)
+        workflow_scan_finalization.update_possible_duplicate_filter_state(self.app)
         _finalizing(3, "Refreshing scan filters...")
 
         if callable(summary_callback):

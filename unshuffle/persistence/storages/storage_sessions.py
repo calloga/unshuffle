@@ -87,8 +87,16 @@ def get_staging_records(db, session_id: str) -> List[Dict]:
     return staging_store.get_staging_records(db.conn, session_id)
 
 
+def iter_staging_records(db, session_id: str, batch_size: int = 1000):
+    return staging_store.iter_staging_records(db.conn, session_id, batch_size=batch_size)
+
+
 def get_coherence_staging_records(db, session_id: str) -> List[Dict]:
     return staging_store.get_coherence_staging_records(db.conn, session_id)
+
+
+def iter_coherence_staging_records(db, session_id: str, batch_size: int = 1000):
+    return staging_store.iter_coherence_staging_records(db.conn, session_id, batch_size=batch_size)
 
 
 def update_staging_record(db, session_id: str, row_id: int, data: Dict[str, str]) -> None:

@@ -199,6 +199,7 @@ def connect_orchestrator_signals(app):
     app.library_tab.preserveRequested.connect(app.drafting_controller.apply_preserve_pack)
     app.library_tab.unpreserveRequested.connect(app.drafting_controller.apply_unpreserve_pack)
     app.library_tab.treeOrganizationEditRequested.connect(app.tree_organization_controller.open_editor)
+    app.library_tab.treeOrganizationSwitchRequested.connect(app.tree_organization_controller.switch_profile)
     
     app.library_tab.bulkCategoryRequested.connect(app.drafting_controller.apply_bulk_category)
     app.library_tab.bulkSubcategoryRequested.connect(app.drafting_controller.apply_bulk_subcategory)

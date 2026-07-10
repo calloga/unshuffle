@@ -251,8 +251,13 @@ def run_plan(
         queued_extract_keys: Dict[tuple[str, str], Path] = {}
         supported = SimilarityEngine.SUPPORTED_EXTS
         cached_feature_vectors: Dict[str, bytes] = {}
+        cached_analysis_failures: Dict[str, str] = {}
         if db and hasattr(db, "get_feature_vectors_bulk"):
             cached_feature_vectors = db.get_feature_vectors_bulk(
+                [node.hash for node in expensive_audio_nodes if node.hash]
+            )
+        if db and hasattr(db, "get_analysis_failures_bulk"):
+            cached_analysis_failures = db.get_analysis_failures_bulk(
                 [node.hash for node in expensive_audio_nodes if node.hash]
             )
 
@@ -261,6 +266,11 @@ def run_plan(
                 continue
 
             if db:
+                cached_failure = cached_analysis_failures.get(node.hash) if node.hash else None
+                if cached_failure:
+                    analysis_failure_tags[node.path] = cached_failure
+                    analysis_statuses[node.path] = cached_failure
+                    continue
                 cached = cached_feature_vectors.get(node.hash) if node.hash else None
                 if cached is None and not hasattr(db, "get_feature_vectors_bulk"):
                     cached = db.get_feature_vector(node.hash)
@@ -353,6 +363,26 @@ def run_plan(
                                 for result_path in dependent_paths:
                                     analysis_failure_tags[result_path] = failure_tag
                                     analysis_statuses[result_path] = failure_tag
+                                if db and failure_tag in {"Empty", "Silent"}:
+                                    node = context.nodes.get(path)
+                                    if node and node.hash:
+                                        stat = path.stat()
+                                        cache_updates.append((
+                                            node.hash,
+                                            path,
+                                            stat.st_size,
+                                            stat.st_mtime,
+                                            None,
+                                            CURRENT_FEATURE_SPACE_VERSION,
+                                            CURRENT_EXTRACTOR_VERSION,
+                                            json.dumps(list(CURRENT_FEATURE_SCHEMA)),
+                                            failure_tag,
+                                            json.dumps([failure_tag]),
+                                            node.fast_hash,
+                                        ))
+                                        if len(cache_updates) >= CACHE_UPDATE_BATCH_SIZE:
+                                            db.update_cache_bulk(cache_updates)
+                                            cache_updates.clear()
                         completed += 1
                         feature_progress.emit(completed)
                 feature_progress.emit(len(to_extract), force=True)
@@ -486,6 +516,7 @@ def run_plan(
                 min_confidence=min_confidence,
                 debug=debug_this,
                 runtime=runtime_config,
+                runtime_revision_trusted=True,
             )
 
             if debug_this:

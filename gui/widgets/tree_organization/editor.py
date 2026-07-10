@@ -52,6 +52,7 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
     profileSaved = Signal(object)
     profileDeleted = Signal(str)
     profileDisabled = Signal()
+    countPreviewReady = Signal(int, object, str)
 
     def __init__(
         self,
@@ -68,7 +69,7 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
         self.setWindowTitle("Edit Tree View Organization")
         self.resize(1120, 720)
         self._profiles = list(profiles)
-        self._records = list(records)
+        self._records = records
         self._active_profile_id = active_profile.id if active_profile is not None else ""
         self._selected_profile_id = self._active_profile_id
         self._pending_profile = active_profile  
@@ -170,6 +171,9 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
         self._count_refresh_timer = QTimer(self)
         self._count_refresh_timer.setSingleShot(True)
         self._count_refresh_timer.timeout.connect(self._refresh_counts_after_idle)
+        self._count_refresh_generation = 0
+        self._count_refresh_active = False
+        self.countPreviewReady.connect(self._apply_count_preview_result)
         self._build_editor_page()
         assert self.editor_page is not None
         self.page_stack.addWidget(self.editor_page)

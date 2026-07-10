@@ -9,7 +9,7 @@ from .models import (
 )
 from .repository import TreeOrganizationProfileStoreError, TreeOrganizationRepository
 from .resolver import TreeOrganizationResolver
-from .routing import RoutePart, TreeRoute, TreeRouteBuilder
+from .routing import RoutePart, TreeRoute, TreeRouteBuilder, semantic_profile_for_record_batches
 
 __all__ = [
     "DestinationResolution",
@@ -24,5 +24,6 @@ __all__ = [
     "RoutePart",
     "TreeRoute",
     "TreeRouteBuilder",
+    "semantic_profile_for_record_batches",
     "make_empty_profile",
 ]

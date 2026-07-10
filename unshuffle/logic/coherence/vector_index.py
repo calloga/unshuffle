@@ -62,12 +62,16 @@ def eligible_staging_row(row: dict[str, Any]) -> bool:
 
 
 def records_from_staging_rows(rows: Iterable[dict[str, Any]]) -> tuple[list[CoherenceRecord], VectorIndexStats]:
-    row_list = list(rows)
-    eligible_rows = [row for row in row_list if eligible_staging_row(row)]
     records: list[CoherenceRecord] = []
     group_counts: dict[tuple[str, str, str], int] = {}
+    total_count = 0
+    eligible_count = 0
 
-    for row in eligible_rows:
+    for row in rows:
+        total_count += 1
+        if not eligible_staging_row(row):
+            continue
+        eligible_count += 1
         vector = valid_coherence_vector(row.get("feature_vector", row.get("acoustic_vector")))
         if vector is None:
             continue
@@ -97,11 +101,10 @@ def records_from_staging_rows(rows: Iterable[dict[str, Any]]) -> tuple[list[Cohe
         group_key = (audio_type, category, subcategory)
         group_counts[group_key] = group_counts.get(group_key, 0) + 1
 
-    eligible_count = len(eligible_rows)
     valid_count = len(records)
     coverage = (valid_count / eligible_count) if eligible_count else 0.0
     stats = VectorIndexStats(
-        total_records=len(row_list),
+        total_records=total_count,
         eligible_records=eligible_count,
         valid_vector_records=valid_count,
         coverage=coverage,

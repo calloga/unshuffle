@@ -50,7 +50,13 @@ def sync_search_ui_state(
         window.library_tab._refresh_search_button_state()
         window.library_tab.set_active_saved_filters(active_saved_filters)
         window.library_tab.set_active_source_filters(active_source_filters)
-        window.library_tab.category_carousel.set_active_values(active_categories)
+        active_category_values = set(active_categories or set())
+        if hasattr(window.library_tab, "category_filter_values_for_query"):
+            active_category_values = window.library_tab.category_filter_values_for_query(
+                query,
+                active_category_values,
+            )
+        window.library_tab.category_carousel.set_active_values(active_category_values)
         window.library_tab.signal_floor_control.set_range(*confidence_range)
         window.sync_type_filter_state()
         window.library_tab.sync_map_filters()

@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QInputDialog, QMenu
-from ..utils.constants import HEADER_FILTERABLE_COLUMNS
+from ..utils.constants import HEADER_FILTERABLE_COLUMNS, StagingColumn
 from ..utils.styles import menu_style
 from ..utils.style_helpers import apply_style
 
@@ -108,6 +108,31 @@ class FilterController:
             act.setChecked(value in active_values)
             act.triggered.connect(lambda checked, selected=value: self.toggle_column_filter(col, selected, checked))
             menu.addAction(act)
+
+        placement = "category" if col == StagingColumn.CATEGORY else "subcategory" if col == StagingColumn.SUBCATEGORY else ""
+        custom_options = [
+            option
+            for option in getattr(self.parent.library_tab, "_custom_tree_filter_options", [])
+            if option.placement == placement
+        ]
+        if custom_options:
+            from gui.core.filter_query import query_contains_token
+
+            menu.addSeparator()
+            custom_menu = menu.addMenu("Custom Tree")
+            current_query = str(getattr(self.parent.search_controller, "current_query", "") or "")
+            for option in custom_options:
+                act = QAction(option.label, self.parent)
+                act.setCheckable(True)
+                act.setChecked(query_contains_token(current_query, option.query))
+                act.triggered.connect(
+                    lambda checked, selected=option: self.apply_filter_query(
+                        selected.query,
+                        checked,
+                        mode="replace",
+                    )
+                )
+                custom_menu.addAction(act)
 
         header = self.parent.library_tab.view_table.horizontalHeader()
         menu.exec(header.mapToGlobal(pos))

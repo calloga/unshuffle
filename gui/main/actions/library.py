@@ -217,6 +217,10 @@ def do_remove_folder(app, root: Path):
             app.model.refresh_index()
             if hasattr(app.library_tab, "set_sources"):
                 app.library_tab.set_sources(app.engine.session_source_roots)
+            _clear_removed_source_filter(app, root)
+            from gui.core import workflow_scan_finalization
+            workflow_scan_finalization.update_corrupt_filter_state(app)
+            workflow_scan_finalization.update_possible_duplicate_filter_state(app)
             app.footer.log(
                 f"<b>Removed:</b> {root.name} ({removed_count} staged files removed; {promoted_count} duplicate shadow(s) promoted)."
             )
@@ -278,6 +282,24 @@ def do_remove_folder(app, root: Path):
         if hasattr(app.library_tab, "set_sources"):
             app.library_tab.set_sources(original_roots)
         QMessageBox.warning(app, "Remove Folder", f"Could not remove folder: {exc}")
+
+
+def _clear_removed_source_filter(app, root: Path) -> None:
+    from gui.core.filter_query import normalize_source_path_key
+
+    normalized_root = normalize_source_path_key(root)
+    controller = getattr(app, "search_controller", None)
+    current = str(getattr(controller, "current_query", "") or "").strip()
+    expected = f'source:"{root}"'
+    query_matches = current.casefold() == expected.casefold()
+    if not query_matches and current.lower().startswith('source:"') and current.endswith('"'):
+        query_matches = normalize_source_path_key(current[8:-1]) == normalized_root
+    sidebar = getattr(getattr(app, "library_tab", None), "sidebar", None)
+    if sidebar is not None:
+        sidebar.source_filter_active.discard(normalized_root)
+        sidebar._sync_source_items()
+    if query_matches and controller is not None:
+        controller.set_query("", immediate=True)
 
 
 def _refresh_model_indexes(model) -> None:

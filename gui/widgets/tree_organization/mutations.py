@@ -7,13 +7,39 @@ from PySide6.QtWidgets import QMessageBox, QWidget
 
 from gui.core.tree_organization_defaults import build_default_tree_nodes, make_default_shaped_profile
 from unshuffle.logic.tree_organization import TreeOrganizationNode, TreeOrganizationProfile
+from unshuffle.logic.tree_organization.models import utc_now_iso
 
 
 class TreeOrganizationMutationMixin:
     def _build_default_tree_nodes(self, records: list, library_tab=None) -> list[TreeOrganizationNode]:
+        app = self.parent() if hasattr(self, "parent") else None
+        store = getattr(app, "session_store", None)
+        if store is not None:
+            from gui.core.tree_organization_defaults import build_default_tree_nodes_from_group_values
+
+            tree_model = getattr(library_tab, "tree_model", None)
+            values = store.default_tree_group_values(
+                confidence_floor=float(getattr(tree_model, "confidence_floor", 0.0)),
+                confidence_filter_enabled=bool(getattr(tree_model, "confidence_filter_enabled", True)),
+            )
+            return build_default_tree_nodes_from_group_values(
+                values,
+                collapse_residual_other=True,
+            )
         return build_default_tree_nodes(records, library_tab, collapse_residual_other=True)
 
     def _make_default_shaped_profile(self, profile_id: str, name: str, records: list, library_tab=None) -> TreeOrganizationProfile:
+        app = self.parent() if hasattr(self, "parent") else None
+        if getattr(app, "session_store", None) is not None:
+            now = utc_now_iso()
+            return TreeOrganizationProfile(
+                id=profile_id,
+                name=name,
+                root_node_id="root",
+                nodes=self._build_default_tree_nodes(records, library_tab),
+                created_at=now,
+                updated_at=now,
+            )
         return make_default_shaped_profile(
             profile_id,
             name,

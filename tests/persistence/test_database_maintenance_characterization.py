@@ -9,12 +9,39 @@ from PySide6.QtCore import QObject
 from gui.core import workflow_build_completion
 from gui.core.workflow_controller import WorkflowController
 from gui.core.workflow_records import build_result_compact_lines
-from gui.core.workers import ScanWorker, StartupRestoreWorker
+from gui.core.workers import (
+    ScanWorker,
+    StartupRestoreWorker,
+    _staging_session_has_rows,
+    _staging_session_row_count,
+)
 from unshuffle.core import PlanRecord
 from unshuffle.persistence import get_local_db
 
 
 class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
+    def test_restore_staging_helpers_use_bounded_sql_queries(self):
+        connection = mock.Mock()
+        connection.execute.side_effect = [
+            mock.Mock(fetchone=mock.Mock(return_value=(1,))),
+            mock.Mock(fetchone=mock.Mock(return_value=(12,))),
+        ]
+        db = SimpleNamespace(conn=connection)
+
+        self.assertTrue(_staging_session_has_rows(db, "session"))
+        self.assertEqual(_staging_session_row_count(db, "session"), 12)
+        self.assertIn("LIMIT 1", connection.execute.call_args_list[0].args[0])
+        self.assertIn("COUNT(*)", connection.execute.call_args_list[1].args[0])
+
+    def test_restore_staging_helpers_keep_legacy_database_fallback(self):
+        db = SimpleNamespace(
+            conn=None,
+            get_staging_records=mock.Mock(return_value=[{"row_id": 1}]),
+        )
+
+        self.assertTrue(_staging_session_has_rows(db, "session"))
+        self.assertEqual(_staging_session_row_count(db, "session"), 1)
+
     def test_scan_worker_prunes_after_writing_current_staging(self):
         calls = []
 
@@ -58,6 +85,44 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
         self.assertNotIn(("compact_if_worthwhile",), calls)
         self.assertEqual(calls[-1], ("close",))
 
+    def test_append_scan_inserts_only_new_staging_rows(self):
+        calls = []
+        connection = mock.Mock()
+        connection.execute.return_value.fetchone.return_value = (9,)
+
+        class _DB:
+            conn = connection
+
+            def register_session(self, *args, **kwargs):
+                calls.append(("register_session", args, kwargs))
+
+            def clear_staging(self, session_id):
+                calls.append(("clear_staging", session_id))
+
+            def list_coherence_review_decisions(self, *args, **kwargs):
+                return []
+
+            def add_staging_records_bulk(self, session_id, rows):
+                calls.append(("add_staging_records_bulk", session_id, rows))
+
+            def prune_ephemeral_state(self, keep_session_ids, target_root=None):
+                pass
+
+        record = PlanRecord(Path("D:/Added/kick.wav"), "Pack", "Kicks", "Oneshots", "0.9")
+        engine = mock.Mock()
+        engine.db = _DB()
+        engine.session_id = "scan-session"
+        engine.target_dir = Path("D:/Library")
+        engine.prepare_plan.return_value = [record]
+        worker = ScanWorker(engine, [Path("D:/Added")], append=True)
+
+        worker.run()
+
+        self.assertNotIn(("clear_staging", "scan-session"), calls)
+        inserted = next(call for call in calls if call[0] == "add_staging_records_bulk")
+        self.assertEqual(len(inserted[2]), 1)
+        self.assertEqual(inserted[2][0][0], 10)
+
     def test_startup_restore_prunes_before_loading_and_uses_newest_fallback(self):
         calls = []
         payloads = []
@@ -98,7 +163,8 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
         )
         invalidate.assert_called_once_with("D:/Library")
         self.assertEqual(payloads[0]["session_id"], "newest-session")
-        self.assertEqual(payloads[0]["plan"], ["plan-record"])
+        self.assertEqual(payloads[0]["record_count"], 1)
+        self.assertNotIn("plan", payloads[0])
 
     def test_startup_restore_falls_back_when_requested_session_has_no_staging(self):
         calls = []
@@ -109,7 +175,7 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
 
             def get_staging_records(self, session_id):
                 calls.append(("get_staging_records", session_id))
-                return []
+                return [] if session_id == "build-session" else [{"row_id": 1}]
 
             def newest_restorable_staging_session(self, target_root=None):
                 calls.append(("newest_restorable_staging_session", target_root))
@@ -134,11 +200,12 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
              mock.patch("gui.utils.session.plan_records_from_staging", return_value=["plan-record"]):
             worker.run()
 
-        self.assertIn(("get_staging_records", "build-session"), calls)
         self.assertIn(("newest_restorable_staging_session", Path("D:/Library")), calls)
         self.assertIn(("prune_ephemeral_state", {"scan-session"}, Path("D:/Library")), calls)
-        self.assertIn(("load_staging_records", "D:/Library", "scan-session"), calls)
+        self.assertIn(("get_staging_records", "scan-session"), calls)
+        self.assertNotIn(("load_staging_records", "D:/Library", "scan-session"), calls)
         self.assertEqual(payloads[0]["session_id"], "scan-session")
+        self.assertEqual(payloads[0]["record_count"], 1)
 
     def test_startup_restore_falls_back_to_target_local_staging_session(self):
         import tempfile
@@ -183,8 +250,8 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
             self.assertEqual(payloads[0]["session_id"], "local-session")
             self.assertEqual(payloads[0]["db_scope"], "local")
             self.assertEqual(payloads[0]["sources"], [str(source.parent)])
-            self.assertEqual(len(payloads[0]["plan"]), 1)
-            self.assertEqual(str(payloads[0]["plan"][0].source_path), str(source))
+        self.assertEqual(payloads[0]["record_count"], 1)
+        self.assertNotIn("plan", payloads[0])
 
     def test_restore_plan_records_skip_reserved_internal_paths(self):
         from gui.utils.session import plan_records_from_staging

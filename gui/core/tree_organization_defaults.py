@@ -50,6 +50,37 @@ def build_default_tree_nodes(records: list, library_tab=None, *, collapse_residu
     return nodes
 
 
+def build_default_tree_nodes_from_group_values(
+    values,
+    *,
+    collapse_residual_other: bool,
+) -> list[TreeOrganizationNode]:
+    grouped = {}
+    for audio_type, category, subcategory in values:
+        grouped.setdefault(audio_type, {}).setdefault(category, {}).setdefault(subcategory, [])
+    nodes = [
+        TreeOrganizationNode(
+            id="root",
+            parent_id=None,
+            name="Root",
+            filter_query=None,
+            node_type="system",
+            sort_order=0,
+            enabled=True,
+        )
+    ]
+    append_default_profile_nodes(
+        nodes,
+        "root",
+        grouped,
+        list(DEFAULT_EDIT_LEVELS),
+        (),
+        collapse_residual_other=collapse_residual_other,
+    )
+    ensure_default_utility_node(nodes)
+    return nodes
+
+
 def make_default_shaped_profile(
     profile_id: str,
     name: str,

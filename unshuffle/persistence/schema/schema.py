@@ -10,6 +10,7 @@ from .schema_ddl import (
     create_search_objects, ensure_id_fields,
 )
 from unshuffle.persistence.schema_migrations import (
+    ensure_custom_tree_memberships,
     ensure_fast_hash_columns,
     ensure_feature_schema_columns,
     ensure_schema_version,
@@ -83,6 +84,7 @@ def migrations_up(connection: sqlite3.Connection ) -> None:
 
     ensure_fast_hash_columns(connection)
     ensure_staging_view_indexes(connection)
+    ensure_custom_tree_memberships(connection)
 
 def initialize_v1_schema(conn: sqlite3.Connection, schema_version: int) -> None:
     # ensure schema_version table exists
@@ -97,6 +99,7 @@ def initialize_v1_schema(conn: sqlite3.Connection, schema_version: int) -> None:
     ensure_feature_schema_columns(conn)
     ensure_fast_hash_columns(conn)
     ensure_staging_view_indexes(conn)
+    ensure_custom_tree_memberships(conn)
     create_indexes(conn)
     ensure_id_fields(conn)
 

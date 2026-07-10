@@ -29,6 +29,10 @@ def list_coherence_results(db, session_id: str) -> List[Dict[str, Any]]:
     return coherence_store.list_coherence_results(db.conn, session_id)
 
 
+def list_coherence_result_clusters(db, session_id: str) -> List[Dict[str, Any]]:
+    return coherence_store.list_coherence_result_clusters(db.conn, session_id)
+
+
 def upsert_refinement_candidates(db, session_id: str, candidates: List[Any]) -> None:
     def _write() -> None:
         coherence_store.upsert_refinement_candidates(db.conn, session_id, candidates)

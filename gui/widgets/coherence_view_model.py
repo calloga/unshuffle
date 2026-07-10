@@ -32,7 +32,10 @@ def coherence_points_from_app(
     result_by_id = {}
     if engine is not None and getattr(engine, "db", None) is not None and getattr(engine, "session_id", None):
         if hasattr(engine.db, "list_coherence_results"):
-            results = list(engine.db.list_coherence_results(engine.session_id))
+            if hasattr(engine.db, "list_coherence_result_clusters"):
+                results = list(engine.db.list_coherence_result_clusters(engine.session_id))
+            else:
+                results = list(engine.db.list_coherence_results(engine.session_id))
             result_by_id = {str(row.get("record_id") or ""): row for row in results}
     session_store = getattr(app, "session_store", None) or getattr(model, "store", None)
     if session_store is not None:

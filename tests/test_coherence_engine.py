@@ -405,6 +405,44 @@ def test_vectorized_input_cache_invalidates_when_same_ids_have_new_vectors():
     assert second_distances[0, 1] == pytest.approx(0.0, abs=1e-6)
 
 
+def test_vectorized_input_cache_reuses_same_record_list_and_is_bounded():
+    engine = CoherenceEngine()
+    records = [_record(idx, idx / 10) for idx in range(4)]
+
+    first = engine._vectorized_inputs(records)
+    second = engine._vectorized_inputs(records)
+
+    assert second is first
+    assert engine._last_vector_records is records
+    assert engine._last_vector_inputs is first
+
+
+def test_cluster_laplacian_matches_dense_diagonal_expression(monkeypatch):
+    engine = CoherenceEngine()
+    weights = np.array(
+        [
+            [0.0, 0.8, 0.2],
+            [0.8, 0.0, 0.4],
+            [0.2, 0.4, 0.0],
+        ],
+        dtype=float,
+    )
+    degree = weights.sum(axis=1)
+    inv = np.diag(1.0 / np.sqrt(np.where(degree > 1e-12, degree, 1.0)))
+    expected = np.eye(3) - inv @ weights @ inv
+    captured = {}
+    original = np.linalg.eigh
+
+    def capture(matrix):
+        captured["matrix"] = matrix.copy()
+        return original(matrix)
+
+    monkeypatch.setattr(np.linalg, "eigh", capture)
+    engine._cluster_labels(weights, 3)
+
+    assert np.allclose(captured["matrix"], expected)
+
+
 def test_refinement_evidence_includes_also_matched_neighbors():
     engine = CoherenceEngine(_EuclideanSimilarity())
     target = _record("target", 0.0, category="Bass", subcategory="")

@@ -98,7 +98,8 @@ def restore_previous_session(controller, *, frontload: bool = False, bridge_fact
             restored_target = str(payload.get("target") or target)
             sources = payload.get("sources") or []
             plan = payload.get("plan") or []
-            if not plan:
+            record_count = int(payload.get("record_count") or len(plan))
+            if record_count <= 0:
                 ui_helpers.set_ui_busy(controller.app, False)
                 restored_handover = workflow_handover.restore_build_handover_state(controller)
                 if not restored_handover:
@@ -150,8 +151,8 @@ def restore_previous_session(controller, *, frontload: bool = False, bridge_fact
                 controller.app.settings.remove(f"tagging_pass/{restored_session_id}/state_key")
                 controller.app.settings.remove(f"tagging_pass/{restored_session_id}/duplicate_count")
             stats = {
-                "total_scanned": len(plan),
-                "added_count": len(plan),
+                "total_scanned": record_count,
+                "added_count": record_count,
                 "lib_dupe_count": 0,
                 "session_dupe_count": 0,
                 "total_dupe_count": 0,

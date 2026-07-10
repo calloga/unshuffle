@@ -53,8 +53,9 @@ def load_staging_session(app, sess, show_errors=True):
         if app._session_load_worker is worker:
             app._session_load_worker = None
 
-        records = payload.get("records") or []
-        if not records:
+        plan = payload.get("plan") or []
+        record_count = int(payload.get("record_count") or len(plan))
+        if record_count <= 0:
             try:
                 new_engine.close()
             except Exception:
@@ -62,7 +63,6 @@ def load_staging_session(app, sess, show_errors=True):
             QMessageBox.warning(app, "Error", "No staging data found for this session.")
             return
 
-        plan = payload.get("plan") or []
         sources_strs = payload.get("sources") or []
         if sources_strs:
             new_engine.session_source_roots = [Path(s) for s in sources_strs]
@@ -84,8 +84,21 @@ def load_staging_session(app, sess, show_errors=True):
         app.data_manager.set_bridge(PersistenceBridge(new_engine))
         app.worker_manager.set_engine(new_engine)
 
-        app.workflow_controller.handle_scan_finished(plan, True, None)
-        app.footer.log(f"Successfully loaded {len(plan)} files from session.")
+        stats = {
+            "total_scanned": record_count,
+            "added_count": record_count,
+            "lib_dupe_count": 0,
+            "session_dupe_count": 0,
+            "total_dupe_count": 0,
+        }
+        app.workflow_controller.finalize_scan_data(
+            plan,
+            False,
+            stats,
+            show_summary=False,
+            persist_staging=False,
+        )
+        app.footer.log(f"Successfully loaded {record_count} files from session.")
 
     def _handle_error(message):
         if not _is_qobject_valid(app):

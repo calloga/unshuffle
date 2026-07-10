@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
+import threading
 
 from unshuffle.logic.tree_organization import TreeOrganizationNode, TreeOrganizationResolver
 
@@ -67,6 +68,18 @@ class TreeOrganizationIndexCountMixin:
         nodes = self._node_by_id()
         counts: dict[str, int] = defaultdict(int)
         resolver = TreeOrganizationResolver()
+        app = self.parent() if hasattr(self, "parent") else None
+        controller = getattr(app, "tree_organization_controller", None)
+        store = getattr(app, "session_store", None)
+        if store is not None and controller is not None:
+            try:
+                signature = controller._ensure_profile_projection(profile)
+                counts.update(store.custom_tree_node_counts(profile.id, signature))
+                counts[profile.root_node_id] = store.count(None)
+                self._match_count_cache = dict(counts)
+            except ValueError:
+                self._match_count_cache = {}
+            return
         path_index = self._node_ids_by_route_path(resolver)
         try:
             routed = resolver.routed_records(profile, self._records)
@@ -86,12 +99,59 @@ class TreeOrganizationIndexCountMixin:
 
     def _schedule_count_refresh(self, delay_ms: int = 350) -> None:
         self._counts_dirty = True
+        self._count_refresh_generation += 1
         self._count_refresh_timer.start(delay_ms)
 
     def _refresh_counts_after_idle(self) -> None:
         if not self._counts_dirty:
             return
+        app = self.parent() if hasattr(self, "parent") else None
+        store = getattr(app, "session_store", None)
+        tree_model = getattr(getattr(app, "library_tab", None), "tree_model", None)
+        if store is not None and tree_model is not None:
+            if self._count_refresh_active:
+                return
+            self._counts_dirty = False
+            self._count_refresh_active = True
+            generation = self._count_refresh_generation
+            profile = self._profile_from_ui()
+            levels = list(tree_model._active_tree_levels())
+            confidence_floor = float(getattr(tree_model, "confidence_floor", 0.0))
+            confidence_filter_enabled = bool(getattr(tree_model, "confidence_filter_enabled", True))
+
+            def calculate() -> None:
+                try:
+                    counts = store.preview_custom_tree_node_counts(
+                        profile,
+                        levels,
+                        confidence_floor=confidence_floor,
+                        confidence_filter_enabled=confidence_filter_enabled,
+                    )
+                    error = ""
+                except Exception as exc:
+                    counts = {}
+                    error = str(exc)
+                try:
+                    self.countPreviewReady.emit(generation, counts, error)
+                except RuntimeError:
+                    pass
+
+            threading.Thread(
+                target=calculate,
+                name="unshuffle-tree-count-preview",
+                daemon=True,
+            ).start()
+            return
         self._rebuild_count_cache_for_current_nodes()
+        self._update_visible_count_tooltips()
+        self._sync_fields_from_selection()
+
+    def _apply_count_preview_result(self, generation: int, counts: object, error: str) -> None:
+        self._count_refresh_active = False
+        if generation != self._count_refresh_generation or self._counts_dirty:
+            self._count_refresh_timer.start(0)
+            return
+        self._match_count_cache = dict(counts) if isinstance(counts, dict) and not error else {}
         self._update_visible_count_tooltips()
         self._sync_fields_from_selection()
 

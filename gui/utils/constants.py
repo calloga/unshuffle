@@ -32,6 +32,7 @@ STAGING_HEADERS = [COLUMN_CONFIG[col]["label"] for col in sorted(StagingColumn)]
 HEADER_FILTERABLE_COLUMNS = (
     StagingColumn.PACK,
     StagingColumn.CATEGORY,
+    StagingColumn.SUBCATEGORY,
     StagingColumn.TAGS,
 )
 

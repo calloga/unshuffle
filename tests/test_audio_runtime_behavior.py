@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest import mock
 import json
 import math
+import subprocess
 import struct
 import pytest
 import sys
@@ -96,14 +97,58 @@ def test_bulk_feature_extraction_parses_jsonl_success_and_failure(tmp_path: Path
     ]
     completed = mock.Mock(returncode=0, stdout="\n".join(json.dumps(row) for row in rows), stderr="")
 
-    with mock.patch("unshuffle.audio.acoustic.subprocess.run", return_value=completed) as run:
+    with mock.patch.object(engine, "_run_batch_extractor", return_value=completed) as run:
         result = engine.extract_feature_payloads_bulk([good, bad])
 
-    assert run.call_args.args[0][1] == "--batch"
+    run.assert_called_once()
     assert result[good] is not None
     assert result[good].vector == [0.1] * FEATURE_VECTOR_SIZE
     assert result[bad] is None
     assert engine.extraction_failure_tag(bad) == "Empty"
+
+
+def test_bulk_feature_extraction_retries_decode_failures_but_not_terminal_rejections(tmp_path: Path):
+    extractor = tmp_path / "extractor.exe"
+    extractor.write_text("fake", encoding="utf-8")
+    empty = tmp_path / "empty.wav"
+    undecodable = tmp_path / "undecodable.wav"
+    empty.write_bytes(b"")
+    undecodable.write_bytes(b"bad")
+    engine = SimilarityEngine(extractor_path=str(extractor))
+    rows = [
+        {"path": str(empty), "ok": False, "error": "File is empty"},
+        {"path": str(undecodable), "ok": False, "error": "ffmpeg: Failed to decode file"},
+    ]
+    completed = mock.Mock(returncode=0, stdout="\n".join(json.dumps(row) for row in rows), stderr="")
+
+    with mock.patch.object(engine, "_run_batch_extractor", return_value=completed), \
+         mock.patch.object(engine, "extract_feature_payload", return_value=None) as retry:
+        result = engine.extract_feature_payloads_bulk([empty, undecodable])
+
+    retry.assert_called_once_with(undecodable)
+    assert result[empty] is None
+    assert result[undecodable] is None
+    assert engine.extraction_failure_tag(empty) == "Empty"
+
+
+def test_batch_timeout_preserves_partial_terminal_rows_and_retries_only_unseen(tmp_path: Path):
+    extractor = tmp_path / "extractor.exe"
+    extractor.write_text("fake", encoding="utf-8")
+    empty = tmp_path / "empty.wav"
+    unresolved = tmp_path / "unresolved.wav"
+    empty.write_bytes(b"")
+    unresolved.write_bytes(b"audio")
+    engine = SimilarityEngine(extractor_path=str(extractor))
+    partial = json.dumps({"path": str(empty), "ok": False, "error": "File is empty"}) + "\n"
+    timed_out = subprocess.TimeoutExpired([str(extractor), "--batch"], 0.01, output=partial)
+
+    with mock.patch.object(engine, "_run_batch_extractor", side_effect=timed_out), \
+         mock.patch.object(engine, "extract_feature_payload", return_value=None) as retry:
+        result = engine.extract_feature_payloads_bulk([empty, unresolved])
+
+    retry.assert_called_once_with(unresolved)
+    assert result[empty] is None
+    assert result[unresolved] is None
 
 
 def test_bulk_feature_extraction_falls_back_to_single_file_on_invalid_output(tmp_path: Path):
@@ -116,12 +161,75 @@ def test_bulk_feature_extraction_falls_back_to_single_file_on_invalid_output(tmp
     completed = mock.Mock(returncode=0, stdout="not-jsonl", stderr="")
     fallback_payload = mock.Mock(spec=object)
 
-    with mock.patch("unshuffle.audio.acoustic.subprocess.run", return_value=completed), \
+    with mock.patch.object(engine, "_run_batch_extractor", return_value=completed), \
          mock.patch.object(engine, "extract_feature_payload", return_value=fallback_payload) as fallback:
         result = engine.extract_feature_payloads_bulk([sample])
 
     fallback.assert_called_once_with(sample)
     assert result[sample] is fallback_payload
+
+
+def test_batch_feature_extraction_kills_process_after_inactivity(tmp_path: Path):
+    import time
+
+    extractor = tmp_path / "extractor.exe"
+    extractor.write_text("fake", encoding="utf-8")
+    manifest = tmp_path / "batch.txt"
+    manifest.write_text("sample.wav\n", encoding="utf-8")
+    engine = SimilarityEngine(extractor_path=str(extractor))
+    engine.EXTRACT_TIMEOUT_SECONDS = 0.01
+
+    class SlowOutput:
+        def __iter__(self):
+            time.sleep(0.05)
+            return iter(())
+
+    process = mock.Mock()
+    process.args = [str(extractor), "--batch", str(manifest)]
+    process.stdout = SlowOutput()
+    process.stderr = iter(())
+    process.poll.return_value = None
+    process.wait.return_value = -9
+
+    with mock.patch("unshuffle.audio.acoustic.subprocess.Popen", return_value=process), \
+         pytest.raises(subprocess.TimeoutExpired):
+        engine._run_batch_extractor(manifest)
+
+    process.kill.assert_called_once()
+
+
+def test_failed_batch_retries_files_with_bounded_parallelism(tmp_path: Path):
+    import threading
+    import time
+
+    extractor = tmp_path / "extractor.exe"
+    extractor.write_text("fake", encoding="utf-8")
+    samples = [tmp_path / f"sample-{index}.wav" for index in range(8)]
+    for sample in samples:
+        sample.write_bytes(b"audio")
+    engine = SimilarityEngine(extractor_path=str(extractor))
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def retry(_path):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return None
+
+    timed_out = subprocess.TimeoutExpired([str(extractor), "--batch"], 0.01)
+    with mock.patch.object(engine, "_run_batch_extractor", side_effect=timed_out), \
+         mock.patch.object(engine, "extract_feature_payload", side_effect=retry) as fallback:
+        result = engine.extract_feature_payloads_bulk(samples)
+
+    assert fallback.call_count == len(samples)
+    assert peak == engine.FALLBACK_EXTRACTOR_WORKERS
+    assert set(result) == set(samples)
 
 
 def test_audio_duration_logs_debug_for_mutagen_failures(tmp_path: Path):

@@ -340,11 +340,14 @@ class ViewController(QObject):
     def _current_tree_signature(self):
         model = getattr(self.app, "model", None)
         tree_model = getattr(getattr(self.app, "library_tab", None), "tree_model", None)
+        profile = getattr(tree_model, "custom_tree_profile", None)
         return (
             id(model),
             getattr(model, "query", None),
             getattr(model, "group_column", None),
             getattr(tree_model, "sort_column", None),
+            getattr(profile, "id", None),
+            getattr(profile, "updated_at", None),
         )
 
     def do_tree_rebuild(self):

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any
+import logging
+import time
 import numpy as np
 try:
     import hnswlib
@@ -13,6 +15,7 @@ class SpatialIndex:
     on current-schema acoustic vectors.
     """
     def __init__(self, vectors: np.ndarray, M: int = 16, ef_construction: int = 200) -> None:
+        started = time.perf_counter()
         self.vectors = np.asarray(vectors, dtype=np.float32)
         self.num_elements, self.dim = self.vectors.shape
         if hnswlib is None:
@@ -29,6 +32,12 @@ class SpatialIndex:
             self.index.add_items(self.vectors, np.arange(self.num_elements))
 
         self.index.set_ef(50)
+        logging.getLogger("unshuffle").debug(
+            "Spatial index built: elements=%d dimensions=%d elapsed=%.3fs",
+            self.num_elements,
+            self.dim,
+            time.perf_counter() - started,
+        )
 
     def query(self, query_vector: np.ndarray, k: int = 10) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -73,7 +82,7 @@ class SparsePairwiseDistances:
             from ...core.features import normalize_distance_vector
             vectors = np.array([normalize_distance_vector(r.vector) for r in records], dtype=np.float32)
             
-        self.spatial_index = SpatialIndex(vectors)
+        spatial_index = SpatialIndex(vectors)
 
         self.nearest = np.zeros((self.n, nearest_k), dtype=int)
         self._cache: dict[tuple[int, int], float] = {}
@@ -86,7 +95,7 @@ class SparsePairwiseDistances:
             if actual_M <= 1:
                 continue
                 
-            labels, _ = self.spatial_index.query(vectors[i], k=actual_M)
+            labels, _ = spatial_index.query(vectors[i], k=actual_M)
             candidate_indices = labels[0]
             
 
@@ -108,6 +117,7 @@ class SparsePairwiseDistances:
                     self.nearest[i, rank] = c_idx
                     self._cache[(i, c_idx)] = float(dist)
                     self._cache[(c_idx, i)] = float(dist)
+        del spatial_index
                         
     def __getitem__(self, key: Any) -> Any:
         import math

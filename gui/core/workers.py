@@ -44,6 +44,22 @@ def _staging_session_has_rows(db_conn, session_id: str) -> bool:
         return False
 
 
+def _staging_session_row_count(db_conn, session_id: str) -> int:
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return 0
+    conn = getattr(db_conn, "conn", None)
+    if conn is not None:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM staging_records WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row[0] if row is not None else 0)
+    if hasattr(db_conn, "get_staging_records"):
+        return len(db_conn.get_staging_records(session_id))
+    return -1
+
+
 def _resolve_restore_session_id(db_conn, target: Path, requested_session_id: str) -> str:
     requested_session_id = (requested_session_id or "").strip()
     if _staging_session_has_rows(db_conn, requested_session_id):
@@ -99,7 +115,7 @@ class ScanWorker(QThread):
         self.append = append
         self.existing_hashes = existing_hashes
         self.lib_hashes = set(lib_hashes or ())
-        self.current_records = list(current_records or ())
+        self.current_records = current_records or ()
 
     @safe_gc_run
     def run(self):
@@ -150,11 +166,12 @@ class ScanWorker(QThread):
                 db_conn = get_db(self.engine.target_dir)
                 owns_db_conn = True
             try:
+                session_phase = "Updating Session" if self.append else "Creating Session"
                 session_progress = PhaseProgress(
                     self.engine.progress_callback,
-                    "Creating Session",
+                    session_phase,
                     total=6,
-                    message="Creating session...",
+                    message=f"{session_phase}...",
                     update_every=1,
                 )
                 session_progress.emit(0, force=True)
@@ -166,13 +183,14 @@ class ScanWorker(QThread):
                     mode="pending"
                 )
                 session_progress.emit(1)
-                db_conn.clear_staging(self.engine.session_id)
+                if not self.append:
+                    db_conn.clear_staging(self.engine.session_id)
                 session_progress.emit(2)
-                if hasattr(db_conn, "ensure_verified_anchors_for_session"):
+                if not self.append and hasattr(db_conn, "ensure_verified_anchors_for_session"):
                     db_conn.ensure_verified_anchors_for_session(self.engine.session_id)
                 session_progress.emit(3)
                 from gui.utils.state import build_staging_rows
-                all_records = list(self.current_records) + new_records if self.append else new_records
+                all_records = new_records
                 if hasattr(db_conn, "list_coherence_review_decisions"):
                     from .coherence_review_decisions import apply_target_review_decisions
 
@@ -180,7 +198,21 @@ class ScanWorker(QThread):
                     if applied_count and hasattr(self.engine, "log"):
                         self.engine.log(f"Applied {applied_count} remembered outlier review field change(s).")
                 session_progress.emit(4)
-                rows = build_staging_rows(all_records)
+                start_index = 0
+                if self.append:
+                    connection = getattr(db_conn, "conn", None)
+                    if connection is not None:
+                        row = connection.execute(
+                            "SELECT COALESCE(MAX(row_id), -1) FROM staging_records WHERE session_id = ?",
+                            (self.engine.session_id,),
+                        ).fetchone()
+                        start_index = int(row[0] if row is not None else -1) + 1
+                    else:
+                        start_index = max(
+                            (int(getattr(rec, "staging_row_id", -1) or -1) for rec in self.current_records),
+                            default=-1,
+                        ) + 1
+                rows = build_staging_rows(all_records, start_index=start_index)
                 if rows:
                     db_conn.add_staging_records_bulk(self.engine.session_id, rows)
                 session_progress.emit(5)
@@ -492,9 +524,7 @@ class SessionLoadWorker(QThread):
     @safe_gc_run
     def run(self):
         try:
-            from unshuffle.persistence import get_db
-            from ..utils.history import invalidate_history_cache, load_session_sources, load_staging_records
-            from ..utils.session import plan_records_from_staging
+            from ..utils.history import invalidate_history_cache, load_session_sources
 
             session_id = self.session_id
             db_scope = "global"
@@ -507,18 +537,27 @@ class SessionLoadWorker(QThread):
                             invalidate_history_cache(self.target)
                     except Exception:
                         logging.debug("Session-load database maintenance skipped.", exc_info=True)
+                    record_count = _staging_session_row_count(db_conn, session_id)
+                    if record_count < 0:
+                        from ..utils.history import load_staging_records
+
+                        record_count = len(load_staging_records(self.target, session_id))
+                    sources = (
+                        db_conn.get_session_sources(session_id)
+                        if session_id and hasattr(db_conn, "get_session_sources")
+                        else load_session_sources(self.target, session_id) if session_id else []
+                    )
                 finally:
                     db_conn.close()
+            else:
+                record_count = 0
+                sources = []
 
-            records = load_staging_records(self.target, session_id) if session_id else []
-            sources = load_session_sources(self.target, session_id) if session_id else []
-            plan = plan_records_from_staging(records)
             self.finished.emit(
                 {
                     "session_id": session_id,
-                    "records": records,
                     "sources": sources,
-                    "plan": plan,
+                    "record_count": record_count,
                     "db_scope": db_scope,
                 }
             )
@@ -540,9 +579,7 @@ class StartupRestoreWorker(QThread):
     @safe_gc_run
     def run(self):
         try:
-            from unshuffle.persistence import get_db
-            from ..utils.history import invalidate_history_cache, load_session_sources, load_staging_records
-            from ..utils.session import plan_records_from_staging
+            from ..utils.history import invalidate_history_cache, load_session_sources
 
             session_id = self.session_id
             db_scope = "global"
@@ -555,18 +592,28 @@ class StartupRestoreWorker(QThread):
                             invalidate_history_cache(self.target)
                     except Exception:
                         logging.debug("Startup database maintenance skipped.", exc_info=True)
+                    record_count = _staging_session_row_count(db_conn, session_id)
+                    if record_count < 0:
+                        from ..utils.history import load_staging_records
+
+                        record_count = len(load_staging_records(self.target, session_id))
+                    sources = (
+                        db_conn.get_session_sources(session_id)
+                        if session_id and hasattr(db_conn, "get_session_sources")
+                        else load_session_sources(self.target, session_id) if session_id else []
+                    )
                 finally:
                     db_conn.close()
+            else:
+                record_count = 0
+                sources = []
 
-            records = load_staging_records(self.target, session_id) if session_id else []
-            sources = load_session_sources(self.target, session_id) if session_id else []
-            plan = plan_records_from_staging(records) if records else []
             self.finished.emit(
                 {
                     "session_id": session_id,
                     "target": self.target,
                     "sources": sources,
-                    "plan": plan,
+                    "record_count": record_count,
                     "db_scope": db_scope,
                 }
             )

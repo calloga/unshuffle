@@ -191,11 +191,13 @@ SUB_TAXONOMY_MAP = _STATE.sub_taxonomy_map
 RESERVED_NAMES = _STATE.reserved_names
 IGNORED_SYSTEM_ARTIFACT_NAMES = _STATE.ignored_system_artifact_names
 CONFIG_STATE_LOCK = threading.RLock()
+_CONFIG_REVISION = 0
 
 
 def get_runtime_config_snapshot():
     with CONFIG_STATE_LOCK:
         return {
+            "config_revision": _CONFIG_REVISION,
             "alias_table": copy.deepcopy(_STATE.alias_table),
             "noise_words": set(_STATE.noise_words),
             "loop_indicators": list(_STATE.loop_indicators),
@@ -214,6 +216,7 @@ def get_runtime_config_snapshot():
 
 
 def refresh_alias_structures(db=None):
+    global _CONFIG_REVISION
     fallback_state = _build_runtime_state(_CONFIG)
     db_aliases = None
     db_noise_words = None
@@ -278,6 +281,7 @@ def refresh_alias_structures(db=None):
         _STATE.categories.extend(_build_categories(_STATE.alias_table))
         _STATE.reserved_names = _default_reserved_names()
         _STATE.ignored_system_artifact_names = fallback_state.ignored_system_artifact_names
+        _CONFIG_REVISION += 1
 
 
 PRESERVED_MARKER = ".unshuffle_preserved"

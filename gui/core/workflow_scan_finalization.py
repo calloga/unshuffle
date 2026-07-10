@@ -33,9 +33,32 @@ def records_include_corrupt_silent_or_empty(records) -> bool:
 
 
 def update_corrupt_filter_state(app) -> None:
-    records = getattr(getattr(app, "model", None), "records", None)
-    enabled = records_include_corrupt_silent_or_empty(records)
+    store = getattr(app, "session_store", None)
+    if store is not None and hasattr(store, "has_any_tags"):
+        enabled = store.has_any_tags({"silent", "empty", "corrupted", "duplicate"})
+    else:
+        records = getattr(getattr(app, "model", None), "records", None)
+        enabled = records_include_corrupt_silent_or_empty(records)
     set_corrupt_filter_state(app, enabled)
+
+
+def update_possible_duplicate_filter_state(app) -> None:
+    store = getattr(app, "session_store", None)
+    if store is not None and hasattr(store, "has_any_tags"):
+        enabled = store.has_any_tags({"possibleduplicate"})
+    else:
+        records = getattr(getattr(app, "model", None), "records", None) or []
+        enabled = any(
+            "possibleduplicate" in {
+                str(tag).strip().lower() for tag in (getattr(rec, "tags", []) or [])
+            }
+            for rec in records
+        )
+    library_tab = getattr(app, "library_tab", None)
+    if hasattr(library_tab, "set_possible_duplicate_filter_enabled"):
+        library_tab.set_possible_duplicate_filter_enabled(enabled)
+    if getattr(app, "filter_controller", None):
+        app.filter_controller.refresh_dock_filters()
 
 
 def clear_corrupt_filter_state(app) -> None:

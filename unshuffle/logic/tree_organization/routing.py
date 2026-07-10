@@ -41,6 +41,7 @@ class RoutePart:
     read_only: bool = False
     residual: bool = False
     hide_subbranches: bool = False
+    sort_order: int = 0
 
 
 @dataclass
@@ -80,6 +81,7 @@ class TreeRouteBuilder:
         confidence_max: float = 1.0,
         confidence_floor: float | None = None,
         confidence_filter_enabled: bool = True,
+        resolve_semantics: bool = True,
     ) -> list[TreeRoute]:
         return list(
             self.iter_routes(
@@ -91,6 +93,7 @@ class TreeRouteBuilder:
                 confidence_max=confidence_max,
                 confidence_floor=confidence_floor,
                 confidence_filter_enabled=confidence_filter_enabled,
+                resolve_semantics=resolve_semantics,
             )
         )
 
@@ -105,9 +108,10 @@ class TreeRouteBuilder:
         confidence_max: float = 1.0,
         confidence_floor: float | None = None,
         confidence_filter_enabled: bool = True,
+        resolve_semantics: bool = True,
     ):
         levels = list(levels or _default_levels())
-        if profile is not None:
+        if profile is not None and resolve_semantics:
             profile = semantic_profile_for_records(profile, records, self.evaluator)
         if profile is None:
             for record in records:
@@ -271,6 +275,7 @@ class TreeRouteBuilder:
                     read_only=_is_read_only_utility_node(next_node, profile.root_node_id),
                     residual=next_node.node_type == "fallback",
                     hide_subbranches=bool(getattr(next_node, "hide_subbranches", False)),
+                    sort_order=int(next_node.sort_order),
                 )
             )
             if getattr(next_node, "hide_subbranches", False):
@@ -724,6 +729,62 @@ def semantic_profile_for_records(
         if replacement_query and replacement_query != node.filter_query:
             nodes.append(replace(node, filter_query=replacement_query))
             changed = True
+        else:
+            nodes.append(node)
+    return replace(profile, nodes=nodes) if changed else profile
+
+
+def semantic_profile_for_record_batches(
+    profile: TreeOrganizationProfile,
+    record_batches,
+    evaluator: FilterEvaluator | None = None,
+) -> TreeOrganizationProfile:
+    """Resolve plain profile filters without retaining every record."""
+
+    evaluator = evaluator or FilterEvaluator()
+    candidate_fields = {
+        "packname": "pack",
+        "category": "category",
+        "subcategory": "subcategory",
+        "type": "audio_type",
+        "tag": "tags",
+    }
+    states: dict[str, tuple[str, set[str], bool]] = {}
+    for node in profile.nodes:
+        text = (node.filter_query or "").strip()
+        groups = parse_query_groups(text)
+        if text and len(groups) == 1 and len(groups[0]) == 1 and not split_field_term(groups[0][0]):
+            states[node.id] = (text, set(candidate_fields), False)
+    if not states:
+        return profile
+
+    for batch in record_batches():
+        for record in batch:
+            for node_id, (text, candidates, matched) in list(states.items()):
+                if not evaluator.matches(record, text):
+                    continue
+                value = _strip_quotes(text)
+                matching = {
+                    prefix
+                    for prefix, field_name in candidate_fields.items()
+                    if _record_field_matches_plain(record, field_name, value, evaluator)
+                }
+                states[node_id] = (text, candidates & matching, True)
+
+    nodes: list[TreeOrganizationNode] = []
+    changed = False
+    for node in profile.nodes:
+        state = states.get(node.id)
+        if state is None:
+            nodes.append(node)
+            continue
+        text, candidates, matched = state
+        if matched and len(candidates) == 1:
+            prefix = next(iter(candidates))
+            escaped = _strip_quotes(text).replace('"', '\\"')
+            replacement_query = f'{prefix}:"{escaped}"'
+            nodes.append(replace(node, filter_query=replacement_query))
+            changed = changed or replacement_query != node.filter_query
         else:
             nodes.append(node)
     return replace(profile, nodes=nodes) if changed else profile

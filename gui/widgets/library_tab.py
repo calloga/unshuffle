@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QScrollBar,
     QStackedWidget,
@@ -136,6 +138,7 @@ class LibraryTab(QWidget):
     preserveRequested = Signal(object, object)
     unpreserveRequested = Signal(object, object)
     treeOrganizationEditRequested = Signal()
+    treeOrganizationSwitchRequested = Signal(str)
 
     def __init__(self, undo_stack, parent=None):
         super().__init__(parent)
@@ -143,6 +146,7 @@ class LibraryTab(QWidget):
         self.user_resized_rows = set()
         self.proxy_model = None
         self.saved_filters = []
+        self._custom_tree_filter_options = []
         self._column_width_ratios: dict[StagingColumn, float] = {}
         self._applying_proportional_resize = False
         self._restoring_column_order = False
@@ -369,8 +373,9 @@ class LibraryTab(QWidget):
         self.lbl_tree_org_badge.setVisible(False)
         tree_footer.addWidget(self.lbl_tree_org_badge, 0)
         tree_footer.addStretch(1)
-        self.btn_tree_org = QPushButton("Edit tree organization")
-        self.btn_tree_org.clicked.connect(self.treeOrganizationEditRequested.emit)
+        self.btn_tree_org = QPushButton("Switch tree organization")
+        self.tree_org_menu = QMenu(self.btn_tree_org)
+        self.btn_tree_org.setMenu(self.tree_org_menu)
         self.btn_tree_org.setObjectName("secondary")
         apply_style(self.btn_tree_org, workspace_sidebar_button_style())
         tree_footer.addWidget(self.btn_tree_org, 0)
@@ -456,8 +461,17 @@ class LibraryTab(QWidget):
         self._sync_sort_header(self.sort_columns.index(staging_column))
         self.combo_sort.setCurrentIndex(self.sort_columns.index(staging_column))
 
-    def _category_options_for_type_state(self, oneshots: bool, loops: bool, all_files: bool) -> list[tuple[str, str]]:
-        return category_options_for_type_state(CATEGORIES, oneshots, loops, all_files)
+    def _category_options_for_type_state(self, oneshots: bool, loops: bool, all_files: bool) -> list[tuple[str, object]]:
+        options = list(category_options_for_type_state(CATEGORIES, oneshots, loops, all_files))
+        for custom in self._custom_tree_filter_options:
+            if custom.placement != "category":
+                continue
+            if not all_files:
+                selected_type = "Oneshots" if oneshots and not loops else "Loops" if loops and not oneshots else ""
+                if custom.audio_type and selected_type and custom.audio_type != selected_type:
+                    continue
+            options.append((custom.label, custom))
+        return options
 
     def _refresh_category_options_for_type(self, oneshots: bool, loops: bool, all_files: bool) -> None:
         options = self._category_options_for_type_state(oneshots, loops, all_files)
@@ -468,18 +482,31 @@ class LibraryTab(QWidget):
         self.category_carousel.set_options(options)
         if invalid_active_values:
             self.category_carousel.set_active_values(set())
-            for category in sorted(str(value) for value in invalid_active_values):
-                self.categoryFilterRequested.emit(category, False)
+            from gui.core.tree_filter_options import CustomTreeFilterOption
+
+            for value in invalid_active_values:
+                if isinstance(value, CustomTreeFilterOption):
+                    self.savedFilterRequested.emit(value.query, False, "replace")
+                else:
+                    self.categoryFilterRequested.emit(str(value), False)
 
     def _on_category_carousel_toggled(self, category, is_active):
         self.category_carousel.set_active_values({category} if is_active else set())
         self.sync_map_filters()
-        self.categoryFilterRequested.emit(category, is_active)
+        from gui.core.tree_filter_options import CustomTreeFilterOption
+        if isinstance(category, CustomTreeFilterOption):
+            self.savedFilterRequested.emit(category.query, is_active, "replace")
+        else:
+            self.categoryFilterRequested.emit(str(category), is_active)
 
     def _on_category_carousel_selected(self, category):
         self.category_carousel.set_active_values({category})
         self.sync_map_filters()
-        self.categoryFilterRequested.emit(category, True)
+        from gui.core.tree_filter_options import CustomTreeFilterOption
+        if isinstance(category, CustomTreeFilterOption):
+            self.savedFilterRequested.emit(category.query, True, "replace")
+        else:
+            self.categoryFilterRequested.emit(str(category), True)
 
     def _handle_tree_category_change(self, rec, category):
         self.bulkCategoryRequested.emit(category, [rec])
@@ -788,12 +815,54 @@ class LibraryTab(QWidget):
 
     def _current_category_filter(self) -> str:
         active = list(getattr(self.category_carousel, "active_values", set()) or [])
-        return str(active[0]) if len(active) == 1 else ""
+        if len(active) != 1 or not isinstance(active[0], str):
+            return ""
+        return active[0]
+
+    def set_custom_tree_filter_options(self, options) -> None:
+        self._custom_tree_filter_options = list(options or [])
+        self._refresh_category_options_for_type(*self.type_picker.get_state())
+
+    def category_filter_values_for_query(self, query: str, canonical_categories: set[str]) -> set[object]:
+        from gui.core.filter_query import query_contains_token
+
+        custom = {
+            option
+            for option in self._custom_tree_filter_options
+            if option.placement == "category" and query_contains_token(query, option.query)
+        }
+        return set(canonical_categories) | custom
 
     def set_tree_organization_state(self, active: bool, profile_name: str = "") -> None:
-        text = f"{profile_name}" if active and profile_name else "Custom tree organization active"
-        self.lbl_tree_org_badge.setText(text)
-        self.lbl_tree_org_badge.setVisible(active)
+        text = str(profile_name or "Custom Tree") if active else "Default"
+        self.btn_tree_org.setText(text)
+        self.lbl_tree_org_badge.setVisible(False)
+
+    def set_tree_organization_options(self, profiles, active_profile_id: str = "") -> None:
+        self.tree_org_menu.clear()
+        active_id = str(active_profile_id or "")
+
+        def add_profile(label: str, profile_id: str) -> None:
+            action = QAction(label, self.tree_org_menu)
+            action.setCheckable(True)
+            action.setChecked(profile_id == active_id)
+            action.triggered.connect(
+                lambda _checked=False, value=profile_id: self.treeOrganizationSwitchRequested.emit(value)
+            )
+            self.tree_org_menu.addAction(action)
+
+        add_profile("Default", "")
+        seen_ids = set()
+        for profile in profiles or []:
+            profile_id = str(getattr(profile, "id", "") or "")
+            profile_name = str(getattr(profile, "name", "Custom Tree") or "Custom Tree")
+            if not profile_id or profile_id in seen_ids or profile_name.strip().casefold() == "default":
+                continue
+            seen_ids.add(profile_id)
+            add_profile(profile_name, profile_id)
+        self.tree_org_menu.addSeparator()
+        manage = self.tree_org_menu.addAction("Manage Tree Organizations...")
+        manage.triggered.connect(self.treeOrganizationEditRequested.emit)
 
     def focus_search(self):
         self.edit_search.setFocus()

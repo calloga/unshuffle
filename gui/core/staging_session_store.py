@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
+import logging
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterable, Iterator
 
 from unshuffle.core import PlanRecord, parse_tags, plan_record_from_staging_row, tags_to_search_text
+from unshuffle.core.hashing import is_fast_hash
+from unshuffle.logic.tree_organization import (
+    TreeOrganizationProfile,
+    TreeOrganizationResolver,
+    TreeRouteBuilder,
+    semantic_profile_for_record_batches,
+)
 from gui.utils.constants import StagingColumn
 
 
@@ -43,6 +54,19 @@ LIGHTWEIGHT_RECORD_COLUMNS = (
     "analysis_status",
     "analysis_tags_json",
     "preserved_root",
+    "is_preserved",
+)
+
+TREE_RECORD_COLUMNS = LIGHTWEIGHT_RECORD_COLUMNS
+
+MAP_RECORD_COLUMNS = (
+    "row_id",
+    "source_path",
+    "audio_type",
+    "category",
+    "subcategory",
+    "feature_vector",
+    "evidence_json",
     "is_preserved",
 )
 
@@ -83,6 +107,7 @@ class StagingSessionStore:
     def __init__(self, db: Any, session_id: str):
         self.db = db
         self.session_id = str(session_id or "")
+        self._custom_child_count_cache: OrderedDict[tuple[Any, ...], tuple[dict[str, Any], ...]] = OrderedDict()
 
     @property
     def conn(self):
@@ -117,6 +142,26 @@ class StagingSessionStore:
     def lightweight_rows_by_ids(self, row_ids: Iterable[int]) -> list[dict[str, Any]]:
         return self._rows_by_ids(row_ids, ", ".join(LIGHTWEIGHT_RECORD_COLUMNS))
 
+    def iter_rows_by_ids(
+        self,
+        row_ids: Iterable[int],
+        columns: str,
+        *,
+        batch_size: int = 500,
+    ) -> Iterator[list[dict[str, Any]]]:
+        ids = [int(row_id) for row_id in row_ids]
+        size = max(1, min(int(batch_size), 900))
+        for offset in range(0, len(ids), size):
+            chunk = ids[offset : offset + size]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = self.conn.execute(
+                f"SELECT {columns} FROM staging_records "
+                f"WHERE session_id = ? AND row_id IN ({placeholders})",
+                [self.session_id, *chunk],
+            )
+            by_id = {int(row["row_id"]): dict(row) for row in cursor}
+            yield [by_id[row_id] for row_id in chunk if row_id in by_id]
+
     def acoustic_state_rows(self) -> list[dict[str, Any]]:
         cursor = self.conn.execute(
             """
@@ -137,6 +182,56 @@ class StagingSessionStore:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def scan_dedupe_index(self) -> dict[str, Any]:
+        """Build the append-scan identity index without hydrating PlanRecord DTOs."""
+        index: dict[str, Any] = {
+            "full_hashes": set(),
+            "full_hash_records": {},
+            "fast_hash_records": {},
+        }
+        cursor = self.conn.execute(
+            "SELECT source_path, hash, fast_hash, evidence_json, pack, category, subcategory, "
+            "audio_type, confidence, duration, pack_candidates, feature_space_version, "
+            "feature_schema_json, analysis_status, analysis_tags_json "
+            "FROM staging_records WHERE session_id = ?",
+            (self.session_id,),
+        )
+        for row in cursor:
+            data = dict(row)
+            if _is_duplicate_shadow_row(data):
+                continue
+            file_hash = str(data.get("hash") or "")
+            fast_hash = str(data.get("fast_hash") or "")
+            if not fast_hash and is_fast_hash(file_hash):
+                fast_hash = file_hash
+            try:
+                pack_candidates = json.loads(data.get("pack_candidates") or "[]")
+            except (TypeError, json.JSONDecodeError):
+                pack_candidates = []
+            record = SimpleNamespace(
+                source_path=Path(str(data.get("source_path") or "")),
+                hash=file_hash or None,
+                fast_hash=fast_hash or None,
+                is_duplicate_shadow=False,
+                pack=str(data.get("pack") or ""),
+                category=str(data.get("category") or "Uncategorized"),
+                subcategory=str(data.get("subcategory") or ""),
+                audio_type=str(data.get("audio_type") or "Oneshots"),
+                confidence=str(data.get("confidence") or "0"),
+                duration=data.get("duration"),
+                pack_candidates=pack_candidates,
+                feature_space_version=data.get("feature_space_version"),
+                feature_schema_json=data.get("feature_schema_json"),
+                analysis_status=data.get("analysis_status"),
+                analysis_tags_json=data.get("analysis_tags_json"),
+            )
+            if file_hash and not is_fast_hash(file_hash):
+                index["full_hashes"].add(file_hash)
+                index["full_hash_records"].setdefault(file_hash, record)
+            if fast_hash:
+                index["fast_hash_records"].setdefault(fast_hash, []).append(record)
+        return index
+
     def generated_tag_count(self, tag: str) -> int:
         needle = str(tag or "").strip().lower()
         if not needle:
@@ -152,21 +247,29 @@ class StagingSessionStore:
         )
         return int(cursor.fetchone()[0])
 
+    def has_any_tags(self, tags: Iterable[str]) -> bool:
+        needles = [str(tag or "").strip().lower() for tag in tags if str(tag or "").strip()]
+        if not needles:
+            return False
+        clauses = " OR ".join("LOWER(COALESCE(tags, '')) LIKE ?" for _ in needles)
+        row = self.conn.execute(
+            f"SELECT 1 FROM staging_records WHERE session_id = ? AND ({clauses}) LIMIT 1",
+            [self.session_id, *(f"%{needle}%" for needle in needles)],
+        ).fetchone()
+        return row is not None
+
     def _rows_by_ids(self, row_ids: Iterable[int], columns: str) -> list[dict[str, Any]]:
+        started = time.perf_counter()
         ids = [int(row_id) for row_id in row_ids]
-        if not ids:
-            return []
-        placeholders = ", ".join("?" for _ in ids)
-        cursor = self.conn.execute(
-            f"""
-            SELECT {columns}
-            FROM staging_records
-            WHERE session_id = ? AND row_id IN ({placeholders})
-            """,
-            [self.session_id, *ids],
+        rows = [row for batch in self.iter_rows_by_ids(ids, columns) for row in batch]
+        logging.getLogger("unshuffle").debug(
+            "Staging row hydration: requested=%d returned=%d full=%s elapsed=%.3fs",
+            len(ids),
+            len(rows),
+            columns.strip() == "*",
+            time.perf_counter() - started,
         )
-        rows = {int(row["row_id"]): dict(row) for row in cursor.fetchall()}
-        return [rows[row_id] for row_id in ids if row_id in rows]
+        return rows
 
     def record_by_row_id(self, row_id: int) -> PlanRecord | None:
         rows = self.rows_by_ids([row_id])
@@ -191,9 +294,338 @@ class StagingSessionStore:
             if records:
                 yield records
 
+    def iter_tree_records(
+        self,
+        query: StagingQuery | None = None,
+        *,
+        batch_size: int = 1000,
+    ) -> Iterator[list[PlanRecord]]:
+        where, params = self._where(query)
+        cursor = self.conn.execute(
+            f"SELECT {', '.join(TREE_RECORD_COLUMNS)} FROM staging_records "
+            f"WHERE {where} ORDER BY row_id ASC, id ASC",
+            params,
+        )
+        size = max(1, int(batch_size))
+        while True:
+            rows = cursor.fetchmany(size)
+            if not rows:
+                break
+            yield [plan_record_from_staging_row(dict(row), parse_tags) for row in rows]
+
+    def default_tree_group_values(
+        self,
+        *,
+        confidence_floor: float = 0.0,
+        confidence_filter_enabled: bool = True,
+    ) -> set[tuple[str, str, str]]:
+        values: set[tuple[str, str, str]] = set()
+        for batch in self.iter_tree_records(None, batch_size=1000):
+            for record in batch:
+                audio_type = str(record.audio_type or "").strip()
+                category = str(record.category or "").strip()
+                subcategory = str(record.subcategory or "").strip()
+                if confidence_filter_enabled:
+                    try:
+                        low_confidence = (
+                            float(record.confidence) < confidence_floor
+                            and not record.is_manual
+                            and not record.is_hands_off
+                        )
+                    except (TypeError, ValueError):
+                        low_confidence = False
+                    if low_confidence:
+                        category = "Uncategorized"
+                        subcategory = ""
+                if audio_type == "Non-Audio Assets":
+                    audio_type = "Utility"
+                values.add((audio_type, category, subcategory or "Other"))
+        return values
+
+    @staticmethod
+    def custom_tree_projection_signature(
+        profile: TreeOrganizationProfile,
+        levels: list[tuple[str, str]],
+        *,
+        confidence_floor: float,
+        confidence_filter_enabled: bool,
+    ) -> str:
+        payload = {
+            "profile": {
+                "root_node_id": profile.root_node_id,
+                "nodes": [node.to_dict() for node in profile.nodes],
+            },
+            "levels": levels,
+            "confidence_floor": float(confidence_floor),
+            "confidence_filter_enabled": bool(confidence_filter_enabled),
+        }
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    def ensure_custom_tree_projection(
+        self,
+        profile: TreeOrganizationProfile,
+        levels: list[tuple[str, str]],
+        *,
+        confidence_floor: float = 0.0,
+        confidence_filter_enabled: bool = True,
+    ) -> str:
+        signature = self.custom_tree_projection_signature(
+            profile,
+            levels,
+            confidence_floor=confidence_floor,
+            confidence_filter_enabled=confidence_filter_enabled,
+        )
+        existing = self.conn.execute(
+            """
+            SELECT COUNT(DISTINCT row_id) FROM custom_tree_memberships
+            WHERE session_id = ? AND profile_id = ? AND projection_signature = ?
+            """,
+            (self.session_id, profile.id, signature),
+        ).fetchone()
+        staging_count = self.count(None)
+        projected_count = int(existing[0] if existing is not None else 0)
+        if projected_count == staging_count:
+            return signature
+
+        validation = TreeOrganizationResolver().validate_profile(profile, [])
+        if not validation.valid:
+            raise ValueError("\n".join(validation.blocking_messages))
+
+        record_batches = lambda: self.iter_tree_records(None, batch_size=1000)
+        semantic_profile = semantic_profile_for_record_batches(profile, record_batches)
+        builder = TreeRouteBuilder()
+        insert_sql = """
+            INSERT OR REPLACE INTO custom_tree_memberships (
+                session_id, profile_id, projection_signature, route_key,
+                parent_route_key, label, node_type, semantic_fields_json,
+                source_node_id, source_node_type, read_only, residual, sort_order, depth, row_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        pending: list[tuple[Any, ...]] = []
+        with self.conn:
+            self._invalidate_custom_tree_cache()
+            self.conn.execute(
+                "DELETE FROM custom_tree_memberships "
+                "WHERE session_id = ? AND profile_id = ? AND projection_signature = ?",
+                (self.session_id, profile.id, signature),
+            )
+            for batch in record_batches():
+                routes = builder.iter_routes(
+                    batch,
+                    semantic_profile,
+                    levels,
+                    presentation_mode=True,
+                    confidence_floor=confidence_floor,
+                    confidence_filter_enabled=confidence_filter_enabled,
+                    resolve_semantics=False,
+                )
+                for route in routes:
+                    row_id = getattr(route.record, "staging_row_id", None)
+                    if row_id is None:
+                        continue
+                    parent_key = ""
+                    identity: list[tuple[str, str, str]] = []
+                    fields: dict[str, str] = {}
+                    for depth, part in enumerate(route.parts, 1):
+                        identity.append((part.kind, part.label, part.source_node_id or ""))
+                        route_key = json.dumps(identity, separators=(",", ":"))
+                        fields.update(part.fields)
+                        pending.append(
+                            (
+                                self.session_id,
+                                profile.id,
+                                signature,
+                                route_key,
+                                parent_key,
+                                part.label,
+                                part.kind,
+                                json.dumps(fields, sort_keys=True),
+                                part.source_node_id,
+                                part.source_node_type,
+                                1 if part.read_only else 0,
+                                1 if part.residual else 0,
+                                int(part.sort_order),
+                                depth,
+                                int(row_id),
+                            )
+                        )
+                        parent_key = route_key
+                        if len(pending) >= 2000:
+                            self.conn.executemany(insert_sql, pending)
+                            pending.clear()
+            if pending:
+                self.conn.executemany(insert_sql, pending)
+        return signature
+
+    def preview_custom_tree_node_counts(
+        self,
+        profile: TreeOrganizationProfile,
+        levels: list[tuple[str, str]],
+        *,
+        confidence_floor: float = 0.0,
+        confidence_filter_enabled: bool = True,
+    ) -> dict[str, int]:
+        """Stream routed counts for the editor without writing a projection."""
+        validation = TreeOrganizationResolver().validate_profile(profile, [])
+        if not validation.valid:
+            raise ValueError("\n".join(validation.blocking_messages))
+
+        record_batches = lambda: self.iter_tree_records(None, batch_size=1000)
+        semantic_profile = semantic_profile_for_record_batches(profile, record_batches)
+        builder = TreeRouteBuilder()
+        counts: dict[str, int] = {}
+        total = 0
+        for batch in record_batches():
+            total += len(batch)
+            for route in builder.iter_routes(
+                batch,
+                semantic_profile,
+                levels,
+                presentation_mode=True,
+                confidence_floor=confidence_floor,
+                confidence_filter_enabled=confidence_filter_enabled,
+                resolve_semantics=False,
+            ):
+                node_ids = {
+                    str(part.source_node_id)
+                    for part in route.parts
+                    if part.source_node_id
+                }
+                for node_id in node_ids:
+                    counts[node_id] = counts.get(node_id, 0) + 1
+        counts[profile.root_node_id] = total
+        return counts
+
+    def clear_custom_tree_projections(
+        self,
+        profile_id: str | None = None,
+        *,
+        keep_signature: str = "",
+    ) -> None:
+        self._invalidate_custom_tree_cache()
+        if profile_id and keep_signature:
+            self.conn.execute(
+                "DELETE FROM custom_tree_memberships "
+                "WHERE session_id = ? AND profile_id = ? AND projection_signature != ?",
+                (self.session_id, profile_id, keep_signature),
+            )
+        elif profile_id:
+            self.conn.execute(
+                "DELETE FROM custom_tree_memberships WHERE session_id = ? AND profile_id = ?",
+                (self.session_id, profile_id),
+            )
+        else:
+            self.conn.execute(
+                "DELETE FROM custom_tree_memberships WHERE session_id = ?",
+                (self.session_id,),
+            )
+        self.conn.commit()
+
+    def custom_tree_child_counts(
+        self,
+        profile_id: str,
+        signature: str,
+        parent_route_key: str,
+        query: StagingQuery | None = None,
+    ) -> list[dict[str, Any]]:
+        cache_key = (str(profile_id), str(signature), str(parent_route_key), query)
+        cached = self._custom_child_count_cache.get(cache_key)
+        if cached is not None:
+            self._custom_child_count_cache.move_to_end(cache_key)
+            return [dict(row) for row in cached]
+        where, params = self._where(query, table_alias="s")
+        cursor = self.conn.execute(
+            f"""
+            SELECT
+                m.route_key,
+                m.label,
+                m.node_type,
+                m.semantic_fields_json,
+                m.source_node_id,
+                m.source_node_type,
+                m.read_only,
+                m.residual,
+                m.sort_order,
+                MIN(m.depth) AS depth,
+                COUNT(DISTINCT m.row_id) AS count
+            FROM custom_tree_memberships AS m INDEXED BY idx_custom_tree_memberships_parent
+            JOIN staging_records AS s INDEXED BY idx_staging_records_session_row
+              ON s.session_id = m.session_id AND s.row_id = m.row_id
+            WHERE m.session_id = ?
+              AND m.profile_id = ?
+              AND m.projection_signature = ?
+              AND m.parent_route_key = ?
+              AND {where}
+            GROUP BY
+                m.route_key, m.label, m.node_type, m.semantic_fields_json,
+                m.source_node_id, m.source_node_type, m.read_only, m.residual, m.sort_order
+            ORDER BY depth ASC, m.sort_order ASC, m.label COLLATE NOCASE
+            """,
+            [self.session_id, profile_id, signature, parent_route_key, *params],
+        )
+        rows = tuple(dict(row) for row in cursor)
+        self._custom_child_count_cache[cache_key] = rows
+        self._custom_child_count_cache.move_to_end(cache_key)
+        while len(self._custom_child_count_cache) > 512:
+            self._custom_child_count_cache.popitem(last=False)
+        return [dict(row) for row in rows]
+
+    def custom_tree_records(
+        self,
+        profile_id: str,
+        signature: str,
+        route_key: str,
+        query: StagingQuery | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[PlanRecord]:
+        where, params = self._where(query, table_alias="s")
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ? OFFSET ?"
+            params.extend([max(0, int(limit)), max(0, int(offset))])
+        cursor = self.conn.execute(
+            f"""
+            SELECT s.*
+            FROM custom_tree_memberships AS m INDEXED BY idx_custom_tree_memberships_parent
+            JOIN staging_records AS s INDEXED BY idx_staging_records_session_row
+              ON s.session_id = m.session_id AND s.row_id = m.row_id
+            WHERE m.session_id = ?
+              AND m.profile_id = ?
+              AND m.projection_signature = ?
+              AND m.route_key = ?
+              AND {where}
+            ORDER BY s.sample_name COLLATE NOCASE, s.row_id ASC{limit_sql}
+            """,
+            [self.session_id, profile_id, signature, route_key, *params],
+        )
+        return [plan_record_from_staging_row(dict(row), parse_tags) for row in cursor]
+
+    def custom_tree_node_counts(
+        self,
+        profile_id: str,
+        signature: str,
+    ) -> dict[str, int]:
+        cursor = self.conn.execute(
+            """
+            SELECT source_node_id, COUNT(DISTINCT row_id) AS count
+            FROM custom_tree_memberships
+            WHERE session_id = ?
+              AND profile_id = ?
+              AND projection_signature = ?
+              AND COALESCE(source_node_id, '') != ''
+            GROUP BY source_node_id
+            """,
+            (self.session_id, profile_id, signature),
+        )
+        return {str(row["source_node_id"]): int(row["count"] or 0) for row in cursor}
+
     def update_row(self, row_id: int, fields: dict[str, Any], *, commit: bool = True) -> None:
         if not fields:
             return
+        self._invalidate_custom_tree_cache()
         assignments = []
         values = []
         for key, value in fields.items():
@@ -205,6 +637,40 @@ class StagingSessionStore:
         )
         if commit:
             self.conn.commit()
+
+    def update_rows(self, updates: Iterable[tuple[int, dict[str, Any]]]) -> None:
+        grouped: dict[tuple[str, ...], list[tuple[Any, ...]]] = {}
+        for row_id, fields in updates:
+            if not fields:
+                continue
+            columns = tuple(fields)
+            grouped.setdefault(columns, []).append(
+                (*[fields[column] for column in columns], self.session_id, int(row_id))
+            )
+        if not grouped:
+            return
+        self._invalidate_custom_tree_cache()
+        with self.conn:
+            for columns, values in grouped.items():
+                assignments = ", ".join(f"{column} = ?" for column in columns)
+                self.conn.executemany(
+                    f"UPDATE staging_records SET {assignments} WHERE session_id = ? AND row_id = ?",
+                    values,
+                )
+
+    def has_custom_tree_projection(self, profile_id: str, signature: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(DISTINCT row_id)
+            FROM custom_tree_memberships
+            WHERE session_id = ? AND profile_id = ? AND projection_signature = ?
+            """,
+            (self.session_id, str(profile_id), str(signature)),
+        ).fetchone()
+        return int(row[0] if row is not None else 0) == self.count(None)
+
+    def _invalidate_custom_tree_cache(self) -> None:
+        self._custom_child_count_cache.clear()
 
     def update_record(self, row_id: int, record: PlanRecord, *, commit: bool = True) -> None:
         evidence = dict(getattr(record, "evidence", {}) or {})
@@ -244,6 +710,7 @@ class StagingSessionStore:
         )
 
     def delete_source_root(self, root: Path) -> int:
+        self._invalidate_custom_tree_cache()
         root_text = Path(root).resolve().as_posix().rstrip("/")
         pattern = root_text.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "/%"
         cursor = self.conn.execute(
@@ -374,7 +841,8 @@ class StagingSessionStore:
         if priority:
             placeholders = ", ".join("?" for _ in priority)
             cursor = self.conn.execute(
-                f"SELECT * FROM staging_records WHERE session_id = ? AND row_id IN ({placeholders})",
+                f"SELECT {', '.join(MAP_RECORD_COLUMNS)} FROM staging_records "
+                f"WHERE session_id = ? AND row_id IN ({placeholders})",
                 [self.session_id, *priority],
             )
             rows.update({int(row["row_id"]): dict(row) for row in cursor.fetchall()})
@@ -416,7 +884,7 @@ class StagingSessionStore:
                 group_clauses = [where, "audio_type = ?", "category = ?"]
                 cursor = self.conn.execute(
                     f"""
-                    SELECT *
+                    SELECT {', '.join(MAP_RECORD_COLUMNS)}
                     FROM staging_records
                     WHERE {' AND '.join(group_clauses)}
                     ORDER BY subcategory COLLATE NOCASE, row_id ASC
@@ -429,14 +897,14 @@ class StagingSessionStore:
             if len(rows) < int(limit):
                 cursor = self.conn.execute(
                     f"""
-                    SELECT *
+                    SELECT {', '.join(MAP_RECORD_COLUMNS)}
                     FROM staging_records
                     WHERE {where}
                     ORDER BY audio_type COLLATE NOCASE, category COLLATE NOCASE, subcategory COLLATE NOCASE, row_id ASC
                     """,
                     params,
                 )
-                for row in cursor.fetchall():
+                for row in cursor:
                     rows.setdefault(int(row["row_id"]), dict(row))
                     if len(rows) >= int(limit):
                         break
@@ -478,20 +946,35 @@ class StagingSessionStore:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def records_for_fields(self, fields: dict[str, str], query: StagingQuery | None = None, limit: int | None = None) -> list[PlanRecord]:
+    def records_for_fields(
+        self,
+        fields: dict[str, str],
+        query: StagingQuery | None = None,
+        limit: int | None = None,
+        *,
+        offset: int = 0,
+    ) -> list[PlanRecord]:
         where, params = self._where_with_fields(fields, query)
         limit_sql = ""
         if limit is not None:
-            limit_sql = " LIMIT ?"
-            params.append(int(limit))
+            limit_sql = " LIMIT ? OFFSET ?"
+            params.extend([max(0, int(limit)), max(0, int(offset))])
         cursor = self.conn.execute(
             f"SELECT * FROM staging_records WHERE {where} ORDER BY sample_name COLLATE NOCASE, row_id ASC{limit_sql}",
             params,
         )
         return [plan_record_from_staging_row(dict(row), parse_tags) for row in cursor.fetchall()]
 
-    def _where(self, query: StagingQuery | None) -> tuple[str, list[Any]]:
-        clauses = ["session_id = ?"]
+    def _where(
+        self,
+        query: StagingQuery | None,
+        *,
+        table_alias: str = "",
+    ) -> tuple[str, list[Any]]:
+        def column(name: str) -> str:
+            return f"{table_alias}.{name}" if table_alias else name
+
+        clauses = [f"{column('session_id')} = ?"]
         params: list[Any] = [self.session_id]
         if query is None:
             return " AND ".join(clauses), params
@@ -500,25 +983,25 @@ class StagingSessionStore:
             if not ids:
                 clauses.append("0")
             else:
-                clauses.append(f"row_id IN ({', '.join('?' for _ in ids)})")
+                clauses.append(f"{column('row_id')} IN ({', '.join('?' for _ in ids)})")
                 params.extend(ids)
         if query.audio_types is not None:
             values = sorted(str(value) for value in query.audio_types)
             if not values:
                 clauses.append("0")
             else:
-                clauses.append(f"audio_type IN ({', '.join('?' for _ in values)})")
+                clauses.append(f"{column('audio_type')} IN ({', '.join('?' for _ in values)})")
                 params.extend(values)
         if not query.show_non_audio_assets:
-            clauses.append("COALESCE(audio_type, '') != 'Non-Audio Assets'")
+            clauses.append(f"COALESCE({column('audio_type')}, '') != 'Non-Audio Assets'")
         for prefix in query.path_prefixes:
-            clauses.append("LOWER(REPLACE(source_path, '\\', '/')) LIKE ? ESCAPE '!'")
+            clauses.append(f"LOWER(REPLACE({column('source_path')}, '\\', '/')) LIKE ? ESCAPE '!'")
             params.append(prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%")
         if query.confidence_min > 0.0:
-            clauses.append("(confidence IS NULL OR CAST(confidence AS REAL) >= ?)")
+            clauses.append(f"({column('confidence')} IS NULL OR CAST({column('confidence')} AS REAL) >= ?)")
             params.append(query.confidence_min)
         if query.confidence_max < 1.0:
-            clauses.append("(confidence IS NULL OR CAST(confidence AS REAL) <= ?)")
+            clauses.append(f"({column('confidence')} IS NULL OR CAST({column('confidence')} AS REAL) <= ?)")
             params.append(query.confidence_max)
         for col, allowed in query.column_filters:
             db_col = DB_TABLE_COLUMNS.get(StagingColumn(col))
@@ -528,14 +1011,14 @@ class StagingSessionStore:
             if not values:
                 clauses.append("0")
             else:
-                clauses.append(f"CAST({db_col} AS TEXT) IN ({', '.join('?' for _ in values)})")
+                clauses.append(f"CAST({column(db_col)} AS TEXT) IN ({', '.join('?' for _ in values)})")
                 params.extend(values)
         if query.similarity_rows is not None:
             ids = sorted(int(row_id) for row_id in query.similarity_rows)
             if not ids:
                 clauses.append("0")
             else:
-                clauses.append(f"row_id IN ({', '.join('?' for _ in ids)})")
+                clauses.append(f"{column('row_id')} IN ({', '.join('?' for _ in ids)})")
                 params.extend(ids)
         return " AND ".join(clauses), params
 

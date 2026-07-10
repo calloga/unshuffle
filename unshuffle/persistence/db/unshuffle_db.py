@@ -147,6 +147,9 @@ class UnshuffleDB:
     def get_feature_vectors_bulk(self, file_hashes: List[str]) -> Dict[str, bytes]:
         return self._cache_store.get_feature_vectors_bulk(file_hashes)
 
+    def get_analysis_failures_bulk(self, file_hashes: List[str]) -> Dict[str, str]:
+        return self._cache_store.get_analysis_failures_bulk(file_hashes)
+
     def get_acoustic_vector(self, file_hash: str) -> Optional[bytes]:
         return self._cache_store.get_feature_vector(file_hash)
 
@@ -257,14 +260,23 @@ class UnshuffleDB:
     def get_staging_records(self, session_id: str) -> List[Dict]:
         return storage_sessions.get_staging_records(self, session_id)
 
+    def iter_staging_records(self, session_id: str, batch_size: int = 1000):
+        return storage_sessions.iter_staging_records(self, session_id, batch_size)
+
     def get_coherence_staging_records(self, session_id: str) -> List[Dict]:
         return storage_sessions.get_coherence_staging_records(self, session_id)
+
+    def iter_coherence_staging_records(self, session_id: str, batch_size: int = 1000):
+        return storage_sessions.iter_coherence_staging_records(self, session_id, batch_size)
 
     def upsert_coherence_results(self, session_id: str, results: List[Any]):
         storage_coherence.upsert_coherence_results(self, session_id, results)
 
     def list_coherence_results(self, session_id: str) -> List[Dict[str, Any]]:
         return storage_coherence.list_coherence_results(self, session_id)
+
+    def list_coherence_result_clusters(self, session_id: str) -> List[Dict[str, Any]]:
+        return storage_coherence.list_coherence_result_clusters(self, session_id)
 
     def upsert_refinement_candidates(self, session_id: str, candidates: List[Any]):
         storage_coherence.upsert_refinement_candidates(self, session_id, candidates)

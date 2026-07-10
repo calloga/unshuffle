@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -56,7 +57,7 @@ class DbBackedStagingTableModel(QAbstractTableModel):
         self._matched_ids: set[int] | None = None
         self.matched_ids: set[int] | None = None
         self.audio_types: set[str] | None = None
-        self.show_non_audio_assets: bool = False
+        self.show_non_audio_assets: bool = True
         self.path_filters: set[str] = set()
         self._norm_path_filters: list[str] = []
         self.confidence_min: float = 0.0
@@ -264,23 +265,76 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             return False
         if self.draft_bulk_callback is not None:
             return self.draft_bulk_callback(updates, text or "Bulk Edit")
-        changed = False
+        normalized = [
+            (rec, col, value)
+            for rec, col, value in updates
+            if self._get_record_value(rec, col) != value
+        ]
+        if not normalized:
+            return False
+        self._apply_bulk_values(normalized)
+        if not self._sync_suspended and self.sync_callback is not None:
+            synced = set()
+            for rec, _col, _value in normalized:
+                row_id = getattr(rec, "staging_row_id", None)
+                if row_id is None or int(row_id) in synced:
+                    continue
+                synced.add(int(row_id))
+                self.sync_callback(int(row_id), rec)
+        return True
+
+    def _apply_bulk_values(self, updates: list[tuple[PlanRecord, int, Any]]) -> None:
+        """Apply draft values without re-entering the draft callback."""
+        updates = [
+            (rec, col, value)
+            for rec, col, value in updates
+            if getattr(rec, "is_duplicate_shadow", False) is not True
+        ]
+        if not updates:
+            return
+
+        touched: dict[int, PlanRecord] = {}
+        touched_columns = set()
         for rec, col, value in updates:
             row_id = getattr(rec, "staging_row_id", None)
             if row_id is None:
                 continue
-            if self._get_record_value(rec, col) == value:
-                continue
             self._set_record_value(rec, col, value)
-            self.store.update_record(int(row_id), rec)
-            if not self._sync_suspended and self.sync_callback is not None:
-                self.sync_callback(int(row_id), rec)
-            self._record_cache.put_many({int(row_id): rec})
-            changed = True
-        if changed:
-            self._unique_values_cache.clear()
-            self.dataChanged.emit(self.index(0, 0), self.index(max(0, self.rowCount() - 1), self.columnCount() - 1))
-        return changed
+            touched[int(row_id)] = rec
+            touched_columns.add(col)
+        if not touched:
+            return
+
+        db_updates: list[tuple[int, dict[str, Any]]] = []
+        for row_id, rec in touched.items():
+            fields: dict[str, Any] = {}
+            record_columns = {
+                col
+                for candidate, col, _value in updates
+                if getattr(candidate, "staging_row_id", None) == row_id
+            }
+            if StagingColumn.PACK in record_columns:
+                fields["pack"] = rec.pack
+            if StagingColumn.CATEGORY in record_columns:
+                fields["category"] = rec.category
+                fields["subcategory"] = rec.subcategory or ""
+            if StagingColumn.SUBCATEGORY in record_columns:
+                fields["subcategory"] = rec.subcategory or ""
+            if StagingColumn.TAGS in record_columns:
+                fields["tags"] = json.dumps(list(rec.tags or []))
+            if StagingColumn.TYPE in record_columns:
+                fields["audio_type"] = rec.audio_type
+            if DRAFT_IS_PRESERVED_FIELD in record_columns:
+                fields["is_preserved"] = 1 if rec.is_preserved else 0
+            if DRAFT_PRESERVED_ROOT_FIELD in record_columns:
+                fields["preserved_root"] = str(rec.preserved_root) if rec.preserved_root else None
+            if fields:
+                db_updates.append((row_id, fields))
+
+        self.store.update_rows(db_updates)
+
+        self.refresh_index()
+        self._record_cache.put_many(touched)
 
     def flags(self, index: QModelIndex | QPersistentModelIndex) -> Qt.ItemFlags:
         if not index.isValid():

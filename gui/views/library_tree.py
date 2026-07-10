@@ -264,6 +264,14 @@ class LibraryTreeView(QTreeView):
                 source_node = source_nodes[0]
                 source_label = str(source_node.get("name") or "selection")
                 source_node_type = str(source_node.get("node_type") or "")
+                source_node_id = str(source_node.get("source_node_id") or "")
+                target_profile_node_id = str(applied_fields.get("__target_profile_node_id") or "")
+                if source_node_id and target_profile_node_id and not bool(source_node.get("read_only")):
+                    if not self._confirm_profile_node_move(source_label, self._drop_target_label(applied_fields)):
+                        self._hide_drop_hint(); event.ignore(); return
+                    applied_fields["__move_profile_node_id"] = source_node_id
+                    self._hide_drop_hint(); self.reorganization_requested.emit([], applied_fields)
+                    event.setDropAction(Qt.MoveAction); event.accept(); return
                 if source_node_type == "pack" and target_node_type == "pack":
                     sn, tn = str(source_node.get("name") or "").strip(), str(target_fields.get("pack") or "").strip()
                     if (sn and tn and sn == tn) or not self._confirm_pack_merge(sn, tn): self._hide_drop_hint(); event.ignore(); return
@@ -399,6 +407,9 @@ class LibraryTreeView(QTreeView):
         menu.exec(self.viewport().mapToGlobal(pos))
 
     def _get_selected_records(self, source_index):
+        model = self._source_model()
+        if hasattr(model, "records_for_index"):
+            return model.records_for_index(source_index)
         recs = []; rec = source_index.data(Qt.UserRole)
         if rec: recs.append(rec)
         else: self._collect_records_recursive(source_index, recs)
@@ -488,6 +499,7 @@ class LibraryTreeView(QTreeView):
                 "name": str(idx.data(RAW_NAME_ROLE) or idx.data(Qt.DisplayRole) or ""),
                 "source_node_id": str(idx.data(SOURCE_NODE_ID_ROLE) or ""),
                 "source_node_type": str(idx.data(SOURCE_NODE_TYPE_ROLE) or ""),
+                "read_only": bool(idx.data(READ_ONLY_ROLE)),
             })
         return json.dumps(p).encode("utf-8")
 
@@ -518,6 +530,7 @@ class LibraryTreeView(QTreeView):
                 "name": str(item.get("name") or idx.data(RAW_NAME_ROLE) or idx.data(Qt.DisplayRole) or ""),
                 "source_node_id": str(item.get("source_node_id") or idx.data(SOURCE_NODE_ID_ROLE) or ""),
                 "source_node_type": str(item.get("source_node_type") or idx.data(SOURCE_NODE_TYPE_ROLE) or ""),
+                "read_only": bool(item.get("read_only", idx.data(READ_ONLY_ROLE))),
             })
         return nodes
 
@@ -525,9 +538,14 @@ class LibraryTreeView(QTreeView):
         if not view_index.isValid(): return None
         si = self._source_index(view_index); nt = si.data(NODE_TYPE_ROLE)
         if nt == "file": si = si.parent()
-        if bool(si.data(READ_ONLY_ROLE)) or self._is_read_only_utility_index(si):
+        target_node_id = str(si.data(SOURCE_NODE_ID_ROLE) or "")
+        if (bool(si.data(READ_ONLY_ROLE)) and not target_node_id) or self._is_read_only_utility_index(si):
             return None
         f = {key: value for key, value in dict(si.data(FIELDS_ROLE) or {}).items() if key in SEMANTIC_FIELD_NAMES}
+        target_source_type = str(si.data(SOURCE_NODE_TYPE_ROLE) or "")
+        if target_node_id and target_source_type == "custom":
+            f["__target_profile_node_id"] = target_node_id
+            f["__target_profile_label"] = str(si.data(RAW_NAME_ROLE) or si.data(Qt.DisplayRole) or "")
         return f or None
 
     def _drop_index_at(self, pos):
@@ -549,6 +567,7 @@ class LibraryTreeView(QTreeView):
         return str(nt or "")
 
     def _drop_target_label(self, fields):
+        if fields.get("__target_profile_label"): return str(fields["__target_profile_label"])
         if fields.get("pack"): return f"{fields['pack']} / {fields.get('category', '')}"
         if fields.get("category"): return fields["category"]
         return fields.get("audio_type", "Library")
@@ -564,6 +583,16 @@ class LibraryTreeView(QTreeView):
             lines,
             len(changed_records),
         )
+
+    def _confirm_profile_node_move(self, source_name: str, target_name: str) -> bool:
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Confirm Tree Reorganization")
+        msg.setText(f'Move "{source_name}" into "{target_name}"?')
+        msg.setInformativeText("This changes the custom tree draft without reclassifying files.")
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.Yes)
+        return msg.exec() == QMessageBox.Yes
 
     def _records_changed_by_drop(self, records, fields):
         changed = []

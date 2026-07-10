@@ -100,7 +100,8 @@ class SearchController(QObject):
                         edit.blockSignals(False)
                     self.app.library_tab.set_active_saved_filters(active_saved_filters)
                     self.app.library_tab.set_active_source_filters(active_source_filters)
-                    self.app.library_tab.category_carousel.set_active_values(active_categories)
+                    values = self.app.library_tab.category_filter_values_for_query(query, set(active_categories or set()))
+                    self.app.library_tab.category_carousel.set_active_values(values)
                     self.app.library_tab.signal_floor_control.set_range(*confidence_range)
                 if hasattr(self.app, "dock_view"):
                     self.app.dock_view.set_search_text(query)

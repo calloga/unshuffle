@@ -723,6 +723,89 @@ def test_first_edit_profile_mirrors_current_tree_and_allows_custom_override():
     assert resolver.resolve_record(records[1], profile, records).parts[0] == "Oneshots"
 
 
+def test_custom_tree_filter_options_follow_category_and_subcategory_placement():
+    from gui.core.tree_filter_options import custom_tree_filter_options
+
+    profile = _profile(
+        [
+            TreeOrganizationNode("oneshots", "root", "Oneshots", 'type:"Oneshots"', "system", 1),
+            TreeOrganizationNode("favorites", "oneshots", "Favorites", 'tag:"favorite"', "custom", 1),
+            TreeOrganizationNode("kicks", "oneshots", "Kicks", 'cat:"Kicks"', "system", 2),
+            TreeOrganizationNode("hard", "kicks", "Hard Picks", 'tag:"hard"', "custom", 1),
+        ]
+    )
+
+    options = {option.node_id: option for option in custom_tree_filter_options(profile)}
+
+    assert options["favorites"].placement == "category"
+    assert options["favorites"].query == 'tag:"favorite"'
+    assert options["hard"].placement == "subcategory"
+    assert "oneshots" not in options
+    assert "kicks" not in options
+
+
+def test_custom_category_carousel_option_applies_saved_query(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QUndoStack
+    from PySide6.QtWidgets import QApplication
+    from gui.core.tree_filter_options import CustomTreeFilterOption
+    from gui.widgets.library_tab import LibraryTab
+
+    _app = QApplication.instance() or QApplication([])
+    tab = LibraryTab(QUndoStack())
+    option = CustomTreeFilterOption("favorite", "Favorites", 'tag:"favorite"', "category", "Oneshots")
+    emitted = []
+    tab.savedFilterRequested.connect(lambda query, active, mode: emitted.append((query, active, mode)))
+    tab.set_custom_tree_filter_options([option])
+
+    tab._on_category_carousel_selected(option)
+
+    assert emitted == [('tag:"favorite"', True, "replace")]
+    assert tab._current_category_filter() == ""
+
+
+def test_tree_switcher_reserves_default_and_shows_active_profile_name(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from types import SimpleNamespace
+    from PySide6.QtGui import QUndoStack
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets.library_tab import LibraryTab
+
+    _app = QApplication.instance() or QApplication([])
+    tab = LibraryTab(QUndoStack())
+    profiles = [
+        SimpleNamespace(id="old-default-a", name="Default"),
+        SimpleNamespace(id="old-default-b", name="Default"),
+        SimpleNamespace(id="mine", name="My Tree"),
+    ]
+
+    tab.set_tree_organization_options(profiles, "mine")
+    tab.set_tree_organization_state(True, "My Tree")
+
+    labels = [action.text() for action in tab.tree_org_menu.actions() if not action.isSeparator()]
+    assert labels == ["Default", "My Tree", "Manage Tree Organizations..."]
+    assert tab.btn_tree_org.text() == "My Tree"
+    assert not tab.lbl_tree_org_badge.isVisible()
+
+
+def test_batched_semantic_profile_matches_list_resolution():
+    from unshuffle.logic.tree_organization.routing import (
+        semantic_profile_for_record_batches,
+        semantic_profile_for_records,
+    )
+
+    records = [
+        _record("kick.wav", category="Kicks"),
+        _record("snare.wav", category="Snares"),
+    ]
+    profile = _profile([TreeOrganizationNode("kicks", "root", "Kicks", "Kicks", "custom", 1)])
+
+    expected = semantic_profile_for_records(profile, records)
+    actual = semantic_profile_for_record_batches(profile, lambda: iter([records[:1], records[1:]]))
+
+    assert actual.nodes == expected.nodes
+
+
 def test_default_profile_opens_as_editable_copy():
     from gui.core.tree_organization_controller import TreeOrganizationController
     from gui.models.library_tree import LibraryTreeModel
@@ -1990,6 +2073,62 @@ def test_drafting_controller_collapses_footer_after_discard(monkeypatch):
 
     assert app.footer.toggle_calls[-1] is False
     assert rec.category == "Kicks"
+
+
+def test_tree_reorganize_does_not_enumerate_the_full_db_record_sequence(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QObject
+    from PySide6.QtWidgets import QApplication
+    from gui.core.drafting_controller import DraftingController
+    from gui.utils.constants import StagingColumn
+
+    _app = QApplication.instance() or QApplication([])
+    rec = _record("kick.wav", category="Kicks")
+
+    class ExplodingRecords:
+        def __iter__(self):
+            raise AssertionError("tree drops must not enumerate the full session")
+
+    class FakeModel:
+        records = ExplodingRecords()
+
+        def _get_record_value(self, record, column):
+            return record.category if column == StagingColumn.CATEGORY else None
+
+        def _apply_bulk_values(self, updates):
+            for record, column, value in updates:
+                if column == StagingColumn.CATEGORY:
+                    record.category = value
+
+    model = FakeModel()
+
+    class FakeFooter:
+        def log(self, _message):
+            pass
+
+        def set_status(self, _message):
+            pass
+
+    class FakeViewController:
+        def is_tree_visible(self):
+            return False
+
+    class FakeApp(QObject):
+        def __init__(self):
+            super().__init__()
+            self.model = model
+            self.undo_stack = None
+            self.footer = FakeFooter()
+            self.view_controller = FakeViewController()
+            self.tree_organization_controller = None
+            self.library_tab = SimpleNamespace()
+
+    controller = DraftingController(FakeApp())
+    controller.schedule_reorg_impact_analysis = lambda: None
+
+    controller.handle_tree_reorganize([rec], {"category": "Snares"})
+
+    assert rec.category == "Snares"
 
 
 def test_drafting_controller_moves_custom_node_under_target_filter_path(monkeypatch):
