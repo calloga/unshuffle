@@ -13,6 +13,7 @@ class AcousticSessionState:
     def __init__(self, app=None):
         self.app = app
         self._last_key = ""
+        self._last_revision = None
 
     def current_key(self) -> str:
         app = self.app
@@ -20,6 +21,15 @@ class AcousticSessionState:
         engine = getattr(app, "engine", None)
         store = getattr(model, "store", None)
         if store is not None and hasattr(store, "acoustic_state_rows"):
+            conn = getattr(store, "conn", None)
+            total_changes = getattr(conn, "total_changes", None)
+            revision = (
+                (str(getattr(engine, "session_id", "") or ""), total_changes)
+                if isinstance(total_changes, int)
+                else None
+            )
+            if self._last_key and revision == self._last_revision:
+                return self._last_key
             rows = store.acoustic_state_rows()
             if not rows:
                 self._last_key = ""
@@ -31,6 +41,7 @@ class AcousticSessionState:
             }
             raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
             self._last_key = hashlib.sha1(raw).hexdigest()
+            self._last_revision = revision
             return self._last_key
         records = list(getattr(model, "records", []) or [])
         if not records:

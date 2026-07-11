@@ -46,3 +46,15 @@ def build_filter_suggestions(records: Iterable[object], saved_filters: Iterable[
             escaped = value.replace('"', '\\"')
             suggestions.append(f'{prefix}:"{escaped}"')
     return list(dict.fromkeys(suggestions))
+
+
+def build_filter_suggestions_from_values(
+    values_by_field: dict[str, Iterable[str]],
+    saved_filters: Iterable[str] | None = None,
+) -> list[str]:
+    suggestions: list[str] = [item.strip() for item in saved_filters or [] if item.strip()]
+    for prefix, values in values_by_field.items():
+        for value in sorted({str(item).strip() for item in values if str(item).strip()}, key=str.lower)[:500]:
+            escaped = value.replace('"', '\\"')
+            suggestions.append(f'{prefix}:"{escaped}"')
+    return list(dict.fromkeys(suggestions))

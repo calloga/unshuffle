@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from PySide6.QtGui import QStandardItemModel, QStandardItem, QColor, QBrush, QFont, QIcon
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QApplication
 from unshuffle.core import PlanRecord, plan_record_sort_key
 from unshuffle.core.assets import asset_path
 from unshuffle.core.constants import DEFAULT_CLASSIFICATION_FLOOR
@@ -1101,7 +1102,7 @@ class LibraryTreeModel(QStandardItemModel):
         if role == Qt.FontRole:
             node_type = super().data(index, NODE_TYPE_ROLE)
             if node_type in {"type", "category", "pack"}:
-                font = QFont()
+                font = QFont(QApplication.font())
                 if is_hands_off:
                     font.setItalic(True)
                 return font

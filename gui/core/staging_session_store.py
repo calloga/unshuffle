@@ -121,6 +121,36 @@ class StagingSessionStore:
         ).fetchone()
         return int(row[0] if row is not None else 0)
 
+    def filter_suggestion_values(self, *, limit_per_field: int = 500) -> dict[str, set[str]]:
+        """Return compact search-completion values without hydrating session records."""
+        limit = max(1, int(limit_per_field))
+        values: dict[str, set[str]] = {}
+        for prefix, column in (
+            ("type", "audio_type"),
+            ("category", "category"),
+            ("subcategory", "subcategory"),
+            ("packname", "pack"),
+            ("name", "sample_name"),
+        ):
+            rows = self.conn.execute(
+                f"SELECT DISTINCT {column} FROM staging_records "
+                f"WHERE session_id = ? AND {column} IS NOT NULL AND {column} != '' "
+                f"ORDER BY {column} COLLATE NOCASE LIMIT ?",
+                (self.session_id, limit),
+            )
+            values[prefix] = {str(row[0]).strip() for row in rows if str(row[0] or "").strip()}
+        tags: set[str] = set()
+        rows = self.conn.execute(
+            "SELECT tags FROM staging_records WHERE session_id = ? AND tags IS NOT NULL AND tags != ''",
+            (self.session_id,),
+        )
+        for row in rows:
+            tags.update(str(tag).strip() for tag in parse_tags(row[0]) if str(tag).strip())
+            if len(tags) >= limit:
+                break
+        values["tag"] = tags
+        return values
+
     def row_ids(
         self,
         query: StagingQuery | None = None,
@@ -246,6 +276,17 @@ class StagingSessionStore:
             (self.session_id, f"%{needle}%"),
         )
         return int(cursor.fetchone()[0])
+
+    def tagged_row_ids(self, tag: str) -> set[int]:
+        needle = str(tag or "").strip().lower()
+        if not needle:
+            return set()
+        cursor = self.conn.execute(
+            "SELECT row_id FROM staging_records "
+            "WHERE session_id = ? AND LOWER(COALESCE(tags, '')) LIKE ?",
+            (self.session_id, f"%{needle}%"),
+        )
+        return {int(row[0]) for row in cursor if row[0] is not None}
 
     def has_any_tags(self, tags: Iterable[str]) -> bool:
         needles = [str(tag or "").strip().lower() for tag in tags if str(tag or "").strip()]

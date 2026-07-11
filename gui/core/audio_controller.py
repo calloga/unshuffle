@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal, QTimer
 from gui.core.audio_player import SoundPreviewPlayer
+from unshuffle.core.constants import AUDIO_EXTS
 
 class AudioController(QObject):
     """
@@ -14,7 +15,7 @@ class AudioController(QObject):
     similaritySearchRequested = Signal(str) 
     tabSwitchRequested = Signal(int)
 
-    def _resolve_play_path(self, target, model, proxy_model):
+    def _resolve_play_record(self, target, model, proxy_model):
         if hasattr(target, "column") and hasattr(target, "row"):
             if target is None or not target.isValid():
                 return None
@@ -22,21 +23,24 @@ class AudioController(QObject):
             if not source_index.isValid():
                 return None
             row = source_index.row()
-            records = getattr(model, "records", [])
-            if row < 0 or row >= len(records):
-                return None
-            return records[row].source_path
+            return model.record(row) if hasattr(model, "record") else getattr(model, "records", [])[row]
         if hasattr(target, "source_path"):
-            return target.source_path
+            return target
         if isinstance(target, (str, Path)):
             return Path(target)
         return None
 
     def handle_play_request(self, target, model, proxy_model):
         """Resolves target to a path and plays it."""
-        resolved_path = self._resolve_play_path(target, model, proxy_model)
-        if resolved_path is not None:
-            self.play_path(resolved_path)
+        resolved = self._resolve_play_record(target, model, proxy_model)
+        if resolved is None:
+            return
+        if hasattr(resolved, "source_path"):
+            if str(getattr(resolved, "audio_type", "") or "") in {"Non-Audio Assets", "Utility"}:
+                self.statusRequested.emit("Preview unavailable for non-audio assets.")
+                return
+            resolved = resolved.source_path
+        self.play_path(resolved)
 
     def __init__(self, audio_bar, parent=None):
         super().__init__(parent)
@@ -66,6 +70,10 @@ class AudioController(QObject):
         )
 
     def play_path(self, file_path):
+        file_path = Path(file_path)
+        if file_path.suffix.lower() not in AUDIO_EXTS:
+            self.statusRequested.emit("Preview unavailable for non-audio assets.")
+            return
         self._collapse_timer.stop()
         if self.player.is_playing() and self.player.current_path == file_path:
             self.player.stop()
@@ -74,6 +82,8 @@ class AudioController(QObject):
         else:
             if not self.player.play(file_path):
                 return
+
+        self.statusRequested.emit("")
 
         self.toggle_audio_bar(True)
 

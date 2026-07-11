@@ -40,7 +40,7 @@ from ...utils.layout_helpers import apply_layout_margins, apply_layout_spacing
 from ...utils.styles import ColorPalette, apply_style, make_qcolor, scaled_px
 from ..buttons import AnimatedIconButton
 from ..filter_suggestion_line_edit import FilterSuggestionLineEdit
-from ..filter_suggestions import build_filter_suggestions, saved_filter_queries
+from ..filter_suggestions import build_filter_suggestions, build_filter_suggestions_from_values, saved_filter_queries
 from .constants import ACTION_KIND_ROLE, ADD_PARENT_ID_ROLE, NODE_ID_ROLE
 from .logic import TreeOrganizationEditorLogicMixin
 from .styles import WARNING_TEXT, button_style, editor_style
@@ -394,6 +394,14 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
     def _render_profile_list(self) -> None:
         if not hasattr(self, "profile_rows_layout"):
             return
+        self.profile_list_page.setUpdatesEnabled(False)
+        try:
+            self._render_profile_list_contents()
+        finally:
+            self.profile_list_page.setUpdatesEnabled(True)
+            self.profile_list_page.update()
+
+    def _render_profile_list_contents(self) -> None:
         while self.profile_rows_layout.count():
             item = self.profile_rows_layout.takeAt(0)
             if item.widget():
@@ -583,6 +591,13 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
         return saved_filter_queries(filters)
 
     def _build_filter_suggestions(self) -> list[str]:
+        app = self.parent() if hasattr(self, "parent") else None
+        store = getattr(app, "session_store", None)
+        if store is not None and hasattr(store, "filter_suggestion_values"):
+            return build_filter_suggestions_from_values(
+                store.filter_suggestion_values(),
+                self._saved_filter_suggestions,
+            )
         return build_filter_suggestions(self._records, self._saved_filter_suggestions)
 
     def _build_detail_panel(self) -> QFrame:

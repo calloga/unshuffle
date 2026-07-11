@@ -70,14 +70,18 @@ class OperationMonitorDialog(QDialog):
 
         self.refresh_theme()
 
-    def start(self, title: str, *, cancellable: bool = False, on_cancel: Callable[[], None] | None = None) -> None:
+    def start(self, title: str, *, cancellable: bool = False, on_cancel: Callable[[], None] | None = None, compact: bool = False) -> None:
         self._active = True
         self._cancel_handler = on_cancel
         self._last_phase = ""
         self._phase_transition_id += 1
         self._applying_deferred_phase = False
-        self.title_label.setText(title or "Working")
+        title = title or "Working"
+        self.setWindowTitle(title)
+        self.title_label.setText(title)
+        self.title_label.setVisible(not compact)
         self.phase_label.setText("")
+        self.phase_label.setVisible(not compact)
         self.detail_label.setText("")
         self.detail_label.setVisible(False)
         self.eta_label.setText("")
@@ -88,6 +92,7 @@ class OperationMonitorDialog(QDialog):
         self._progress_animation.stop()
         self.progress.setRange(0, 0)
         self.progress.setFormat("")
+        self.setFixedHeight(scaled_px(92 if compact else 176))
 
     def set_status(self, text: str) -> None:
         self.update_progress({"message": text})

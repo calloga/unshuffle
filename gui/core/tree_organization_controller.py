@@ -16,6 +16,7 @@ from unshuffle.logic.tree_organization import (
     TreeOrganizationProfile,
     TreeOrganizationProfileStoreError,
     TreeOrganizationRepository,
+    semantic_profile_for_record_batches,
 )
 from unshuffle.logic.tree_organization.models import utc_now_iso
 
@@ -74,6 +75,7 @@ class TreeOrganizationController(QObject):
             if self.active_profile and self.active_profile.id == profile.id:
                 self.disable_profile()
             return
+        profile = self._semantic_profile(profile)
         try:
             saved = self.repository.save_profile(profile)
         except TreeOrganizationProfileStoreError as exc:
@@ -106,9 +108,9 @@ class TreeOrganizationController(QObject):
             return
         monitor = getattr(self.app, "operation_monitor", None)
         needs_projection = not self._has_profile_projection(profile)
-        token = monitor.start("Switching Tree Organization") if monitor is not None and needs_projection else None
+        token = monitor.start("Switching Tree Organization", compact=True) if monitor is not None and needs_projection else None
         if token is not None:
-            monitor.update({"phase": "Preparing tree", "message": "Preparing tree organization..."}, token=token)
+            monitor.update({"percent": 50}, token=token)
             QApplication.processEvents()
         try:
             signature = self._ensure_profile_projection(profile)
@@ -261,8 +263,18 @@ class TreeOrganizationController(QObject):
             self.editor_widget = None
 
     def _record_source(self):
+        if getattr(self.app, "session_store", None) is not None:
+            return []
         model = getattr(self.app, "model", None)
         return getattr(model, "records", []) or []
+
+    def _semantic_profile(self, profile: TreeOrganizationProfile) -> TreeOrganizationProfile:
+        store = getattr(self.app, "session_store", None)
+        if store is not None and hasattr(store, "iter_tree_records"):
+            return semantic_profile_for_record_batches(profile, lambda: store.iter_tree_records(batch_size=1000))
+        from unshuffle.logic.tree_organization import semantic_profile_for_records
+
+        return semantic_profile_for_records(profile, list(self._record_source()))
 
     def _clear_profile_projection(self, profile_id: str) -> None:
         store = getattr(self.app, "session_store", None)

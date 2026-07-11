@@ -25,11 +25,12 @@ class OperationMonitorManager(QObject):
         *,
         cancellable: bool = False,
         on_cancel: Callable[[], None] | None = None,
+        compact: bool = False,
     ) -> int:
         self._token += 1
         self._active_token = self._token
         dialog = self._ensure_dialog()
-        dialog.start(title, cancellable=cancellable, on_cancel=on_cancel)
+        dialog.start(title, cancellable=cancellable, on_cancel=on_cancel, compact=compact)
         dialog.show()
         dialog.raise_()
         return self._active_token

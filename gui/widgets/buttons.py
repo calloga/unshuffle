@@ -212,9 +212,10 @@ class SidebarIconButton(AnimatedIconButton):
                 painter.translate(self.width() / 2, self.height() / 2 + self.hover_offset)
                 painter.scale(self.scale, self.scale)
                 font = painter.font()
-                font.setPointSize(
-                    scaled_px(self.SHORT_TEXT_POINTSIZE if len(self.text_label) < 3 else self.DEFAULT_TEXT_POINTSIZE)
+                point_size = scaled_px(
+                    self.SHORT_TEXT_POINTSIZE if len(self.text_label) < 3 else self.DEFAULT_TEXT_POINTSIZE
                 )
+                font.setPointSize(max(1, point_size))
                 font.setBold(True)
                 painter.setFont(font)
                 painter.setPen(

@@ -249,7 +249,9 @@ def connect_orchestrator_signals(app):
     app.worker_manager.busyStateChanged.connect(lambda b: set_ui_busy(app, b))
     app.worker_manager.cancelling.connect(lambda: handle_cancelling(app))
 
-    app.audio_controller.statusRequested.connect(app.footer.set_status)
+    app.audio_controller.statusRequested.connect(
+        lambda text: app.footer.set_transient_status(text) if text else app.footer.set_status("Ready")
+    )
     app.audio_controller.similaritySearchRequested.connect(lambda q: [app.library_tab.edit_search.setText(q), app.search_controller.execute_search()])
     
     app.undo_stack.canUndoChanged.connect(lambda: update_undo_redo_states(app))

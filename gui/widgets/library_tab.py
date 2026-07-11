@@ -28,7 +28,7 @@ from .buttons import AnimatedIconButton, SidebarIconButton
 from .coherence_analyzer import CoherenceAnalyzerPage
 from .delegates import ComboDelegate
 from .filter_suggestion_line_edit import FilterSuggestionLineEdit
-from .filter_suggestions import build_filter_suggestions, saved_filter_queries
+from .filter_suggestions import build_filter_suggestions, build_filter_suggestions_from_values, saved_filter_queries
 from .library_filters import category_options_for_type_state
 from .library_sources import updated_recent_scan_sources
 from .library_records import (
@@ -1033,8 +1033,13 @@ class LibraryTab(QWidget):
         if not hasattr(self, "edit_search"):
             return
         saved_queries = saved_filter_queries(self.saved_filters)
-        records = self._records_for_search_suggestions()
-        self.edit_search.set_suggestions(build_filter_suggestions(records, saved_queries), saved_queries)
+        model = self.proxy_model.sourceModel() if self.proxy_model and hasattr(self.proxy_model, "sourceModel") else None
+        store = getattr(model, "store", None)
+        if store is not None and hasattr(store, "filter_suggestion_values"):
+            suggestions = build_filter_suggestions_from_values(store.filter_suggestion_values(), saved_queries)
+        else:
+            suggestions = build_filter_suggestions(self._records_for_search_suggestions(), saved_queries)
+        self.edit_search.set_suggestions(suggestions, saved_queries)
 
     def _records_for_search_suggestions(self) -> list[object]:
         model = self.proxy_model.sourceModel() if self.proxy_model and hasattr(self.proxy_model, "sourceModel") else None

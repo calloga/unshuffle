@@ -719,7 +719,7 @@ class CoherenceAnalyzerPage(QFrame):
                 self._data_priority_row_ids = frozenset(priority_ids)
                 self._source_cache[source_signature] = (records, results, data_key)
                 self._source_cache.move_to_end(source_signature)
-                while len(self._source_cache) > 2:
+                while len(self._source_cache) > 8:
                     self._source_cache.popitem(last=False)
                 self._prewarmed_projection_key = None
                 self._refresh_category_options()

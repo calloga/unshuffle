@@ -173,6 +173,22 @@ class ViewController(QObject):
             return
         self.refresh_library_map(force=False)
 
+    def prewarm_possible_duplicate_map(self) -> None:
+        """Keep generated-duplicate points inside the warm capped map data set."""
+        store = getattr(self.app, "session_store", None)
+        if store is None or not hasattr(store, "tagged_row_ids") or not self._view_available("map"):
+            return
+        row_ids = store.tagged_row_ids("possibleduplicate")
+        if not row_ids:
+            return
+        library_tab = getattr(self.app, "library_tab", None)
+        page = self.app._ensure_library_map() if hasattr(self.app, "_ensure_library_map") else getattr(library_tab, "coherence_map", None)
+        if page is None:
+            return
+        page.refresh_from_app(self.app, force=False, priority_row_ids=row_ids)
+        if hasattr(page, "prewarm_library_projections"):
+            page.prewarm_library_projections()
+
     def prewarm_library_tree(self, *, delay_ms: int = 1600) -> None:
         if self._tree_prewarm_scheduled:
             return

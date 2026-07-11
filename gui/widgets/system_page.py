@@ -244,6 +244,7 @@ class SystemPage(QWidget):
         self._anchor_preview_offsets: dict[str, int] = {}
         self._anchor_candidate_actions: dict[str, str] = {}
         self._anchor_cell_widgets: dict[int, list[QWidget]] = {}
+        self._anchor_row_signatures: dict[int, tuple] = {}
         self._setup_ui()
         self.set_mode(False)
 
@@ -851,6 +852,22 @@ class SystemPage(QWidget):
         self._sync_anchor_action_widgets()
 
     def _set_anchor_rows(self, table: QTableWidget, rows: list[dict]) -> None:
+        signature = tuple(
+            (
+                str(row.get("anchor_id") or ""),
+                str(row.get("audio_type") or ""),
+                str(row.get("category") or ""),
+                str(row.get("subcategory") or ""),
+                str(row.get("state") or ""),
+                str(row.get("updated_at") or ""),
+                str(row.get("consistency_ratio") or ""),
+                str(row.get("preview_path") or ""),
+            )
+            for row in rows
+        )
+        if self._anchor_row_signatures.get(id(table)) == signature:
+            return
+        self._anchor_row_signatures[id(table)] = signature
         self._populating_anchor_rows = True
         table.setSortingEnabled(False)
         table.setRowCount(0)

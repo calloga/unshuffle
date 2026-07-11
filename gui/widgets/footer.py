@@ -34,7 +34,7 @@ class ModernFooter(QFrame):
     openBuildSourceRequested = Signal()
     undoBuildRequested = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, audio_bar=None):
         super().__init__(parent)
         self.setObjectName("ModernFooter")
         self._coherence_review_suppressed = False
@@ -52,14 +52,21 @@ class ModernFooter(QFrame):
         self._notification_remaining = {}
         self._notification_timers = {}
         self._timed_notifications = set()
-        apply_fixed_height(self, scaled_px(FOOTER_COLLAPSED_HEIGHT))
+        self.audio_bar = audio_bar
+        self._merged_presentation = audio_bar is not None
+        self._status_timer = QTimer(self)
+        self._status_timer.setSingleShot(True)
+        self._status_timer.timeout.connect(self._clear_transient_status)
+        base_height = max(FOOTER_COLLAPSED_HEIGHT, getattr(audio_bar, "TARGET_HEIGHT", 0))
+        apply_fixed_height(self, scaled_px(base_height))
         apply_style(self, footer_base_style())
         self._setup_ui()
         self._setup_notification_state()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        apply_layout_margins(layout, (FOOTER_MARGIN_H, 4, FOOTER_MARGIN_H, 4))
+        vertical_margin = 0 if self._merged_presentation else 4
+        apply_layout_margins(layout, (FOOTER_MARGIN_H, vertical_margin, FOOTER_MARGIN_H, vertical_margin))
         
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
@@ -184,10 +191,13 @@ class ModernFooter(QFrame):
         process_group.addWidget(self.btn_reorg_discard)
         process_group.addWidget(self.btn_reorg_save)
         process_group.addWidget(self.btn_cancel)
-        status_row.addLayout(status_group, 1)
-        status_row.addLayout(notification_group, 0)
         status_row.addWidget(self.lbl_count, 0)
+        status_row.addLayout(notification_group, 0)
+        status_row.addLayout(status_group, 1)
         status_row.addLayout(process_group, 0)
+        if self.audio_bar is not None:
+            self.audio_bar.setParent(self)
+            status_row.addWidget(self.audio_bar, 0, Qt.AlignVCenter)
         layout.addLayout(status_row)
         
         self.progress_bar = QProgressBar()
@@ -202,8 +212,20 @@ class ModernFooter(QFrame):
         layout.addLayout(h_progress)
 
     def set_status(self, text):
+        self._status_timer.stop()
         self._status_text = str(text or "Ready")
-        self.lbl_status.setText("Ready" if self._docked_presentation else self._status_text)
+        display_text = "Ready" if self._docked_presentation else self._status_text
+        self.lbl_status.setText(
+            "" if self._merged_presentation and not self._docked_presentation and display_text == "Ready" else display_text
+        )
+
+    def set_transient_status(self, text: str, timeout_ms: int = 8000) -> None:
+        self.set_status(text)
+        if str(text or "").strip():
+            self._status_timer.start(max(1, int(timeout_ms)))
+
+    def _clear_transient_status(self) -> None:
+        self.set_status("Ready")
 
     def log(self, text, html=True):
         if html:
@@ -225,6 +247,9 @@ class ModernFooter(QFrame):
             self.progress_bar.setVisible(False)
             return
         self._progress_visible = True
+        if self._merged_presentation:
+            self.progress_bar.setVisible(False)
+            return
         self.progress_bar.setRange(0, 100)
         percent = int(round((min(current_value, total_value) / total_value) * 100))
         self._set_progress_value(percent)
@@ -445,7 +470,8 @@ class ModernFooter(QFrame):
     def _refresh_footer_presentation(self) -> None:
         blocked = self._notification_blocked()
         docked = bool(self._docked_presentation)
-        self.lbl_status.setText("Ready" if docked else self._status_text)
+        display_text = "Ready" if docked else self._status_text
+        self.lbl_status.setText("" if self._merged_presentation and not docked and display_text == "Ready" else display_text)
         self.lbl_reorg_draft.setVisible(self._draft_visible and not docked)
         self.lbl_tagging_status.setVisible(self._tagging_visible and not blocked)
         self.lbl_coherence_status.setVisible(self._coherence_label_visible and not blocked)
@@ -453,7 +479,7 @@ class ModernFooter(QFrame):
         self.btn_reorg_discard.setVisible(self._draft_visible and not docked)
         self.btn_reorg_save.setVisible(self._draft_visible and not docked)
         self.btn_cancel.setVisible(False)
-        self.progress_bar.setVisible(self._progress_visible and not docked)
+        self.progress_bar.setVisible(self._progress_visible and not docked and not self._merged_presentation)
         for name, widget in self._notification_widgets.items():
             desired = bool(self._notification_desired.get(name, False))
             if name in self._timed_notifications and blocked:
@@ -475,6 +501,13 @@ class ModernFooter(QFrame):
 
     def toggle_footer(self, expand: bool):
         """Smoothly animates the footer height and manages visibility of logs/progress."""
+        if self._merged_presentation:
+            target = scaled_px(max(FOOTER_COLLAPSED_HEIGHT, getattr(self.audio_bar, "TARGET_HEIGHT", 0)))
+            self.setMinimumHeight(target)
+            self.setMaximumHeight(target)
+            self.log_output.setVisible(False)
+            self.progress_bar.setVisible(False)
+            return
         target = scaled_px(FOOTER_EXPANDED_HEIGHT if expand else FOOTER_COLLAPSED_HEIGHT)
         if not self.isVisible():
             self.setMinimumHeight(target)
@@ -554,7 +587,10 @@ class ModernFooter(QFrame):
         apply_style(self.btn_reorg_discard, footer_cta_button_style("danger"))
         apply_style(self.btn_reorg_save, footer_cta_button_style())
         apply_style(self.btn_cancel, footer_cta_button_style("danger"))
-        target = scaled_px(FOOTER_EXPANDED_HEIGHT if self._busy else FOOTER_COLLAPSED_HEIGHT)
+        if self._merged_presentation:
+            target = scaled_px(max(FOOTER_COLLAPSED_HEIGHT, getattr(self.audio_bar, "TARGET_HEIGHT", 0)))
+        else:
+            target = scaled_px(FOOTER_EXPANDED_HEIGHT if self._busy else FOOTER_COLLAPSED_HEIGHT)
         self.setMinimumHeight(target)
         self.setMaximumHeight(target)
         self.updateGeometry()

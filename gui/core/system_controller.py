@@ -31,6 +31,8 @@ class SystemController:
         self._anchor_draft_counts: Counter[str] = Counter()
         self._anchor_action_drafts: dict[str, str] = {}
         self._anchor_update_drafts: dict[str, AnchorProfile] = {}
+        self._anchor_rows_cache_key = None
+        self._anchor_rows_cache: tuple[list[dict], list[dict]] | None = None
         self._connect_page_signals()
 
     def _connect_page_signals(self) -> None:
@@ -247,7 +249,20 @@ class SystemController:
         self.refresh_anchors()
 
     def refresh_anchors(self) -> None:
-        candidate_rows, verified_rows = system_anchor_rows.rows_for_controller(self)
+        engine = self._engine()
+        conn = getattr(getattr(engine, "db", None), "conn", None)
+        total_changes = getattr(conn, "total_changes", None)
+        cache_key = (
+            (str(getattr(engine, "session_id", "") or ""), total_changes)
+            if isinstance(total_changes, int)
+            else None
+        )
+        if cache_key is not None and self._anchor_rows_cache is not None and cache_key == self._anchor_rows_cache_key:
+            candidate_rows, verified_rows = self._anchor_rows_cache
+        else:
+            candidate_rows, verified_rows = system_anchor_rows.rows_for_controller(self)
+            self._anchor_rows_cache_key = cache_key
+            self._anchor_rows_cache = (candidate_rows, verified_rows)
         self.page.set_anchor_candidates(candidate_rows)
         self.page.set_anchor_candidate_actions(self._anchor_action_drafts)
         self.page.set_my_anchors(verified_rows)

@@ -56,6 +56,8 @@ class TaggingController(QObject):
                     self.app.filter_controller.refresh_dock_filters()
                 if getattr(self.app, "footer", None):
                     self.app.footer.set_tagging_state("", False)
+                if duplicate_count and hasattr(getattr(self.app, "view_controller", None), "prewarm_possible_duplicate_map"):
+                    QTimer.singleShot(0, self.app.view_controller.prewarm_possible_duplicate_map)
                 if schedule_coherence and getattr(self.app, "coherence_controller", None):
                     self.app.coherence_controller.schedule_after_render()
                 self.taggingFinished.emit()
@@ -231,6 +233,8 @@ class TaggingController(QObject):
             self.app.library_tab.set_possible_duplicate_filter_enabled(bool(duplicate_count))
         if getattr(self.app, "filter_controller", None):
             self.app.filter_controller.refresh_dock_filters()
+        if duplicate_count and hasattr(getattr(self.app, "view_controller", None), "prewarm_possible_duplicate_map"):
+            QTimer.singleShot(0, self.app.view_controller.prewarm_possible_duplicate_map)
         if getattr(self.app, "footer", None):
             self.app.footer.set_tagging_state(
                 "" if quiet else summary,

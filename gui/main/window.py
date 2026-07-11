@@ -166,9 +166,7 @@ class ModernApp(QMainWindow):
         main_layout.addWidget(self.vibe_bar)
 
         self.audio_bar = PreviewControlBar()
-        main_layout.addWidget(self.audio_bar)
-
-        self.footer = ModernFooter()
+        self.footer = ModernFooter(audio_bar=self.audio_bar)
         main_layout.addWidget(self.footer)
 
         self.custom_menu_bar = ModernMenuBar(self)
