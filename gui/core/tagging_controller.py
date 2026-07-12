@@ -63,14 +63,23 @@ class TaggingController(QObject):
                 self.taggingFinished.emit()
                 return
 
-        records = [rec for rec in model.records if getattr(rec, "is_duplicate_shadow", False) is not True]
-        if not records:
+        engine = getattr(self.app, "engine", None)
+        db_mode = bool(
+            store is not None
+            and engine is not None
+            and getattr(engine, "db", None) is not None
+            and getattr(engine, "session_id", None)
+        )
+        records = None if db_mode else [
+            rec for rec in model.records if getattr(rec, "is_duplicate_shadow", False) is not True
+        ]
+        if not db_mode and not records:
             self.clear_state()
             if schedule_coherence and getattr(self.app, "coherence_controller", None):
                 self.app.coherence_controller.schedule_after_render()
             self.taggingFinished.emit()
             return
-        if session_state is None:
+        if session_state is None and not db_mode:
             cached = self._cached_state(self._records_fingerprint(records))
             if cached is not None:
                 duplicate_count = int(cached.get("duplicate_count") or 0)
@@ -99,7 +108,12 @@ class TaggingController(QObject):
 
         from .workers import TaggingWorker
 
-        worker = TaggingWorker(request_id, records)
+        worker = TaggingWorker(
+            request_id,
+            records,
+            db=getattr(engine, "db", None) if db_mode else None,
+            session_id=str(getattr(engine, "session_id", "") or "") if db_mode else "",
+        )
         self._active_worker = worker
         self._running_workers.add(worker)
 
@@ -174,32 +188,43 @@ class TaggingController(QObject):
         changed_row_ids: list[int] = []
         store = getattr(model, "store", None)
 
-        with model.suspended_sync():
-            for row, rec in enumerate(model.records):
-                if getattr(rec, "is_duplicate_shadow", False) is True:
-                    continue
-                path_key = str(Path(getattr(rec, "source_path", ""))).replace("\\", "/")
-                generated_tags = tags_by_path.get(path_key, [])
-                merged = merge_generated_tags(getattr(rec, "tags", []) or [], generated_tags)
-                if list(getattr(rec, "tags", []) or []) == merged:
-                    continue
-                rec.tags = merged
-                if generated_tags:
-                    evidence = getattr(rec, "evidence", None)
-                    if isinstance(evidence, dict):
-                        evidence["generated_tags"] = list(generated_tags)
-                row_id = getattr(rec, "staging_row_id", None)
-                if store is not None and row_id is not None:
-                    row_id = int(row_id)
-                    store.update_record(row_id, rec, commit=False)
-                    cache = getattr(model, "_record_cache", None)
-                    if cache is not None and hasattr(cache, "put_many"):
-                        cache.put_many({row_id: rec})
-                    changed_row_ids.append(row_id)
-                else:
-                    changed_rows.append(row)
-            if changed_row_ids and store is not None:
-                store.conn.commit()
+        if payload.get("db_applied") and store is not None:
+            cache = getattr(model, "_record_cache", None)
+            if cache is not None and hasattr(cache, "clear"):
+                cache.clear()
+            model._invalidate_unique_values(StagingColumn.TAGS)
+            self.app.view_controller.update_library_views(tree_delay_ms=0)
+            if self.app.search_controller.current_query:
+                self.app.search_controller.execute_search()
+            changed_rows = []
+            changed_row_ids = []
+        else:
+            with model.suspended_sync():
+                for row, rec in enumerate(model.records):
+                    if getattr(rec, "is_duplicate_shadow", False) is True:
+                        continue
+                    path_key = str(Path(getattr(rec, "source_path", ""))).replace("\\", "/")
+                    generated_tags = tags_by_path.get(path_key, [])
+                    merged = merge_generated_tags(getattr(rec, "tags", []) or [], generated_tags)
+                    if list(getattr(rec, "tags", []) or []) == merged:
+                        continue
+                    rec.tags = merged
+                    if generated_tags:
+                        evidence = getattr(rec, "evidence", None)
+                        if isinstance(evidence, dict):
+                            evidence["generated_tags"] = list(generated_tags)
+                    row_id = getattr(rec, "staging_row_id", None)
+                    if store is not None and row_id is not None:
+                        row_id = int(row_id)
+                        store.update_record(row_id, rec, commit=False)
+                        cache = getattr(model, "_record_cache", None)
+                        if cache is not None and hasattr(cache, "put_many"):
+                            cache.put_many({row_id: rec})
+                        changed_row_ids.append(row_id)
+                    else:
+                        changed_rows.append(row)
+                if changed_row_ids and store is not None:
+                    store.conn.commit()
 
         if changed_row_ids:
             model._invalidate_unique_values(StagingColumn.TAGS)
@@ -217,9 +242,10 @@ class TaggingController(QObject):
                     row_id = model.record_id(row) if hasattr(model, "record_id") else row
                     model.sync_callback(row_id, model.records[row])
 
-        self.app.view_controller.update_library_views(tree_delay_ms=0)
-        if self.app.search_controller.current_query:
-            self.app.search_controller.execute_search()
+        if not payload.get("db_applied"):
+            self.app.view_controller.update_library_views(tree_delay_ms=0)
+            if self.app.search_controller.current_query:
+                self.app.search_controller.execute_search()
 
         duplicate_count = int(payload.get("duplicate_file_count") or 0)
         self._last_duplicate_count = duplicate_count

@@ -56,7 +56,9 @@ class WorkerManager(QObject):
 
             self.worker.progress.connect(self.progress.emit)
             worker = self.worker
-            self.worker.finished.connect(lambda new_recs, app_val, stats, w=worker: self._on_finished(w, "scan", (new_recs, app_val, stats)))
+            self.worker.finished.connect(
+                lambda payload, w=worker: self._on_finished(w, "scan", payload)
+            )
             self.worker.finished.connect(self.worker.deleteLater)
             self.worker.error.connect(lambda err, w=worker: self._on_error(w, err))
             self.worker.start(QThread.LowPriority)

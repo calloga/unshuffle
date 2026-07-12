@@ -30,13 +30,6 @@ def coherence_points_from_app(
     engine = getattr(app, "engine", None)
     results = []
     result_by_id = {}
-    if engine is not None and getattr(engine, "db", None) is not None and getattr(engine, "session_id", None):
-        if hasattr(engine.db, "list_coherence_results"):
-            if hasattr(engine.db, "list_coherence_result_clusters"):
-                results = list(engine.db.list_coherence_result_clusters(engine.session_id))
-            else:
-                results = list(engine.db.list_coherence_results(engine.session_id))
-            result_by_id = {str(row.get("record_id") or ""): row for row in results}
     session_store = getattr(app, "session_store", None) or getattr(model, "store", None)
     if session_store is not None:
         if audio_type:
@@ -59,6 +52,13 @@ def coherence_points_from_app(
                     row_id = row.get("row_id") if row.get("row_id") is not None else row.get("id")
                     rows_by_id.setdefault(str(row_id), row)
             rows = list(rows_by_id.values())
+        if hasattr(session_store, "coherence_clusters_for_row_ids"):
+            row_ids = [
+                int(row.get("row_id") if row.get("row_id") is not None else row.get("id"))
+                for row in rows
+            ]
+            results = session_store.coherence_clusters_for_row_ids(row_ids)
+            result_by_id = {str(row.get("record_id") or ""): row for row in results}
         records = []
         for row in rows:
             if _staging_row_is_duplicate_shadow(row):
@@ -85,6 +85,13 @@ def coherence_points_from_app(
                 )
             )
         return records, results
+    if engine is not None and getattr(engine, "db", None) is not None and getattr(engine, "session_id", None):
+        if hasattr(engine.db, "list_coherence_results"):
+            if hasattr(engine.db, "list_coherence_result_clusters"):
+                results = list(engine.db.list_coherence_result_clusters(engine.session_id))
+            else:
+                results = list(engine.db.list_coherence_results(engine.session_id))
+            result_by_id = {str(row.get("record_id") or ""): row for row in results}
     model_records = list(getattr(model, "records", []) or []) if model is not None else []
     if model_records:
         return analyzer_points_from_model_records(model_records, result_by_id), results

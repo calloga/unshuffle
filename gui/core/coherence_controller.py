@@ -443,11 +443,25 @@ class CoherenceController(QObject):
             return 0, set()
         if not hasattr(engine.db, "list_coherence_results") or not hasattr(engine.db, "list_anchor_candidates"):
             return 0, set()
-        coherence_results = engine.db.list_coherence_results(engine.session_id)
+        store = getattr(model, "store", None)
+        if store is not None and hasattr(store, "record_by_row_id"):
+            selected_records = [
+                record
+                for record_id in record_ids
+                if str(record_id).lstrip("-").isdigit()
+                for record in [store.record_by_row_id(int(record_id))]
+                if record is not None
+            ]
+            coherence_results = store.coherence_clusters_for_row_ids(
+                int(record_id) for record_id in record_ids if str(record_id).lstrip("-").isdigit()
+            )
+        else:
+            selected_records = model.records
+            coherence_results = engine.db.list_coherence_results(engine.session_id)
         anchor_rows = engine.db.list_anchor_candidates(engine.session_id, state="candidate")
         promote_ids, promoted_record_ids = coherence_anchor_promotions.matching_anchor_promotions(
             record_ids,
-            model.records,
+            selected_records,
             coherence_results,
             anchor_rows,
         )
@@ -553,25 +567,43 @@ class CoherenceController(QObject):
         coherence_navigation.select_source_rows(self.app, rows)
 
     def _use_cached_coherence_state(self, engine) -> bool:
-        results = engine.db.list_coherence_results(engine.session_id)
-        if not results:
-            logging.info("Coherence cache miss for session %s: no cached results.", engine.session_id)
-            return False
-        session_state = getattr(self.app, "acoustic_session_state", None)
-        staging_ids = session_state.staging_record_ids() if session_state is not None else {
-            str(row.get("row_id")) for row in engine.db.get_staging_records(engine.session_id)
-        }
-        result_ids = {str(row.get("record_id")) for row in results}
-        if not result_ids or not result_ids.issubset(staging_ids):
-            logging.info(
-                "Coherence cache miss for session %s: %s result id(s), %s staging id(s), missing %s.",
-                engine.session_id,
-                len(result_ids),
-                len(staging_ids),
-                len(result_ids - staging_ids),
-            )
-            return False
-        logging.info("Coherence cache hit for session %s: %s result id(s).", engine.session_id, len(result_ids))
+        cache_stats_fn = getattr(engine.db, "coherence_cache_stats", None)
+        cache_stats = cache_stats_fn(engine.session_id) if callable(cache_stats_fn) else None
+        if isinstance(cache_stats, dict):
+            result_count = int(cache_stats.get("result_count") or 0)
+            missing_count = int(cache_stats.get("missing_count") or 0)
+            if not result_count:
+                logging.info("Coherence cache miss for session %s: no cached results.", engine.session_id)
+                return False
+            if missing_count:
+                logging.info(
+                    "Coherence cache miss for session %s: %s result id(s), missing %s.",
+                    engine.session_id,
+                    result_count,
+                    missing_count,
+                )
+                return False
+            logging.info("Coherence cache hit for session %s: %s result id(s).", engine.session_id, result_count)
+        else:
+            results = engine.db.list_coherence_results(engine.session_id)
+            if not results:
+                logging.info("Coherence cache miss for session %s: no cached results.", engine.session_id)
+                return False
+            session_state = getattr(self.app, "acoustic_session_state", None)
+            staging_ids = session_state.staging_record_ids() if session_state is not None else {
+                str(row.get("row_id")) for row in engine.db.get_staging_records(engine.session_id)
+            }
+            result_ids = {str(row.get("record_id")) for row in results}
+            if not result_ids or not result_ids.issubset(staging_ids):
+                logging.info(
+                    "Coherence cache miss for session %s: %s result id(s), %s staging id(s), missing %s.",
+                    engine.session_id,
+                    len(result_ids),
+                    len(staging_ids),
+                    len(result_ids - staging_ids),
+                )
+                return False
+            logging.info("Coherence cache hit for session %s: %s result id(s).", engine.session_id, len(result_ids))
         auto_staged = engine.db.list_refinement_candidates(engine.session_id, state="auto_staged")
         if getattr(self.app, "system_controller", None):
             self.app.system_controller.refresh_anchor_candidates()

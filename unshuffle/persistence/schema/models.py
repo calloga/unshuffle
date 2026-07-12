@@ -89,6 +89,108 @@ class SessionMetadata(BaseModel):
         )
 
 
+class ScanRun(BaseModel):
+    """Durable coordinator state for an initial or append scan."""
+
+    scan_id = TextField(primary_key=True)
+    session_id = TextField()
+    target_root = TextField()
+    roots_json = TextField()
+    mode = TextField(default="new")
+    state = TextField(default="running")
+    phase = TextField(default="discovery")
+    hash_version = TextField(null=True)
+    feature_version = TextField(null=True)
+    taxonomy_version = TextField(null=True)
+    classification_version = TextField(null=True)
+    tagging_version = TextField(null=True)
+    coherence_version = TextField(null=True)
+    source_signature = TextField(null=True)
+    discovered_count = IntegerField(default=0)
+    completed_count = IntegerField(default=0)
+    error_count = IntegerField(default=0)
+    last_error_json = TextField(null=True)
+    created_at = DateTimeField(default=datetime.now)
+    updated_at = DateTimeField(default=datetime.now)
+
+    class Meta:
+        table_name = "scan_runs"
+
+
+class ScanDirectory(BaseModel):
+    """Compact directory-only structural state for a resumable scan."""
+
+    scan_id = TextField()
+    directory_id = IntegerField()
+    discovery_order = IntegerField()
+    parent_directory_id = IntegerField(null=True)
+    depth = IntegerField(default=0)
+    normalized_path = TextField()
+    display_name = TextField()
+    is_preserved = IntegerField(default=0)
+    is_protected = IntegerField(default=0)
+    token_blob = BlobField(null=True)
+    descendant_token_blob = BlobField(null=True)
+    immediate_directory_count = IntegerField(default=0)
+    immediate_file_count = IntegerField(default=0)
+    descendant_count = IntegerField(default=0)
+    role_flags = IntegerField(default=0)
+    pack_weight = FloatField(default=0.0)
+    weight_evidence_json = TextField(default="{}")
+    structure_state = TextField(default="pending")
+
+    class Meta:
+        table_name = "scan_directories"
+        primary_key = CompositeKey("scan_id", "directory_id")
+
+
+class ScanItem(BaseModel):
+    """Per-file durable state; production scan workers hydrate only bounded batches."""
+
+    scan_id = TextField()
+    item_id = IntegerField()
+    discovery_order = IntegerField()
+    parent_directory_id = IntegerField()
+    normalized_path = TextField()
+    sample_name = TextField()
+    extension = TextField(default="")
+    size = IntegerField(default=0)
+    mtime = FloatField(null=True)
+    mtime_ns = IntegerField(null=True)
+    is_preserved = IntegerField(default=0)
+    is_protected = IntegerField(default=0)
+    is_supported_audio = IntegerField(default=0)
+    discovery_state = TextField(default="ready")
+    hash_state = TextField(default="pending")
+    fast_hash = TextField(null=True)
+    effective_hash = TextField(null=True)
+    analysis_state = TextField(default="pending")
+    analysis_error_code = TextField(null=True)
+    analysis_error_text = TextField(null=True)
+    analysis_attempts = IntegerField(default=0)
+    canonical_analysis_item_id = IntegerField(null=True)
+    classification_state = TextField(default="pending")
+    pack = TextField(null=True)
+    category = TextField(null=True)
+    subcategory = TextField(null=True)
+    audio_type = TextField(null=True)
+    confidence = TextField(null=True)
+    duration = FloatField(null=True)
+    tags = TextField(null=True)
+    pack_candidates = TextField(null=True)
+    evidence_json = TextField(null=True)
+    analysis_status = TextField(null=True)
+    analysis_tags_json = TextField(null=True)
+    duplicate_of_item_id = IntegerField(null=True)
+    staging_state = TextField(default="pending")
+    claimed_at = DateTimeField(null=True)
+    claim_owner = TextField(null=True)
+
+    class Meta:
+        table_name = "scan_items"
+        primary_key = CompositeKey("scan_id", "item_id")
+
+
 class Record(BaseModel):
     """File records for a session."""
     id = IntegerField(primary_key=True)

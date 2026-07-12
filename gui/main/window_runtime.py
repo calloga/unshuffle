@@ -16,12 +16,14 @@ def apply_runtime_engine(window, engine) -> None:
 
         window.search_controller.search_engine.set_bridge(SearchBridge(engine))
         window.data_manager.set_bridge(PersistenceBridge(engine))
-        window.library_tab.set_saved_filters(window.settings_controller.get_saved_filters())
+        if not getattr(window, "_scan_finalizing", False):
+            window.library_tab.set_saved_filters(window.settings_controller.get_saved_filters())
     window.worker_manager.set_engine(engine)
-    try:
-        window.filter_controller.refresh_dock_filters()
-    except Exception:
-        logging.exception("Failed to refresh dock filters after runtime context update.")
+    if not getattr(window, "_scan_finalizing", False):
+        try:
+            window.filter_controller.refresh_dock_filters()
+        except Exception:
+            logging.exception("Failed to refresh dock filters after runtime context update.")
     if window.system_controller is not None:
         try:
             window.system_controller.refresh_capabilities()

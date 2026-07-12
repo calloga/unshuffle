@@ -15,8 +15,18 @@ def _normalized_source_path(value: Any) -> str:
     return Path(str(value or "")).as_posix()
 
 
-def upsert_coherence_results(conn: sqlite3.Connection, session_id: str, results: list[Any]) -> None:
+def clear_generated_coherence_audit(conn: sqlite3.Connection, session_id: str) -> None:
     conn.execute("DELETE FROM coherence_results WHERE session_id = ?", (session_id,))
+    conn.execute(
+        "DELETE FROM refinement_candidates WHERE session_id = ? AND state IN ('pending', 'auto_staged')",
+        (session_id,),
+    )
+    conn.execute("DELETE FROM anchor_profiles WHERE session_id = ? AND state = 'candidate'", (session_id,))
+
+
+def append_coherence_results(conn: sqlite3.Connection, session_id: str, results: list[Any]) -> None:
+    if not results:
+        return
     conn.executemany(
         """
         INSERT INTO coherence_results (
@@ -26,6 +36,19 @@ def upsert_coherence_results(conn: sqlite3.Connection, session_id: str, results:
             nearest_neighbor_summary_json, anchor_fit_status, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(session_id, record_id) DO UPDATE SET
+            category=excluded.category,
+            subcategory=excluded.subcategory,
+            coherence_status=excluded.coherence_status,
+            coherence_score=excluded.coherence_score,
+            cluster_id=excluded.cluster_id,
+            is_outlier=excluded.is_outlier,
+            review_reason=excluded.review_reason,
+            suggested_alternate_category=excluded.suggested_alternate_category,
+            suggested_alternate_subcategory=excluded.suggested_alternate_subcategory,
+            nearest_neighbor_summary_json=excluded.nearest_neighbor_summary_json,
+            anchor_fit_status=excluded.anchor_fit_status,
+            updated_at=CURRENT_TIMESTAMP
         """,
         [
             (
@@ -46,6 +69,11 @@ def upsert_coherence_results(conn: sqlite3.Connection, session_id: str, results:
             for result in results
         ],
     )
+
+
+def upsert_coherence_results(conn: sqlite3.Connection, session_id: str, results: list[Any]) -> None:
+    conn.execute("DELETE FROM coherence_results WHERE session_id = ?", (session_id,))
+    append_coherence_results(conn, session_id, results)
 
 
 def list_coherence_results(conn: sqlite3.Connection, session_id: str) -> list[dict[str, Any]]:
@@ -83,11 +111,38 @@ def list_coherence_result_clusters(conn: sqlite3.Connection, session_id: str) ->
     ]
 
 
+def coherence_cache_stats(conn: sqlite3.Connection, session_id: str) -> dict[str, int]:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS result_count,
+            COALESCE(SUM(NOT EXISTS (
+                SELECT 1 FROM staging_records AS staging
+                WHERE staging.session_id = result.session_id
+                  AND CAST(staging.row_id AS TEXT) = result.record_id
+            )), 0) AS missing_count
+        FROM coherence_results AS result
+        WHERE result.session_id = ?
+        """,
+        (session_id,),
+    ).fetchone()
+    return {
+        "result_count": int(row[0] if row is not None else 0),
+        "missing_count": int(row[1] if row is not None else 0),
+    }
+
+
 def upsert_refinement_candidates(conn: sqlite3.Connection, session_id: str, candidates: list[Any]) -> None:
     conn.execute(
         "DELETE FROM refinement_candidates WHERE session_id = ? AND state IN ('pending', 'auto_staged')",
         (session_id,),
     )
+    if not candidates:
+        return
+    append_refinement_candidates(conn, session_id, candidates)
+
+
+def append_refinement_candidates(conn: sqlite3.Connection, session_id: str, candidates: list[Any]) -> None:
     if not candidates:
         return
     conn.executemany(
@@ -256,8 +311,62 @@ def list_coherence_review_decisions(
     return list(rows_by_path.values())
 
 
+def apply_target_review_decisions_to_staging(conn: sqlite3.Connection, session_id: str) -> int:
+    exact = conn.execute(
+        """
+        UPDATE staging_records AS staging SET
+            audio_type = COALESCE(NULLIF((SELECT target_audio_type FROM coherence_review_decisions
+                WHERE source_path = staging.source_path AND decision_type = 'target'), ''), audio_type),
+            category = COALESCE(NULLIF((SELECT target_category FROM coherence_review_decisions
+                WHERE source_path = staging.source_path AND decision_type = 'target'), ''), category),
+            subcategory = COALESCE((SELECT target_subcategory FROM coherence_review_decisions
+                WHERE source_path = staging.source_path AND decision_type = 'target'), subcategory)
+        WHERE staging.session_id = ? AND EXISTS (
+            SELECT 1 FROM coherence_review_decisions
+            WHERE source_path = staging.source_path AND decision_type = 'target'
+        )
+        """,
+        (session_id,),
+    )
+    by_hash = conn.execute(
+        """
+        WITH unique_staging AS (
+            SELECT hash FROM staging_records
+            WHERE session_id = ? AND COALESCE(hash, '') != ''
+            GROUP BY hash HAVING COUNT(*) = 1
+        ),
+        unique_decisions AS (
+            SELECT file_hash,
+                   MAX(target_audio_type) AS target_audio_type,
+                   MAX(target_category) AS target_category,
+                   MAX(target_subcategory) AS target_subcategory
+            FROM coherence_review_decisions
+            WHERE decision_type = 'target' AND COALESCE(file_hash, '') != ''
+            GROUP BY file_hash HAVING COUNT(*) = 1
+        )
+        UPDATE staging_records AS staging SET
+            audio_type = COALESCE(NULLIF((SELECT target_audio_type FROM unique_decisions WHERE file_hash = staging.hash), ''), audio_type),
+            category = COALESCE(NULLIF((SELECT target_category FROM unique_decisions WHERE file_hash = staging.hash), ''), category),
+            subcategory = COALESCE((SELECT target_subcategory FROM unique_decisions WHERE file_hash = staging.hash), subcategory)
+        WHERE staging.session_id = ?
+          AND staging.hash IN (SELECT hash FROM unique_staging)
+          AND staging.hash IN (SELECT file_hash FROM unique_decisions)
+          AND NOT EXISTS (
+              SELECT 1 FROM coherence_review_decisions
+              WHERE source_path = staging.source_path AND decision_type = 'target'
+          )
+        """,
+        (session_id, session_id),
+    )
+    return max(0, int(exact.rowcount or 0)) + max(0, int(by_hash.rowcount or 0))
+
+
 def upsert_anchor_candidates(conn: sqlite3.Connection, session_id: str, anchors: list[Any]) -> None:
     conn.execute("DELETE FROM anchor_profiles WHERE session_id = ? AND state = 'candidate'", (session_id,))
+    append_anchor_candidates(conn, session_id, anchors)
+
+
+def append_anchor_candidates(conn: sqlite3.Connection, session_id: str, anchors: list[Any]) -> None:
     if not anchors:
         return
     _upsert_anchor_profiles(conn, session_id, anchors, update_state=False)

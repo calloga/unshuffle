@@ -20,6 +20,19 @@ class AcousticSessionState:
         model = getattr(app, "model", None)
         engine = getattr(app, "engine", None)
         store = getattr(model, "store", None)
+        if store is not None and hasattr(store, "acoustic_state_digest"):
+            conn = getattr(store, "conn", None)
+            total_changes = getattr(conn, "total_changes", None)
+            revision = (
+                (str(getattr(engine, "session_id", "") or ""), total_changes)
+                if isinstance(total_changes, int)
+                else None
+            )
+            if self._last_key and revision == self._last_revision:
+                return self._last_key
+            self._last_key = str(store.acoustic_state_digest() or "")
+            self._last_revision = revision
+            return self._last_key
         if store is not None and hasattr(store, "acoustic_state_rows"):
             conn = getattr(store, "conn", None)
             total_changes = getattr(conn, "total_changes", None)

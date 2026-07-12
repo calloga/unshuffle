@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import json
 
-from unshuffle.core import tags_to_search_text
+from unshuffle.core import parse_tags, tags_to_search_text
 
 
-def build_staging_rows(records, *, start_index: int = 0):
-    rows = []
+def iter_staging_rows(records, *, start_index: int = 0):
     for i, rec in enumerate(records, start=max(0, int(start_index))):
         if hasattr(rec, "staging_row_id"):
             rec.staging_row_id = i
@@ -27,8 +26,7 @@ def build_staging_rows(records, *, start_index: int = 0):
         else:
             evidence.pop("duplicate_shadow", None)
         tags_clean = tags_to_search_text(rec.tags)
-        rows.append(
-            (
+        yield (
                 i,
                 str(rec.source_path),
                 rec.source_path.name,
@@ -50,9 +48,64 @@ def build_staging_rows(records, *, start_index: int = 0):
                 getattr(rec, "analysis_tags_json", None),
                 rec.preserved_root,
                 rec.is_preserved,
-            )
         )
-    return rows
+
+
+def build_staging_rows(records, *, start_index: int = 0):
+    """Compatibility helper for callers that explicitly need a materialized list."""
+    return list(iter_staging_rows(records, start_index=start_index))
+
+
+def iter_scan_item_staging_rows(row_batches, *, start_index: int = 0):
+    row_id = max(0, int(start_index))
+    for batch in row_batches:
+        for item in batch:
+            is_shadow = int(item.get("duplicate_rank") or 1) > 1
+            try:
+                evidence = json.loads(item.get("evidence_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                evidence = {}
+            if not isinstance(evidence, dict):
+                evidence = {}
+            tags = parse_tags(item.get("tags"))
+            if is_shadow:
+                tags = [*tags, "duplicate"]
+                evidence["duplicate_shadow"] = {
+                    "is_shadow": True,
+                    "duplicate_of_hash": item.get("canonical_hash"),
+                    "duplicate_of_path": item.get("canonical_path"),
+                }
+
+            def inherited(name, default=None):
+                if is_shadow and item.get(f"canonical_{name}") is not None:
+                    return item.get(f"canonical_{name}")
+                value = item.get(name)
+                return default if value is None else value
+
+            yield (
+                row_id,
+                item["normalized_path"],
+                item["sample_name"],
+                inherited("pack", ""),
+                inherited("category", "Uncategorized"),
+                inherited("subcategory", ""),
+                inherited("audio_type", "Oneshots"),
+                tags_to_search_text(tags),
+                inherited("confidence", "0.0"),
+                inherited("duration", 0.0),
+                item.get("effective_hash") or "",
+                item.get("fast_hash"),
+                inherited("pack_candidates", "[]"),
+                json.dumps(evidence, default=str),
+                item.get("feature_vector"),
+                item.get("feature_space_version"),
+                item.get("feature_schema_json"),
+                inherited("analysis_status"),
+                inherited("analysis_tags_json", "[]"),
+                None,
+                False,
+            )
+            row_id += 1
 
 
 def rewrite_staging_from_model(app):

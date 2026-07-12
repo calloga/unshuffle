@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from collections import OrderedDict
 import logging
 import time
 import numpy as np
@@ -25,11 +26,16 @@ class SpatialIndex:
         self.index.init_index(
             max_elements=self.num_elements,
             ef_construction=ef_construction,
-            M=M
+            M=M,
+            random_seed=100,
         )
         
         if self.num_elements > 0:
-            self.index.add_items(self.vectors, np.arange(self.num_elements))
+            self.index.add_items(
+                self.vectors,
+                np.arange(self.num_elements),
+                num_threads=1,
+            )
 
         self.index.set_ef(50)
         logging.getLogger("unshuffle").debug(
@@ -56,8 +62,43 @@ class SpatialIndex:
             return np.array([[]], dtype=int), np.array([[]], dtype=np.float32)
             
         self.index.set_ef(max(50, k))
-        labels, distances = self.index.knn_query(query_vector, k=k)
+        labels, distances = self.index.knn_query(query_vector, k=k, num_threads=1)
         return labels, distances
+
+
+class SparseSimilarityGraph:
+    """Compact symmetric k-NN graph without a SciPy runtime dependency."""
+
+    def __init__(self, neighbors: np.ndarray, weights: np.ndarray) -> None:
+        self.neighbors = np.asarray(neighbors, dtype=np.int32)
+        self.weights = np.asarray(weights, dtype=np.float64)
+        self.shape = (self.neighbors.shape[0], self.neighbors.shape[0])
+        valid = self.neighbors >= 0
+        self._valid = valid
+        self._rows = np.repeat(np.arange(self.shape[0], dtype=np.int32), self.neighbors.shape[1])[valid.ravel()]
+        self._cols = self.neighbors[valid]
+        self._edge_weights = self.weights[valid]
+        self.degree = self.weights.sum(axis=1)
+        self.degree += np.bincount(self._cols, weights=self._edge_weights, minlength=self.shape[0])
+
+    def sum(self, axis=None):
+        if axis == 1:
+            return self.degree.copy()
+        return float(self.degree.sum())
+
+    def normalized_matmul(self, values: np.ndarray) -> np.ndarray:
+        array = np.asarray(values, dtype=np.float64)
+        was_vector = array.ndim == 1
+        if was_vector:
+            array = array[:, None]
+        safe_degree = np.where(self.degree > 1e-12, self.degree, 1.0)
+        scaled = array / np.sqrt(safe_degree)[:, None]
+        output = np.zeros_like(scaled)
+        edge_values = self._edge_weights[:, None]
+        np.add.at(output, self._rows, edge_values * scaled[self._cols])
+        np.add.at(output, self._cols, edge_values * scaled[self._rows])
+        output /= np.sqrt(safe_degree)[:, None]
+        return output[:, 0] if was_vector else output
 
 
 class SparsePairwiseDistances:
@@ -66,7 +107,14 @@ class SparsePairwiseDistances:
     Computes exact custom distances for local neighborhoods (retrieved via HNSW)
     and computes other requested pairwise distances on-the-fly.
     """
-    def __init__(self, records: list[Any], engine: Any, nearest_k: int, M: int = 100) -> None:
+    def __init__(
+        self,
+        records: list[Any],
+        engine: Any,
+        nearest_k: int,
+        M: int = 100,
+        on_demand_cache_size: int = 8192,
+    ) -> None:
         self.records = records
         self.engine = engine
         self.n = len(records)
@@ -84,8 +132,10 @@ class SparsePairwiseDistances:
             
         spatial_index = SpatialIndex(vectors)
 
-        self.nearest = np.zeros((self.n, nearest_k), dtype=int)
-        self._cache: dict[tuple[int, int], float] = {}
+        self.nearest = np.full((self.n, nearest_k), -1, dtype=np.int32)
+        self.nearest_distances = np.full((self.n, nearest_k), np.inf, dtype=np.float32)
+        self._on_demand_cache: OrderedDict[tuple[int, int], float] = OrderedDict()
+        self._on_demand_cache_size = max(0, int(on_demand_cache_size))
         
 
         actual_M = min(M, self.n)
@@ -115,8 +165,7 @@ class SparsePairwiseDistances:
                 
                 for rank, (c_idx, dist) in enumerate(top_k):
                     self.nearest[i, rank] = c_idx
-                    self._cache[(i, c_idx)] = float(dist)
-                    self._cache[(c_idx, i)] = float(dist)
+                    self.nearest_distances[i, rank] = float(dist)
         del spatial_index
                         
     def __getitem__(self, key: Any) -> Any:
@@ -130,16 +179,28 @@ class SparsePairwiseDistances:
                 col_idx = int(col)
                 if row_idx == col_idx:
                     return 0.0
-                if (row_idx, col_idx) in self._cache:
-                    return self._cache[(row_idx, col_idx)]
+                positions = np.flatnonzero(self.nearest[row_idx] == col_idx)
+                if positions.size:
+                    return float(self.nearest_distances[row_idx, int(positions[0])])
+                reverse_positions = np.flatnonzero(self.nearest[col_idx] == row_idx)
+                if reverse_positions.size:
+                    return float(self.nearest_distances[col_idx, int(reverse_positions[0])])
+                cache_key = (min(row_idx, col_idx), max(row_idx, col_idx))
+                cached = self._on_demand_cache.get(cache_key)
+                if cached is not None:
+                    self._on_demand_cache.move_to_end(cache_key)
+                    return cached
                 
                 dist = float(self.engine.similarity_engine.calculate_distance(
                     self.records[row_idx].vector, self.records[col_idx].vector
                 ))
                 if not math.isfinite(dist):
                     dist = 1e9
-                self._cache[(row_idx, col_idx)] = dist
-                self._cache[(col_idx, row_idx)] = dist
+                if self._on_demand_cache_size:
+                    self._on_demand_cache[cache_key] = dist
+                    self._on_demand_cache.move_to_end(cache_key)
+                    while len(self._on_demand_cache) > self._on_demand_cache_size:
+                        self._on_demand_cache.popitem(last=False)
                 return dist
                 
 

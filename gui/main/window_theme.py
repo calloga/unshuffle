@@ -21,7 +21,7 @@ def apply_theme(window, theme_key: str) -> None:
     window.setUpdatesEnabled(False)
     try:
         apply_theme_stylesheet(window, qss, app_for_stylesheet)
-        refresh_theme_bindings(window, visible_only=window.isVisible())
+        refresh_theme_bindings(window)
         if hasattr(window, "custom_menu_bar"):
             window.custom_menu_bar.set_theme_checked(window.theme_manager.requested_theme_key)
     finally:

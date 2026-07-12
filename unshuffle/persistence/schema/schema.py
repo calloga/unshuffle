@@ -54,10 +54,10 @@ def migrations_up(connection: sqlite3.Connection ) -> None:
         return int(_file_name.split('_')[0])
 
     # migrate from old versioning
-    _file_models=[
+    _file_models=sorted([
         FileModel(version=_parse_version(f.name), name=str(f), file=f)
         for f in migrations_folder.iterdir() if f.is_file()
-    ]
+    ], key=lambda model: (model.version, model.file.name))
 
     if not _file_models:
         return
@@ -85,6 +85,21 @@ def migrations_up(connection: sqlite3.Connection ) -> None:
     ensure_fast_hash_columns(connection)
     ensure_staging_view_indexes(connection)
     ensure_custom_tree_memberships(connection)
+    if not _table_exists(connection, "scan_runs"):
+        migration = migrations_folder / "009_add_resumable_scan_pipeline.sql"
+        connection.executescript(migration.read_text(encoding="utf-8"))
+        connection.execute(
+            "UPDATE schema_version SET version = MAX(version, ?)",
+            (9,),
+        )
+
+
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
 
 def initialize_v1_schema(conn: sqlite3.Connection, schema_version: int) -> None:
     # ensure schema_version table exists

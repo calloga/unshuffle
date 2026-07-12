@@ -347,7 +347,12 @@ def on_worker_finished(app, worker_type, res):
 
     if worker_type == "scan":
         invalidate_history_cache(app.settings.value("last_target", ""))
-        new_records, is_append, stats = res
+        if isinstance(res, dict):
+            new_records = list(res.get("records") or [])
+            is_append = bool(res.get("append", False))
+            stats = dict(res.get("stats") or {})
+        else:
+            new_records, is_append, stats = res
         app.workflow_controller.handle_scan_finished(new_records, is_append, stats)
     elif worker_type == "commit":
         invalidate_history_cache(app.settings.value("last_target", ""))

@@ -105,6 +105,7 @@ def test_bulk_feature_extraction_parses_jsonl_success_and_failure(tmp_path: Path
     assert result[good].vector == [0.1] * FEATURE_VECTOR_SIZE
     assert result[bad] is None
     assert engine.extraction_failure_tag(bad) == "Empty"
+    assert engine.extraction_failure_message(bad) == "File is empty"
 
 
 def test_bulk_feature_extraction_retries_decode_failures_but_not_terminal_rejections(tmp_path: Path):
@@ -230,6 +231,33 @@ def test_failed_batch_retries_files_with_bounded_parallelism(tmp_path: Path):
     assert fallback.call_count == len(samples)
     assert peak == engine.FALLBACK_EXTRACTOR_WORKERS
     assert set(result) == set(samples)
+
+
+def test_batch_and_retry_processes_share_one_global_budget(tmp_path: Path):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    engine = SimilarityEngine(extractor_path=str(tmp_path / "extractor.exe"))
+    engine.configure_extraction_runtime(max_processes=2)
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def occupy_slot(_index):
+        nonlocal active, peak
+        with engine._process_slot():
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(occupy_slot, range(8)))
+
+    assert peak == 2
 
 
 def test_audio_duration_logs_debug_for_mutagen_failures(tmp_path: Path):

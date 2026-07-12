@@ -14,9 +14,11 @@ from unshuffle.logic.tagging import (
     GENRE_TAG_PREFIX,
     POSSIBLE_DUPLICATE_TAG,
     compute_tagging_pass,
+    compute_db_duplicate_tags,
     genre_from_tags,
     merge_generated_tags,
 )
+from unshuffle.logic.tagging import service as tagging_service
 
 
 def _blob(values):
@@ -72,6 +74,33 @@ def test_tagging_pass_flags_near_identical_acoustic_vectors():
     assert result.duplicate_file_count == 2
     assert result.tags_by_path[str(first.source_path).replace("\\", "/")] == [POSSIBLE_DUPLICATE_TAG]
     assert result.tags_by_path[str(second.source_path).replace("\\", "/")] == [POSSIBLE_DUPLICATE_TAG]
+
+
+def test_db_tagging_matches_in_memory_duplicate_detection(tmp_path):
+    vec = _blob(_v([1.0, 0.5, 0.4, 0.2, 0.2, *([0.1] * 12), 0.7]))
+    far = _blob(_v([2.0, 0.5, 0.4, 0.2, 0.2, *([0.1] * 12), 0.7]))
+    db = UnshuffleDB(tmp_path / "tagging.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), tmp_path, "pending")
+        rows = []
+        for index, (name, blob) in enumerate((("a.wav", vec), ("b.wav", vec), ("far.wav", far))):
+            row = list(_staging_row(index, name))
+            row[14] = blob
+            row[9] = 0.7
+            rows.append(tuple(row))
+        db.add_staging_records_bulk("session", rows)
+
+        assert compute_db_duplicate_tags(db, "session") == 2
+        tags = {
+            int(row[0]): str(row[1] or "")
+            for row in db.conn.execute(
+                "SELECT row_id, tags FROM staging_records WHERE session_id = ? ORDER BY row_id",
+                ("session",),
+            )
+        }
+        assert tags == {0: POSSIBLE_DUPLICATE_TAG, 1: POSSIBLE_DUPLICATE_TAG, 2: ""}
+    finally:
+        db.close()
 
 
 def test_duplicate_detection_checks_later_pairs_in_same_bucket(monkeypatch):
@@ -309,6 +338,72 @@ def test_tagging_controller_persists_generated_tags_for_db_backed_model(tmp_path
         app.search_controller.execute_search.assert_called_once_with()
     finally:
         db.close()
+
+
+def test_tagging_controller_starts_db_worker_without_materializing_records(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from gui.core import workers
+
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_staging_row(10, "first.wav")])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+
+        class ExplodingRecords:
+            def __iter__(self):
+                raise AssertionError("DB tagging must not hydrate model.records")
+
+        model.records = ExplodingRecords()
+        started = []
+        monkeypatch.setattr(workers.TaggingWorker, "start", lambda self: started.append(self))
+
+        class _App(QObject):
+            def __init__(self):
+                super().__init__()
+                self.model = model
+                self.engine = SimpleNamespace(db=db, session_id="session")
+                self.acoustic_session_state = None
+                self.footer = mock.Mock()
+
+        controller = TaggingController(_App())
+        controller.start_tagging_pass(schedule_coherence=False)
+
+        assert len(started) == 1
+        assert started[0].records == []
+        assert started[0].db is db
+        assert started[0].session_id == "session"
+    finally:
+        db.close()
+
+
+def test_large_duplicate_bucket_uses_ann_and_marks_every_identical_row(monkeypatch):
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            "CREATE TEMP TABLE tagging_candidates ("
+            "bucket_duration INTEGER, bucket_signature TEXT, row_id INTEGER PRIMARY KEY, "
+            "source_path TEXT, duration REAL, feature_vector BLOB)"
+        )
+        conn.execute("CREATE TEMP TABLE tagging_matches (row_id INTEGER PRIMARY KEY)")
+        vector = _blob([0.2] * FEATURE_VECTOR_SIZE)
+        conn.executemany(
+            "INSERT INTO tagging_candidates VALUES (1, 'same', ?, ?, 0.5, ?)",
+            [(index, f"D:/Samples/{index}.wav", vector) for index in range(2001)],
+        )
+        monkeypatch.setattr(
+            tagging_service,
+            "_mark_large_bucket_exact",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("quadratic fallback used")),
+        )
+
+        tagging_service._mark_large_bucket_ann(conn, 1, "same", 2001, 0.025, 0.05)
+
+        assert conn.execute("SELECT COUNT(*) FROM tagging_matches").fetchone()[0] == 2001
+    finally:
+        conn.close()
 
 
 def test_sidebar_hides_possible_duplicate_filter_until_enabled():

@@ -31,6 +31,9 @@ class ViewController(QObject):
         self._tree_rebuild_timer.timeout.connect(self.do_tree_rebuild)
         self._tree_rebuild_pending = False
         self._map_prewarm_scheduled = False
+        self._map_prewarm_waiting_for_coherence = False
+        self._pending_map_prewarm = False
+        self._pending_duplicate_map_prewarm = False
         self._tree_prewarm_scheduled = False
         self._tree_build_signature = None
 
@@ -95,6 +98,9 @@ class ViewController(QObject):
         self.set_view_mode(next_view_mode(self.app.library_tab.current_view_mode(), self._view_available))
 
     def refresh_library_map(self, *, force: bool = False) -> None:
+        if self._coherence_is_running():
+            self._defer_map_until_coherence(duplicate=False)
+            return
         started = time.perf_counter()
         library_tab = getattr(self.app, "library_tab", None)
         if library_tab is None or not self._view_available("map"):
@@ -171,10 +177,16 @@ class ViewController(QObject):
         self._map_prewarm_scheduled = False
         if not getattr(self.app, "model", None):
             return
+        if self._coherence_is_running():
+            self._defer_map_until_coherence(duplicate=False)
+            return
         self.refresh_library_map(force=False)
 
     def prewarm_possible_duplicate_map(self) -> None:
         """Keep generated-duplicate points inside the warm capped map data set."""
+        if self._coherence_is_running():
+            self._defer_map_until_coherence(duplicate=True)
+            return
         store = getattr(self.app, "session_store", None)
         if store is None or not hasattr(store, "tagged_row_ids") or not self._view_available("map"):
             return
@@ -188,6 +200,39 @@ class ViewController(QObject):
         page.refresh_from_app(self.app, force=False, priority_row_ids=row_ids)
         if hasattr(page, "prewarm_library_projections"):
             page.prewarm_library_projections()
+
+    def _coherence_is_running(self) -> bool:
+        controller = getattr(self.app, "coherence_controller", None)
+        return bool(controller is not None and getattr(controller, "_running_workers", None))
+
+    def _defer_map_until_coherence(self, *, duplicate: bool) -> None:
+        if duplicate:
+            self._pending_duplicate_map_prewarm = True
+        else:
+            self._pending_map_prewarm = True
+        if self._map_prewarm_waiting_for_coherence:
+            return
+        controller = getattr(self.app, "coherence_controller", None)
+        if controller is None or not hasattr(controller, "coherenceFinished"):
+            return
+        self._map_prewarm_waiting_for_coherence = True
+
+        def _resume_map_prewarm() -> None:
+            try:
+                controller.coherenceFinished.disconnect(_resume_map_prewarm)
+            except (RuntimeError, TypeError):
+                pass
+            self._map_prewarm_waiting_for_coherence = False
+            duplicate_pending = self._pending_duplicate_map_prewarm
+            map_pending = self._pending_map_prewarm
+            self._pending_duplicate_map_prewarm = False
+            self._pending_map_prewarm = False
+            if duplicate_pending:
+                QTimer.singleShot(0, self.prewarm_possible_duplicate_map)
+            elif map_pending:
+                QTimer.singleShot(0, self._prewarm_library_map_now)
+
+        controller.coherenceFinished.connect(_resume_map_prewarm)
 
     def prewarm_library_tree(self, *, delay_ms: int = 1600) -> None:
         if self._tree_prewarm_scheduled:

@@ -1,11 +1,14 @@
 import logging
 import gc
+import hashlib
+import os
 from functools import wraps
 from collections import Counter
 from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from unshuffle.core.paths import DB_FILE_NAME, SYSTEM_FOLDER_NAME
 from unshuffle.core.progress import PhaseProgress
+from unshuffle.core.resource_monitor import ResourceMonitor
 from ..models.library_tree import active_tree_levels_for_sort, build_tree_payload
 from .search_engine import SearchEngine
 
@@ -21,6 +24,22 @@ def safe_gc_run(func):
             if was_enabled:
                 gc.enable()
     return wrapper
+
+
+def _streaming_scan_enabled() -> bool:
+    value = str(os.getenv("UNSHUFFLE_STREAMING_SCAN", "1") or "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _db_native_scan_available(db_conn, *, append: bool) -> bool:
+    return bool(
+        _streaming_scan_enabled()
+        and db_conn is not None
+        and hasattr(db_conn, "iter_classified_scan_session_items")
+        and hasattr(db_conn, "classified_scan_session_stats")
+        and hasattr(db_conn, "add_staging_records_iter")
+        and (not append or hasattr(db_conn, "iter_classified_append_items"))
+    )
 
 
 def _staging_session_has_rows(db_conn, session_id: str) -> bool:
@@ -102,7 +121,7 @@ def _open_restore_db(target: Path, requested_session_id: str):
 class ScanWorker(QThread):
     """Background worker that runs the engine's scan phase."""
     progress = Signal(dict)
-    finished = Signal(list, bool, dict)
+    finished = Signal(dict)
     error = Signal(str)
 
     def __init__(self, engine, sources, acoustic_index=False, skip_expensive_hashes=None, min_confidence=None, append=False, existing_hashes=None, lib_hashes=None, current_records=None):
@@ -117,27 +136,44 @@ class ScanWorker(QThread):
         self.lib_hashes = set(lib_hashes or ())
         self.current_records = current_records or ()
 
-    @safe_gc_run
     def run(self):
+        monitor = ResourceMonitor("scan")
+        monitor.start()
         try:
-            self.engine.progress_callback = lambda d: self.progress.emit(d)
+            def report_progress(payload):
+                monitor.set_phase(payload.get("phase"))
+                self.progress.emit(payload)
+
+            self.engine.progress_callback = report_progress
+            engine_db = getattr(self.engine, "db", None)
+            db_native_scan = _db_native_scan_available(engine_db, append=self.append)
+            scan_ids = [
+                f"{self.engine.session_id}:"
+                f"{hashlib.sha1(str(Path(source).resolve()).encode('utf-8')).hexdigest()[:12]}"
+                for source in self.sources
+            ]
             plan = self.engine.prepare_plan(
                 self.sources,
                 acoustic_index=self.acoustic_index,
                 skip_expensive_hashes=self.skip_expensive_hashes,
                 min_confidence=self.min_confidence,
+                collect_records=not db_native_scan,
             )
             if getattr(self.engine, "interrupted", False) is True:
+                if engine_db is not None and hasattr(engine_db, "update_session_scan_runs"):
+                    engine_db.update_session_scan_runs(self.engine.session_id, state="paused")
                 self.finished.emit(
-                    [],
-                    self.append,
                     {
-                        "total_scanned": 0,
-                        "added_count": 0,
-                        "lib_dupe_count": 0,
-                        "session_dupe_count": 0,
-                        "total_dupe_count": 0,
-                        "cancelled": True,
+                        "records": [],
+                        "append": self.append,
+                        "stats": {
+                            "total_scanned": 0,
+                            "added_count": 0,
+                            "lib_dupe_count": 0,
+                            "session_dupe_count": 0,
+                            "total_dupe_count": 0,
+                            "cancelled": True,
+                        },
                     },
                 )
                 return
@@ -151,12 +187,49 @@ class ScanWorker(QThread):
                 message="Finding duplicates...",
             )
             duplicate_progress.emit(0, force=True)
-            new_records, lib_dupe_count, session_dupe_count = dedupe_plan_records(
-                plan, self.existing_hashes, self.lib_hashes
-            )
+            if db_native_scan:
+                if self.append:
+                    append_total = 0
+                    append_duplicates = 0
+                    append_categories = Counter()
+                    for batch in engine_db.iter_classified_append_items(
+                        self.engine.session_id,
+                        scan_ids,
+                        batch_size=1000,
+                    ):
+                        append_total += len(batch)
+                        append_duplicates += sum(int(row.get("duplicate_rank") or 1) > 1 for row in batch)
+                        append_categories.update(str(row.get("category") or "Uncategorized") for row in batch)
+                    persisted_stats = {
+                        "total": append_total,
+                        "duplicates": append_duplicates,
+                        "category_counts": dict(append_categories),
+                    }
+                else:
+                    persisted_stats = engine_db.classified_scan_session_stats(self.engine.session_id)
+                new_records = list(plan)
+                lib_dupe_count = 0
+                session_dupe_count = int(persisted_stats.get("duplicates", 0) or 0)
+            else:
+                new_records, lib_dupe_count, session_dupe_count = dedupe_plan_records(
+                    plan, self.existing_hashes, self.lib_hashes
+                )
             duplicate_progress.emit(max(1, len(plan)), force=True)
-            stats = scan_duplicate_stats(plan, new_records, lib_dupe_count, session_dupe_count)
-            stats["category_counts"] = scan_category_counts(plan)
+            if db_native_scan:
+                classified_total = int(persisted_stats.get("total", 0) or 0)
+                stats = {
+                    "total_scanned": classified_total + len(new_records),
+                    "added_count": classified_total - session_dupe_count + len(new_records),
+                    "lib_dupe_count": 0,
+                    "session_dupe_count": session_dupe_count,
+                    "total_dupe_count": session_dupe_count,
+                    "category_counts": dict(persisted_stats.get("category_counts") or {}),
+                }
+                for category, count in scan_category_counts(new_records).items():
+                    stats["category_counts"][category] = stats["category_counts"].get(category, 0) + count
+            else:
+                stats = scan_duplicate_stats(plan, new_records, lib_dupe_count, session_dupe_count)
+                stats["category_counts"] = scan_category_counts(plan)
             
             db_conn = getattr(self.engine, "db", None)
             owns_db_conn = False
@@ -189,9 +262,9 @@ class ScanWorker(QThread):
                 if not self.append and hasattr(db_conn, "ensure_verified_anchors_for_session"):
                     db_conn.ensure_verified_anchors_for_session(self.engine.session_id)
                 session_progress.emit(3)
-                from gui.utils.state import build_staging_rows
+                from gui.utils.state import iter_scan_item_staging_rows, iter_staging_rows
                 all_records = new_records
-                if hasattr(db_conn, "list_coherence_review_decisions"):
+                if not db_native_scan and hasattr(db_conn, "list_coherence_review_decisions"):
                     from .coherence_review_decisions import apply_target_review_decisions
 
                     applied_count = apply_target_review_decisions(db_conn, all_records)
@@ -212,9 +285,32 @@ class ScanWorker(QThread):
                             (int(getattr(rec, "staging_row_id", -1) or -1) for rec in self.current_records),
                             default=-1,
                         ) + 1
-                rows = build_staging_rows(all_records, start_index=start_index)
-                if rows:
-                    db_conn.add_staging_records_bulk(self.engine.session_id, rows)
+                if db_native_scan:
+                    scan_item_batches = (
+                        db_conn.iter_classified_append_items(self.engine.session_id, scan_ids)
+                        if self.append
+                        else db_conn.iter_classified_scan_session_items(self.engine.session_id)
+                    )
+                    scan_rows = iter_scan_item_staging_rows(
+                        scan_item_batches,
+                        start_index=start_index,
+                    )
+                    inserted = db_conn.add_staging_records_iter(self.engine.session_id, scan_rows)
+                    if all_records:
+                        db_conn.add_staging_records_iter(
+                            self.engine.session_id,
+                            iter_staging_rows(all_records, start_index=start_index + inserted),
+                        )
+                    if hasattr(db_conn, "apply_target_review_decisions_to_staging"):
+                        applied_count = db_conn.apply_target_review_decisions_to_staging(self.engine.session_id)
+                        if applied_count and hasattr(self.engine, "log"):
+                            self.engine.log(f"Applied {applied_count} remembered outlier review field change(s).")
+                elif hasattr(db_conn, "add_staging_records_iter"):
+                    rows = iter_staging_rows(all_records, start_index=start_index)
+                    db_conn.add_staging_records_iter(self.engine.session_id, rows)
+                else:
+                    rows = iter_staging_rows(all_records, start_index=start_index)
+                    db_conn.add_staging_records_bulk(self.engine.session_id, list(rows))
                 session_progress.emit(5)
                 try:
                     if hasattr(db_conn, "prune_ephemeral_state"):
@@ -222,15 +318,32 @@ class ScanWorker(QThread):
                 except Exception:
                     logging.debug("Post-scan database maintenance skipped.", exc_info=True)
                 session_progress.emit(6, force=True)
+                if hasattr(db_conn, "update_session_scan_runs"):
+                    db_conn.update_session_scan_runs(
+                        self.engine.session_id,
+                        state="staged",
+                        phase="readiness",
+                    )
             finally:
                 if owns_db_conn:
                     db_conn.close()
             
-            self.finished.emit(new_records, self.append, stats)
+            # Staging is authoritative from this point. Avoid retaining and
+            # queueing the complete DTO population into the GUI thread.
+            new_records.clear()
+            plan.clear()
+            self.finished.emit({"records": [], "append": self.append, "stats": stats})
         except Exception as e:
             logging.exception("ScanWorker encountered an error")
+            engine_db = getattr(self.engine, "db", None)
+            if engine_db is not None and hasattr(engine_db, "update_session_scan_runs"):
+                try:
+                    engine_db.update_session_scan_runs(self.engine.session_id, state="failed")
+                except Exception:
+                    logging.debug("Could not persist failed scan state.", exc_info=True)
             self.error.emit(str(e))
         finally:
+            monitor.stop()
             if getattr(self.engine, "progress_callback", None):
                 self.engine.progress_callback = None
 
@@ -432,15 +545,31 @@ class TaggingWorker(QThread):
     finished = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, request_id, records):
+    def __init__(self, request_id, records=None, *, db=None, session_id: str = ""):
         super().__init__()
         self.request_id = int(request_id)
-        self.records = list(records)
+        self.records = list(records or ())
+        self.db = db
+        self.session_id = str(session_id or "")
 
-    @safe_gc_run
     def run(self):
         try:
-            from unshuffle.logic.tagging import compute_tagging_pass
+            from unshuffle.logic.tagging import compute_db_duplicate_tags, compute_tagging_pass
+
+            if self.db is not None and self.session_id:
+                duplicate_count = compute_db_duplicate_tags(
+                    self.db,
+                    self.session_id,
+                    progress_callback=lambda payload: self.progress.emit(payload),
+                )
+                self.finished.emit({
+                    "request_id": self.request_id,
+                    "tags_by_path": {},
+                    "duplicate_matches": [],
+                    "duplicate_file_count": duplicate_count,
+                    "db_applied": True,
+                })
+                return
 
             result = compute_tagging_pass(
                 self.records,
@@ -480,7 +609,6 @@ class CoherenceWorker(QThread):
         self.session_id = str(session_id or "")
         self.force = bool(force)
 
-    @safe_gc_run
     def run(self):
         try:
             from unshuffle.logic.coherence import run_coherence_audit

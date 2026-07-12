@@ -212,6 +212,41 @@ class StagingSessionStore:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def acoustic_state_digest(self) -> str:
+        import hashlib
+
+        digest = hashlib.sha1()
+        digest.update(b"acoustic-state-v4\0")
+        digest.update(self.session_id.encode("utf-8", errors="surrogatepass"))
+        cursor = self.conn.execute(
+            """
+            SELECT row_id, source_path, hash, duration, audio_type, category, subcategory,
+                   LENGTH(feature_vector) AS vector_len
+            FROM staging_records
+            WHERE session_id = ?
+            ORDER BY row_id ASC, id ASC
+            """,
+            (self.session_id,),
+        )
+        count = 0
+        for row in cursor:
+            count += 1
+            values = (
+                int(row[0] or 0),
+                str(row[1] or "").replace("\\", "/"),
+                str(row[2] or ""),
+                f"{float(row[3] or 0.0):.6f}",
+                str(row[4] or ""),
+                str(row[5] or ""),
+                str(row[6] or ""),
+                int(row[7] or 0),
+            )
+            for value in values:
+                digest.update(str(value).encode("utf-8", errors="surrogatepass"))
+                digest.update(b"\0")
+        digest.update(str(count).encode("ascii"))
+        return digest.hexdigest() if count else ""
+
     def scan_dedupe_index(self) -> dict[str, Any]:
         """Build the append-scan identity index without hydrating PlanRecord DTOs."""
         index: dict[str, Any] = {
@@ -318,6 +353,18 @@ class StagingSessionStore:
             return None
         return plan_record_from_staging_row(rows[0], parse_tags)
 
+    def row_id_for_source_path(self, source_path: Path | str) -> int | None:
+        normalized = Path(source_path).as_posix()
+        row = self.conn.execute(
+            """
+            SELECT row_id FROM staging_records
+            WHERE session_id = ? AND REPLACE(source_path, '\\', '/') = ?
+            LIMIT 1
+            """,
+            (self.session_id, normalized),
+        ).fetchone()
+        return int(row[0]) if row is not None else None
+
     def iter_records(
         self,
         batch_size: int = 1000,
@@ -334,6 +381,36 @@ class StagingSessionStore:
             ]
             if records:
                 yield records
+
+    def count_buildable_records(self) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) FROM staging_records
+            WHERE session_id = ?
+              AND COALESCE(CASE WHEN json_valid(COALESCE(evidence_json, ''))
+                  THEN json_extract(evidence_json, '$.duplicate_shadow.is_shadow') ELSE 0 END, 0) != 1
+            """,
+            (self.session_id,),
+        ).fetchone()
+        return int(row[0] if row is not None else 0)
+
+    def iter_buildable_records(self, batch_size: int = 1000) -> Iterator[list[PlanRecord]]:
+        cursor = self.conn.execute(
+            """
+            SELECT * FROM staging_records
+            WHERE session_id = ?
+              AND COALESCE(CASE WHEN json_valid(COALESCE(evidence_json, ''))
+                  THEN json_extract(evidence_json, '$.duplicate_shadow.is_shadow') ELSE 0 END, 0) != 1
+            ORDER BY row_id ASC, id ASC
+            """,
+            (self.session_id,),
+        )
+        size = max(1, int(batch_size))
+        while True:
+            rows = cursor.fetchmany(size)
+            if not rows:
+                return
+            yield [plan_record_from_staging_row(dict(row), parse_tags) for row in rows]
 
     def iter_tree_records(
         self,
@@ -951,6 +1028,26 @@ class StagingSessionStore:
                         break
         return list(rows.values())[: int(limit)]
 
+    def coherence_clusters_for_row_ids(self, row_ids: Iterable[int]) -> list[dict[str, Any]]:
+        values = sorted({int(row_id) for row_id in row_ids})
+        results: list[dict[str, Any]] = []
+        for start in range(0, len(values), 800):
+            chunk = values[start:start + 800]
+            if not chunk:
+                continue
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = self.conn.execute(
+                f"""
+                SELECT record_id, cluster_id
+                FROM coherence_results
+                WHERE session_id = ? AND record_id IN ({placeholders})
+                ORDER BY record_id
+                """,
+                [self.session_id, *[str(value) for value in chunk]],
+            )
+            results.extend(dict(row) for row in cursor)
+        return results
+
     def group_counts(self, fields: list[str], query: StagingQuery | None = None) -> list[dict[str, Any]]:
         allowed = {"audio_type", "category", "subcategory", "pack"}
         selected = [field for field in fields if field in allowed]
@@ -1115,6 +1212,20 @@ class DbRecordSequence:
 
     def __iter__(self) -> Iterator[PlanRecord]:
         for batch in self.store.iter_records(batch_size=1500, query=None):
+            yield from batch
+
+
+class BuildableDbRecordSequence:
+    """Reiterable bounded DTO stream for build execution."""
+
+    def __init__(self, store: StagingSessionStore):
+        self.store = store
+
+    def __len__(self) -> int:
+        return self.store.count_buildable_records()
+
+    def __iter__(self) -> Iterator[PlanRecord]:
+        for batch in self.store.iter_buildable_records(batch_size=1000):
             yield from batch
 
 

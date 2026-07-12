@@ -173,7 +173,16 @@ class WorkflowController(QObject):
                     logging.exception("Failed to close previous engine.")
             
             try:
-                self.set_engine(create_workflow_bridge(Path(target)))
+                resume_session_id = ""
+                if not append:
+                    resume_session_id = workflow_scan_start.compatible_resumable_session_id(
+                        Path(target),
+                        [Path(source) for source in sources],
+                    )
+                if resume_session_id:
+                    self.set_engine(create_workflow_bridge(Path(target), session_id=resume_session_id))
+                else:
+                    self.set_engine(create_workflow_bridge(Path(target)))
             except Exception as e:
                 logging.error(f"Failed to initialize engine: {e}")
                 self._surface_workflow_error(f"Failed to initialize engine: {e}")
@@ -432,7 +441,7 @@ class WorkflowController(QObject):
         from ..utils import ui_helpers
         from PySide6.QtCore import QTimer
 
-        if not new_records and is_append:
+        if not new_records and is_append and int((stats or {}).get("total_scanned", 0) or 0) == 0:
             self.app.footer.log("<b>Notice:</b> No new files found to add.")
             self.app._scan_finalizing = False
             from ..utils.ui_helpers import set_ui_busy
@@ -479,6 +488,13 @@ class WorkflowController(QObject):
                 db_model_attached = True
             except Exception:
                 logging.exception("Failed to attach DB-backed staging model; falling back to in-memory model.")
+                if not new_records and hasattr(db_conn, "get_staging_records"):
+                    from unshuffle.core import parse_tags, plan_records_from_staging_rows
+
+                    new_records = plan_records_from_staging_rows(
+                        db_conn.get_staging_records(session_id),
+                        parse_tags,
+                    )
 
         if not db_model_attached and is_append and self.app.model:
             self.app.model.beginResetModel()
@@ -526,6 +542,21 @@ class WorkflowController(QObject):
         _finalizing(4, "Preparing library controls...")
 
         def _ready() -> None:
+            engine = getattr(self.app, "engine", None)
+            db_conn = getattr(engine, "db", None)
+            session_id = str(getattr(engine, "session_id", "") or "")
+            if db_conn is not None and session_id and hasattr(db_conn, "update_session_scan_runs"):
+                try:
+                    db_conn.update_session_scan_runs(
+                        session_id,
+                        state="ready",
+                        phase="ready",
+                    )
+                except Exception:
+                    logging.exception("Failed to mark scan readiness complete.")
+                    self.app._scan_finalizing = False
+                    self._fail_operation_monitor("Scan readiness could not be saved.")
+                    return
             self.app._scan_finalizing = False
             from ..utils.ui_helpers import set_ui_busy
             set_ui_busy(self.app, False)

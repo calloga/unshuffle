@@ -101,6 +101,60 @@ def save_json_meta(target_dir: Path, filename: str, data: Any, is_dry_run: bool 
             pass
 
 
+def save_json_array_meta_iter(target_dir: Path, filename: str, rows, is_dry_run: bool = False) -> None:
+    file_path = get_system_dir(target_dir, is_dry_run) / filename
+    tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write("[")
+            first = True
+            for row in rows:
+                if not first:
+                    file_handle.write(",")
+                json.dump(row, file_handle, default=str)
+                first = False
+            file_handle.write("]")
+        os.replace(tmp_path, file_path)
+    except OSError as exc:
+        logging.error("Failed to save %s: %s", filename, exc)
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def save_discovery_data_iter(
+    target_dir: Path,
+    filename: str,
+    source_root: Path,
+    entries,
+    is_dry_run: bool = False,
+) -> None:
+    file_path = get_system_dir(target_dir, is_dry_run) / filename
+    tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as file_handle:
+            file_handle.write('{"source_root":')
+            json.dump(source_root.as_posix(), file_handle)
+            file_handle.write(',"entries":[')
+            first = True
+            for entry in entries:
+                if not first:
+                    file_handle.write(",")
+                json.dump(entry, file_handle, default=str)
+                first = False
+            file_handle.write("]}")
+        os.replace(tmp_path, file_path)
+    except OSError as exc:
+        logging.error("Failed to save %s: %s", filename, exc)
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
 def get_directory_dump_filename(session_id: str, source_root: Optional[Path] = None) -> str:
     if source_root is None:
         return f"{DIRECTORY_DUMP_FILE}_{session_id}.json"

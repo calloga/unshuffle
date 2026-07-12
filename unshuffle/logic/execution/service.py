@@ -69,7 +69,7 @@ class ExecutionMixin:
                     no_prefix,
                     self.prefix_map,
                     active_tree_profile=getattr(self, "active_tree_profile", None),
-                    records=getattr(self, "_execution_records", None) or [record],
+                    records=[record],
                 )
             except DestinationContainmentError as exc:
                 self._last_record_error = str(exc)

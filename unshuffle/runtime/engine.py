@@ -95,6 +95,7 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
         acoustic_index: bool,
         skip_expensive_hashes,
         min_confidence,
+        collect_records: bool = True,
     ):
         if self.bootstrapper:
             return self.bootstrapper.run_plan_fn(
@@ -108,6 +109,7 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
                 is_interrupted=lambda: self.interrupted,
                 skip_expensive_hashes=skip_expensive_hashes,
                 min_confidence=min_confidence,
+                collect_records=collect_records,
             )
         raise NotImplementedError
 
@@ -172,6 +174,7 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
         acoustic_index: bool = False,
         skip_expensive_hashes: Optional[set[str]] = None,
         min_confidence: Optional[float] = None,
+        collect_records: bool = True,
     ):
         self.interrupted = False
         valid_sources = []
@@ -218,7 +221,18 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
                     acoustic_index=acoustic_index,
                     skip_expensive_hashes=skip_expensive_hashes,
                     min_confidence=min_confidence,
+                    collect_records=collect_records,
                 )
+            )
+
+        if not collect_records and hasattr(self.db, "iter_session_fast_hash_collision_items"):
+            from ..logic.analysis.scan_hashing import promote_session_fast_hash_collisions
+
+            promote_session_fast_hash_collisions(
+                self.db,
+                self.session_id,
+                is_interrupted=lambda: self.interrupted,
+                progress_callback=self.progress_callback,
             )
 
         exclusions = [Path(path).resolve() for path in self.db.get_exclusions()]
@@ -239,19 +253,26 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
                     )
 
             plan = [record for record in plan if not is_excluded(record)]
-            skipped_count = before_count - len(plan)
+            if not collect_records and hasattr(self.db, "exclude_classified_scan_session_paths"):
+                skipped_count = self.db.exclude_classified_scan_session_paths(self.session_id, exclusions)
+            else:
+                skipped_count = before_count - len(plan)
             if skipped_count:
                 self.log(f"Skipped {skipped_count} files from excluded folders.")
 
-        self.log(f"Scan complete. {len(plan)} files identified.")
+        identified_count = len(plan)
+        if not collect_records and hasattr(self.db, "classified_scan_session_stats"):
+            identified_count += int(self.db.classified_scan_session_stats(self.session_id).get("total", 0))
+        self.log(f"Scan complete. {identified_count} files identified.")
         cleanup_session_meta(self.target_dir, self.session_id, self.db)
         return plan
 
     def execute_plan(self, plan: List, move: bool = False, dry_run: bool = False, flat: bool = False, no_prefix: bool = False):
         self.interrupted = False
         self.moved_preserved_roots = set()
-        self._execution_records = list(plan)
-        tree_error = tree_profile_error(getattr(self, "active_tree_profile", None), self._execution_records)
+        active_tree_profile = getattr(self, "active_tree_profile", None)
+        validation_records = [] if hasattr(plan, "store") else list(plan)
+        tree_error = tree_profile_error(active_tree_profile, validation_records)
         if tree_error is not None:
             self.log(f"Custom tree organization is invalid. Build blocked.\n{tree_error}", level=logging.ERROR)
             return invalid_tree_profile_result(len(plan), dry_run, tree_error)
@@ -295,6 +316,14 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
         report_filename = execution_report_filename(self.session_id, dry_run)
 
         session_records = []
+
+        def flush_session_records() -> None:
+            if not session_records:
+                return
+            batch = list(session_records)
+            for database in active_databases:
+                database.add_records_bulk(self.session_id, batch)
+            session_records.clear()
 
         execution_error = None
 
@@ -353,14 +382,14 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
                             duplicate_trash_path,
                         )
                     )
+                    if len(session_records) >= 1000:
+                        flush_session_records()
 
         except Exception as exc:
             execution_error = str(exc)
             self.log(f"Execution error: {exc}", level=logging.ERROR)
         finally:
-            if session_records:
-                for database in active_databases:
-                    database.add_records_bulk(self.session_id, session_records)
+            flush_session_records()
             if dry_run_file:
                 dry_run_file.close()
             if not dry_run:

@@ -30,6 +30,9 @@ class OperationMonitorManager(QObject):
         self._token += 1
         self._active_token = self._token
         dialog = self._ensure_dialog()
+        refresh_theme = getattr(dialog, "refresh_theme", None)
+        if callable(refresh_theme):
+            refresh_theme()
         dialog.start(title, cancellable=cancellable, on_cancel=on_cancel, compact=compact)
         dialog.show()
         dialog.raise_()

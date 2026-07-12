@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from ...core.assets import asset_path
-from ...core.features import calculate_similarity_distance, vector_from_blob
+from ...core.features import calculate_similarity_distance, normalize_distance_vector, vector_from_blob
 from ...core.models import PlanRecord
 from ...core.progress import PhaseProgress
 from ...core.tags import normalize_tags
@@ -89,6 +89,314 @@ def compute_tagging_pass(
         genres_by_path=genres,
         duplicate_matches=duplicates,
     )
+
+
+def compute_db_duplicate_tags(
+    db,
+    session_id: str,
+    *,
+    duplicate_threshold: float = DEFAULT_DUPLICATE_DISTANCE,
+    duration_window_seconds: float = DEFAULT_DURATION_WINDOW_SECONDS,
+    progress_callback: Callable[[dict], None] | None = None,
+) -> int:
+    """Apply possible-duplicate tags using bounded SQLite-backed buckets."""
+    conn = db.conn
+    conn.execute("DROP TABLE IF EXISTS temp.tagging_candidates")
+    conn.execute("DROP TABLE IF EXISTS temp.tagging_matches")
+    conn.execute(
+        """
+        CREATE TEMP TABLE tagging_candidates (
+            bucket_duration INTEGER NOT NULL,
+            bucket_signature TEXT NOT NULL,
+            row_id INTEGER NOT NULL,
+            source_path TEXT NOT NULL,
+            duration REAL NOT NULL,
+            feature_vector BLOB NOT NULL,
+            PRIMARY KEY (row_id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX temp.idx_tagging_candidates_bucket "
+        "ON tagging_candidates(bucket_duration, bucket_signature, row_id)"
+    )
+    conn.execute("CREATE TEMP TABLE tagging_matches (row_id INTEGER PRIMARY KEY)")
+    total = int(conn.execute(
+        "SELECT COUNT(*) FROM staging_records WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()[0])
+    bucket_progress = PhaseProgress(
+        progress_callback,
+        "Checking Possible Duplicates",
+        total=max(1, total),
+        message="Preparing possible duplicate groups...",
+        update_every=500,
+    )
+    cursor = conn.execute(
+        """
+        SELECT row_id, source_path, duration, feature_vector
+        FROM staging_records
+        WHERE session_id = ?
+          AND feature_vector IS NOT NULL
+          AND COALESCE(is_preserved, 0) = 0
+          AND COALESCE(audio_type, '') NOT IN ('Non-Audio Assets', 'Metadata')
+          AND COALESCE(CASE WHEN json_valid(COALESCE(evidence_json, ''))
+              THEN json_extract(evidence_json, '$.duplicate_shadow.is_shadow') ELSE 0 END, 0) != 1
+        ORDER BY row_id
+        """,
+        (session_id,),
+    )
+    prepared = 0
+    insert_rows = []
+    for row in cursor:
+        prepared += 1
+        vector = vector_from_blob(row[3])
+        if vector:
+            duration = _vector_duration(vector, row[2] or 0.0)
+            insert_rows.append((
+                _duration_bucket(duration, duration_window_seconds),
+                json.dumps(_vector_signature(vector), separators=(",", ":")),
+                int(row[0]),
+                str(row[1] or ""),
+                duration,
+                row[3],
+            ))
+        if len(insert_rows) >= 1000:
+            conn.executemany("INSERT INTO tagging_candidates VALUES (?, ?, ?, ?, ?, ?)", insert_rows)
+            insert_rows.clear()
+        bucket_progress.emit(prepared)
+    if insert_rows:
+        conn.executemany("INSERT INTO tagging_candidates VALUES (?, ?, ?, ?, ?, ?)", insert_rows)
+    bucket_progress.emit(max(1, total), force=True)
+
+    bucket_count = int(conn.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT 1 FROM tagging_candidates
+            GROUP BY bucket_duration, bucket_signature HAVING COUNT(*) > 1
+        )
+        """
+    ).fetchone()[0])
+    compare_progress = PhaseProgress(
+        progress_callback,
+        "Checking Possible Duplicates",
+        total=max(1, bucket_count),
+        message=f"Checking {bucket_count} possible duplicate groups...",
+        update_every=25,
+    )
+    buckets = conn.execute(
+        """
+        SELECT bucket_duration, bucket_signature, COUNT(*)
+        FROM tagging_candidates
+        GROUP BY bucket_duration, bucket_signature HAVING COUNT(*) > 1
+        ORDER BY bucket_duration, bucket_signature
+        """
+    )
+    for bucket_index, (duration_key, signature, count) in enumerate(buckets, 1):
+        if int(count) <= 2000:
+            entries = list(conn.execute(
+                """
+                SELECT row_id, source_path, duration, feature_vector
+                FROM tagging_candidates
+                WHERE bucket_duration = ? AND bucket_signature = ?
+                ORDER BY source_path
+                """,
+                (duration_key, signature),
+            ))
+            decoded = [(int(row[0]), str(row[1]), float(row[2]), vector_from_blob(row[3])) for row in entries]
+            for left_index, left in enumerate(decoded[:-1]):
+                for right in decoded[left_index + 1:]:
+                    _record_db_duplicate_match(
+                        conn,
+                        left,
+                        right,
+                        duplicate_threshold,
+                        duration_window_seconds,
+                    )
+        else:
+            _mark_large_bucket_ann(
+                conn,
+                duration_key,
+                signature,
+                int(count),
+                duplicate_threshold,
+                duration_window_seconds,
+            )
+        compare_progress.emit(bucket_index)
+    compare_progress.emit(max(1, bucket_count), force=True)
+
+    with db.write_transaction():
+        conn.execute(
+            """
+            UPDATE staging_records
+            SET tags = TRIM(REPLACE(' ' || COALESCE(tags, '') || ' ', ' possibleduplicate ', ' '))
+            WHERE session_id = ? AND (' ' || LOWER(COALESCE(tags, '')) || ' ') LIKE '% possibleduplicate %'
+            """,
+            (session_id,),
+        )
+        conn.execute(
+            """
+            UPDATE staging_records
+            SET tags = TRIM(COALESCE(tags, '') || ' possibleduplicate')
+            WHERE session_id = ? AND row_id IN (SELECT row_id FROM tagging_matches)
+            """,
+            (session_id,),
+        )
+    duplicate_count = int(conn.execute("SELECT COUNT(*) FROM tagging_matches").fetchone()[0])
+    conn.execute("DROP TABLE temp.tagging_candidates")
+    conn.execute("DROP TABLE temp.tagging_matches")
+    return duplicate_count
+
+
+def _mark_large_bucket_ann(
+    conn,
+    duration_key: int,
+    signature: str,
+    count: int,
+    duplicate_threshold: float,
+    duration_window_seconds: float,
+) -> None:
+    try:
+        import hnswlib
+        import numpy as np
+    except ModuleNotFoundError:
+        _mark_large_bucket_exact(
+            conn,
+            duration_key,
+            signature,
+            duplicate_threshold,
+            duration_window_seconds,
+        )
+        return
+
+    dimension = None
+    index = None
+    cursor = conn.execute(
+        """
+        SELECT row_id, feature_vector FROM tagging_candidates
+        WHERE bucket_duration = ? AND bucket_signature = ? ORDER BY row_id
+        """,
+        (duration_key, signature),
+    )
+    while True:
+        rows = cursor.fetchmany(1000)
+        if not rows:
+            break
+        labels = []
+        vectors = []
+        for row in rows:
+            vector = vector_from_blob(row[1])
+            if not vector:
+                continue
+            normalized = normalize_distance_vector(vector)
+            if dimension is None:
+                dimension = len(normalized)
+                index = hnswlib.Index(space="l2", dim=dimension)
+                index.init_index(max_elements=count, ef_construction=200, M=16)
+            labels.append(int(row[0]))
+            vectors.append(normalized)
+        if vectors and index is not None:
+            index.add_items(np.asarray(vectors, dtype=np.float32), np.asarray(labels, dtype=np.int64))
+    if index is None or index.get_current_count() < 2:
+        return
+    index.set_ef(min(250, max(100, int(index.get_current_count()))))
+
+    query_cursor = conn.execute(
+        """
+        SELECT row_id, source_path, duration, feature_vector FROM tagging_candidates
+        WHERE bucket_duration = ? AND bucket_signature = ? ORDER BY row_id
+        """,
+        (duration_key, signature),
+    )
+    neighbor_count = min(100, int(index.get_current_count()))
+    while True:
+        rows = query_cursor.fetchmany(250)
+        if not rows:
+            break
+        query_vectors = []
+        valid_rows = []
+        for row in rows:
+            vector = vector_from_blob(row[3])
+            if not vector:
+                continue
+            query_vectors.append(normalize_distance_vector(vector))
+            valid_rows.append((int(row[0]), str(row[1]), float(row[2]), vector))
+        if not query_vectors:
+            continue
+        labels, _distances = index.knn_query(np.asarray(query_vectors, dtype=np.float32), k=neighbor_count)
+        for left, candidate_ids in zip(valid_rows, labels):
+            ids = [int(value) for value in candidate_ids if int(value) != left[0]]
+            if not ids:
+                continue
+            placeholders = ", ".join("?" for _ in ids)
+            candidate_rows = conn.execute(
+                f"SELECT row_id, source_path, duration, feature_vector FROM tagging_candidates "
+                f"WHERE row_id IN ({placeholders})",
+                ids,
+            )
+            for row in candidate_rows:
+                right = (int(row[0]), str(row[1]), float(row[2]), vector_from_blob(row[3]))
+                if _record_db_duplicate_match(
+                    conn,
+                    left,
+                    right,
+                    duplicate_threshold,
+                    duration_window_seconds,
+                ):
+                    break
+
+
+def _mark_large_bucket_exact(
+    conn,
+    duration_key: int,
+    signature: str,
+    duplicate_threshold: float,
+    duration_window_seconds: float,
+) -> None:
+    left_rows = conn.execute(
+        """
+        SELECT row_id, source_path, duration, feature_vector FROM tagging_candidates
+        WHERE bucket_duration = ? AND bucket_signature = ? ORDER BY source_path
+        """,
+        (duration_key, signature),
+    )
+    for left_row in left_rows:
+        left = (int(left_row[0]), str(left_row[1]), float(left_row[2]), vector_from_blob(left_row[3]))
+        right_rows = conn.execute(
+            """
+            SELECT row_id, source_path, duration, feature_vector FROM tagging_candidates
+            WHERE bucket_duration = ? AND bucket_signature = ? AND source_path > ? ORDER BY source_path
+            """,
+            (duration_key, signature, left[1]),
+        )
+        for right_row in right_rows:
+            right = (int(right_row[0]), str(right_row[1]), float(right_row[2]), vector_from_blob(right_row[3]))
+            _record_db_duplicate_match(
+                conn,
+                left,
+                right,
+                duplicate_threshold,
+                duration_window_seconds,
+            )
+
+
+def _record_db_duplicate_match(conn, left, right, threshold: float, duration_window: float) -> bool:
+    left_id, _left_path, left_duration, left_vector = left
+    right_id, _right_path, right_duration, right_vector = right
+    if left_vector is None or right_vector is None:
+        return False
+    if abs(left_duration - right_duration) > max(duration_window, 0.001):
+        return False
+    distance = calculate_similarity_distance(
+        left_vector,
+        right_vector,
+        d1=left_duration,
+        d2=right_duration,
+    )
+    if math.isfinite(distance) and distance <= threshold:
+        conn.execute("INSERT OR IGNORE INTO tagging_matches(row_id) VALUES (?), (?)", (left_id, right_id))
+        return True
+    return False
 
 
 def load_genre_candidates(path: Path) -> list[_GenreCandidate]:

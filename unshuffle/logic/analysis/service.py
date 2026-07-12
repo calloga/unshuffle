@@ -64,9 +64,19 @@ class TokenRegistry:
 
 
 class AnalysisContext:
-    def __init__(self, root_path: Path, progress_callback=None, db=None, target_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        root_path: Path,
+        progress_callback=None,
+        db=None,
+        target_dir: Optional[Path] = None,
+        scan_id: str | None = None,
+        lean_db_items: bool = False,
+    ):
         self.db = db
         self.target_dir = target_dir
+        self.scan_id = scan_id
+        self.lean_db_items = lean_db_items
         self.root_path = root_path
         self.resolved_target_dir = target_dir.resolve() if target_dir else None
         self.nodes: Dict[Path, LibNode] = {}
@@ -282,10 +292,7 @@ class AnalysisContext:
                 parent.pack_candidate_weight = round(parent.pack_candidate_weight, 3)
 
 
-def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
-    root_path = root_path.resolve()
-    context.root_path = root_path
-
+def _discover_paths_in_memory(root_path: Path, context: AnalysisContext) -> list[Path]:
     all_paths = [root_path]
     count = 0
     discovery_progress = PhaseProgress(
@@ -339,7 +346,49 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
             count += len(dirs) + len(files)
             discovery_progress.emit(count, message=f"Discovering samples: {count} items found...")
 
-    total_found = len(all_paths)
+    return all_paths
+
+
+def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
+    root_path = root_path.resolve()
+    context.root_path = root_path
+
+    use_scan_store = bool(
+        context.scan_id
+        and context.db is not None
+        and hasattr(context.db, "insert_scan_items")
+        and hasattr(context.db, "iter_discovered_scan_nodes")
+    )
+    if use_scan_store:
+        from .scan_discovery import discover_to_scan_store
+
+        total_found = discover_to_scan_store(
+            context.db,
+            context.scan_id,
+            root_path,
+            target_dir=context.target_dir,
+            is_interrupted=context.is_interrupted,
+            progress_callback=context.progress_callback,
+        )
+        node_rows = (
+            row
+            for batch in context.db.iter_discovered_scan_nodes(context.scan_id, batch_size=1000)
+            for row in batch
+        )
+    else:
+        all_paths = _discover_paths_in_memory(root_path, context)
+        total_found = len(all_paths)
+        node_rows = (
+            {
+                "normalized_path": path.as_posix(),
+                "name": path.name,
+                "node_type": "root" if path == root_path else "file" if path.is_file() else "directory",
+                "extension": path.suffix.lower() if path.is_file() else None,
+                "is_preserved": bool(path.is_dir() and (path / PRESERVED_MARKER).exists()),
+            }
+            for path in all_paths
+        )
+
     mapping_progress = PhaseProgress(
         context.progress_callback,
         "Discovering Samples",
@@ -349,26 +398,39 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
     )
     mapping_progress.emit(0, force=True)
 
-    for index, path in enumerate(all_paths, 1):
+    for index, row in enumerate(node_rows, 1):
         if context.is_interrupted():
             break
-        name = path.name
+        path = Path(str(row["normalized_path"]))
+        name = str(row.get("name") or path.name)
 
         if _is_reserved_scan_name(path) or name.startswith("._"):
             continue
 
-        if path == root_path:
+        row_type = str(row.get("node_type") or "")
+        if row_type == "root" or path == root_path:
             node_type = NodeType.ROOT
-        elif path.is_file():
+        elif row_type == "file":
             node_type = NodeType.FILE
         else:
             node_type = NodeType.CONTAINER
 
-        node = LibNode(path=path, name=name, node_type=node_type, extension=path.suffix.lower() if path.is_file() else None)
+        if node_type == NodeType.FILE and context.lean_db_items:
+            context.frequency_analyzer.feed_path(path)
+            context.total_scanned += 1
+            mapping_progress.emit(index)
+            continue
+
+        node = LibNode(
+            path=path,
+            name=name,
+            node_type=node_type,
+            extension=str(row.get("extension") or "") if node_type == NodeType.FILE else None,
+        )
         if node_type == NodeType.FILE:
-            node.hash = None
-            node.fast_hash = None
-        if node_type in (NodeType.CONTAINER, NodeType.ROOT) and (path / PRESERVED_MARKER).exists():
+            node.hash = row.get("effective_hash") or None
+            node.fast_hash = row.get("fast_hash") or None
+        if node_type in (NodeType.CONTAINER, NodeType.ROOT) and bool(row.get("is_preserved")):
             node.is_preserved = True
             node.preserved_root = path
 
@@ -381,10 +443,30 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
         mapping_progress.emit(index)
     mapping_progress.emit(total_found, force=True)
 
+    if use_scan_store:
+        from .scan_hashing import hash_scan_items
+
+        hash_scan_items(
+            context.db,
+            context.scan_id,
+            is_interrupted=context.is_interrupted,
+            progress_callback=context.progress_callback,
+        )
+        for batch in context.db.iter_scan_items(
+            context.scan_id,
+            columns="normalized_path, fast_hash, effective_hash",
+            batch_size=2000,
+        ):
+            for row in batch:
+                node = context.nodes.get(Path(row["normalized_path"]))
+                if node is not None:
+                    node.fast_hash = row.get("fast_hash") or None
+                    node.hash = row.get("effective_hash") or None
+
     all_file_nodes = [node for node in context.nodes.values() if node.node_type == NodeType.FILE and not node.name.startswith("._")]
 
     to_hash = []
-    if all_file_nodes:
+    if all_file_nodes and not use_scan_store:
         cache_progress = PhaseProgress(
             context.progress_callback,
             "Checking Cache",
@@ -397,6 +479,9 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
         statted_nodes = []
         if context.db and (hasattr(context.db, "get_cached_entries") or hasattr(context.db, "get_cached_hashes")):
             for index, node in enumerate(all_file_nodes, 1):
+                if node.hash:
+                    cache_progress.emit(index)
+                    continue
                 try:
                     stat = node.path.stat()
                 except OSError:
@@ -420,6 +505,15 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                     node.fast_hash = cached.get("fast_hash")
                 else:
                     to_hash.append(node)
+            if context.scan_id and hasattr(context.db, "update_scan_item_hashes_by_path"):
+                context.db.update_scan_item_hashes_by_path(
+                    context.scan_id,
+                    (
+                        (node.path, node.fast_hash, node.hash)
+                        for node in statted_nodes
+                        if node.hash
+                    ),
+                )
             if context.progress_callback and cached_entries:
                 context.progress_callback({"message": f"Hash cache: {len(cached_entries)} reused, {len(to_hash)} new."})
         elif context.db and (hasattr(context.db, "get_cached_entry") or hasattr(context.db, "get_cached_hash")):
@@ -441,7 +535,7 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                 to_hash.append(node)
                 cache_progress.emit(index)
         else:
-            to_hash.extend(all_file_nodes)
+            to_hash.extend(node for node in all_file_nodes if not node.hash)
             cache_progress.emit(len(all_file_nodes), force=True)
         cache_progress.emit(len(all_file_nodes), force=True)
     if to_hash:
@@ -461,6 +555,7 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                 progress.emit(0, force=True)
 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    hash_updates = []
                     for idx, (node, file_hash) in enumerate(
                         bounded_map(
                             executor,
@@ -476,11 +571,18 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                         node.hash = file_hash
                         if hash_func is get_fast_hash:
                             node.fast_hash = file_hash
+                        hash_updates.append((node.path, node.fast_hash, node.hash))
+                        if len(hash_updates) >= 500 and context.scan_id and hasattr(context.db, "update_scan_item_hashes_by_path"):
+                            context.db.update_scan_item_hashes_by_path(context.scan_id, hash_updates)
+                            hash_updates.clear()
                         progress.emit(idx)
+                    if hash_updates and context.scan_id and hasattr(context.db, "update_scan_item_hashes_by_path"):
+                        context.db.update_scan_item_hashes_by_path(context.scan_id, hash_updates)
                 progress.emit(len(nodes), force=True)
             else:
                 progress.emit(0, message=serial_message, force=True)
 
+                hash_updates = []
                 for idx, node in enumerate(nodes, 1):
                     if context.is_interrupted():
                         return
@@ -488,7 +590,10 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
                     node.hash = file_hash
                     if hash_func is get_fast_hash:
                         node.fast_hash = file_hash
+                    hash_updates.append((node.path, node.fast_hash, node.hash))
                     progress.emit(idx)
+                if hash_updates and context.scan_id and hasattr(context.db, "update_scan_item_hashes_by_path"):
+                    context.db.update_scan_item_hashes_by_path(context.scan_id, hash_updates)
                 progress.emit(len(nodes), force=True)
 
         assign_hashes(
@@ -526,6 +631,52 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
         if context.is_interrupted():
             return context.nodes[root_path]
             
+    if use_scan_store:
+        import json
+        from .scan_structure import (
+            ROLE_CHILD_OF_DUPLICATE,
+            ROLE_DUPLICATE,
+            ROLE_LARGE,
+            ROLE_LEAF,
+            ROLE_PURE,
+            ROLE_STANDARD,
+            analyze_scan_structure,
+        )
+
+        analyze_scan_structure(context.db, context.scan_id)
+        for batch in context.db.iter_scan_directories(context.scan_id, batch_size=1000):
+            for row in batch:
+                node = context.nodes.get(Path(row["normalized_path"]))
+                if node is None:
+                    continue
+                flags = int(row.get("role_flags") or 0)
+                node.node_type = NodeType.LEAF if flags & ROLE_LEAF else node.node_type
+                node.is_pure_container = bool(flags & ROLE_PURE)
+                node.is_duplicate_container = bool(flags & ROLE_DUPLICATE)
+                node.is_child_of_duplicate = bool(flags & ROLE_CHILD_OF_DUPLICATE)
+                node.is_large_container = bool(flags & ROLE_LARGE)
+                node.is_standard_container = bool(flags & ROLE_STANDARD)
+                node.pack_candidate_weight = float(row.get("pack_weight") or 0.0)
+                try:
+                    node.weight_evidence = json.loads(row.get("weight_evidence_json") or "{}")
+                    node.unweighted_tokens = list(json.loads(row.get("token_blob") or "[]"))
+                except (TypeError, json.JSONDecodeError):
+                    node.weight_evidence = {}
+                    node.unweighted_tokens = []
+                tokens = tokenize(node.name)
+                node.name_weighted_tokens = [token for token in tokens if is_category_alias(token)]
+                context.word_map.update(node.unweighted_tokens)
+        for node in context.nodes.values():
+            if node.node_type == NodeType.FILE:
+                tokens = tokenize(node.name)
+                node.name_weighted_tokens = [token for token in tokens if is_category_alias(token)]
+                node.unweighted_tokens = [
+                    token for token in tokens
+                    if not is_category_alias(token) and token not in NOISE_WORDS
+                ]
+        context.global_word_map = dict(context.word_map)
+        return context.nodes[root_path]
+
     for path, node in context.nodes.items():
         if path == root_path:
             continue
@@ -555,11 +706,36 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
     context.get_node_roles()
     context.calculate_pack_weights()
     context.global_word_map = dict(context.word_map)
+    # Planning uses path lookups and the computed weights, not graph edges.
+    # Break cycles and release structural-only indexes before feature analysis.
+    for node in context.nodes.values():
+        node.parent = None
+        node.children.clear()
+    context.descendant_token_sets.clear()
+    context.descendant_counts.clear()
+    context.category_distribution.clear()
     return context.nodes[root_path]
 
 
-def run_analysis(root_path: Path, progress_callback=None, db=None, target_dir: Optional[Path] = None) -> AnalysisContext:
-    context = AnalysisContext(root_path, progress_callback, db=db, target_dir=target_dir)
+def run_analysis(
+    root_path: Path,
+    progress_callback=None,
+    db=None,
+    target_dir: Optional[Path] = None,
+    scan_id: str | None = None,
+    is_interrupted=None,
+    lean_db_items: bool = False,
+) -> AnalysisContext:
+    context = AnalysisContext(
+        root_path,
+        progress_callback,
+        db=db,
+        target_dir=target_dir,
+        scan_id=scan_id,
+        lean_db_items=lean_db_items,
+    )
+    if is_interrupted is not None:
+        context.is_interrupted = is_interrupted
     build_node_graph(root_path, context)
     return context
 

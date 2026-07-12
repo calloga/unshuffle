@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import numpy as np
 
+from unshuffle.core.numerics import symmetric_eigh
+
 
 def _vector_signature(vector: list[float]) -> int:
     if not vector:
@@ -75,7 +77,7 @@ def _mds_coords(distances: np.ndarray) -> np.ndarray:
         squared = distances**2
         centered = np.eye(count) - np.ones((count, count), dtype=float) / count
         gram = -0.5 * centered @ squared @ centered
-        values, vectors = np.linalg.eigh(gram)
+        values, vectors = symmetric_eigh(gram)
     except np.linalg.LinAlgError:
         return np.zeros((count, 2), dtype=float)
     order = np.argsort(values)[::-1]

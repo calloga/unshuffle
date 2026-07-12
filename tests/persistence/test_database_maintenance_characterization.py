@@ -14,12 +14,39 @@ from gui.core.workers import (
     StartupRestoreWorker,
     _staging_session_has_rows,
     _staging_session_row_count,
+    _db_native_scan_available,
+    _streaming_scan_enabled,
 )
 from unshuffle.core import PlanRecord
 from unshuffle.persistence import get_local_db
 
 
 class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
+    def test_streaming_scan_is_default_with_explicit_rollback_override(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertTrue(_streaming_scan_enabled())
+        for value in ("0", "false", "no", "off"):
+            with self.subTest(value=value), mock.patch.dict(
+                "os.environ", {"UNSHUFFLE_STREAMING_SCAN": value}, clear=True
+            ):
+                self.assertFalse(_streaming_scan_enabled())
+
+    def test_streaming_rollback_selects_legacy_path_for_capable_database(self):
+        database = SimpleNamespace(
+            iter_classified_scan_session_items=mock.Mock(),
+            classified_scan_session_stats=mock.Mock(),
+            add_staging_records_iter=mock.Mock(),
+            iter_classified_append_items=mock.Mock(),
+        )
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertTrue(_db_native_scan_available(database, append=False))
+            self.assertTrue(_db_native_scan_available(database, append=True))
+        with mock.patch.dict(
+            "os.environ", {"UNSHUFFLE_STREAMING_SCAN": "0"}, clear=True
+        ):
+            self.assertFalse(_db_native_scan_available(database, append=False))
+            self.assertFalse(_db_native_scan_available(database, append=True))
+
     def test_restore_staging_helpers_use_bounded_sql_queries(self):
         connection = mock.Mock()
         connection.execute.side_effect = [

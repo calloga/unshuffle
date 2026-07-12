@@ -6,7 +6,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from collections import OrderedDict
 from pathlib import Path
@@ -152,6 +154,47 @@ class SimilarityEngine:
         self.feature_cache: "OrderedDict[str, List[float]]" = OrderedDict()
         self.negative_feature_cache: "OrderedDict[str, tuple[int, int, str, str, str]]" = OrderedDict()
         self.extraction_failure_tags: "OrderedDict[str, str]" = OrderedDict()
+        self.extraction_failure_messages: "OrderedDict[str, str]" = OrderedDict()
+        self._process_slots = threading.BoundedSemaphore(1)
+        self._is_interrupted: Callable[[], bool] | None = None
+        self._completion_callback: Callable[[Path], None] | None = None
+        self._reported_completions: set[Path] = set()
+        self._completion_lock = threading.Lock()
+
+    def configure_extraction_runtime(
+        self,
+        *,
+        max_processes: int,
+        is_interrupted: Callable[[], bool] | None = None,
+        completion_callback: Callable[[Path], None] | None = None,
+    ) -> None:
+        """Set one process budget shared by batch extraction and retries."""
+        self._process_slots = threading.BoundedSemaphore(max(1, max_processes))
+        self._is_interrupted = is_interrupted
+        self._completion_callback = completion_callback
+        self._reported_completions.clear()
+
+    def _report_extraction_complete(self, file_path: Path) -> None:
+        callback = self._completion_callback
+        if callback is None:
+            return
+        with self._completion_lock:
+            if file_path in self._reported_completions:
+                return
+            self._reported_completions.add(file_path)
+        callback(file_path)
+
+    @contextmanager
+    def _process_slot(self) -> Iterator[None]:
+        while not self._process_slots.acquire(timeout=0.1):
+            if self._is_interrupted and self._is_interrupted():
+                raise InterruptedError("audio feature extraction cancelled")
+        try:
+            if self._is_interrupted and self._is_interrupted():
+                raise InterruptedError("audio feature extraction cancelled")
+            yield
+        finally:
+            self._process_slots.release()
 
     def _cache_get(self, file_path: Path) -> Optional[List[float]]:
         key = str(file_path)
@@ -225,11 +268,20 @@ class SimilarityEngine:
     def extraction_failure_tag(self, file_path: Path | str) -> str | None:
         return self.extraction_failure_tags.get(str(file_path))
 
+    def extraction_failure_message(self, file_path: Path | str) -> str | None:
+        return self.extraction_failure_messages.get(str(file_path))
+
     def _remember_extraction_failure_tag(self, file_path: Path, message: str) -> None:
+        key = str(file_path)
+        normalized_message = str(message or "").strip()[:2000]
+        if normalized_message:
+            self.extraction_failure_messages[key] = normalized_message
+            self.extraction_failure_messages.move_to_end(key)
+            while len(self.extraction_failure_messages) > self.max_cache_entries:
+                self.extraction_failure_messages.popitem(last=False)
         tag = self.extraction_failure_tag_for_message(message)
         if not tag:
             return
-        key = str(file_path)
         self.extraction_failure_tags[key] = tag
         self.extraction_failure_tags.move_to_end(key)
         while len(self.extraction_failure_tags) > self.max_cache_entries:
@@ -259,10 +311,11 @@ class SimilarityEngine:
         options.pop("capture_output", None)
         options["stdout"] = subprocess.PIPE
         options["stderr"] = subprocess.PIPE
-        process = subprocess.Popen(
-            [self.extractor_path, "--batch", str(manifest_path)],
-            **options,
-        )
+        with self._process_slot():
+            return self._run_batch_extractor_in_slot(manifest_path, options)
+
+    def _run_batch_extractor_in_slot(self, manifest_path: Path, options: dict) -> subprocess.CompletedProcess[str]:
+        process = subprocess.Popen([self.extractor_path, "--batch", str(manifest_path)], **options)
         output: queue.Queue[str | None] = queue.Queue()
         stderr_lines: list[str] = []
 
@@ -341,12 +394,18 @@ class SimilarityEngine:
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="unshuffle-extractor-retry") as executor:
             futures = {executor.submit(self.extract_feature_payload, path): path for path in pending}
             for future in as_completed(futures):
+                if self._is_interrupted and self._is_interrupted():
+                    for pending_future in futures:
+                        pending_future.cancel()
+                    break
                 path = futures[future]
                 try:
                     results[path] = future.result()
                 except Exception as exc:
                     logging.error("C++ extractor retry failed for %s: %s", path.name, exc)
                     results[path] = self._cache_negative_and_return_none(path, str(exc))
+                finally:
+                    self._report_extraction_complete(path)
         return results
 
     def _payload_from_extractor_data(self, file_path: Path, data: dict) -> Optional[FeaturePayload]:
@@ -404,11 +463,12 @@ class SimilarityEngine:
             return self._cache_negative_and_return_none(file_path)
 
         try:
-            result = subprocess.run(
-                [self.extractor_path, "--file", str(file_path)],
-                **self._subprocess_options(),
-                timeout=self.EXTRACT_TIMEOUT_SECONDS,
-            )
+            with self._process_slot():
+                result = subprocess.run(
+                    [self.extractor_path, "--file", str(file_path)],
+                    **self._subprocess_options(),
+                    timeout=self.EXTRACT_TIMEOUT_SECONDS,
+                )
             if result.returncode != 0:
                 error_text = result.stderr.strip()
                 logging.error(
@@ -443,9 +503,11 @@ class SimilarityEngine:
             cached = self._cache_get(file_path)
             if cached is not None:
                 results[file_path] = FeaturePayload(vector=cached)
+                self._report_extraction_complete(file_path)
                 continue
             if self._negative_cache_get(file_path):
                 results[file_path] = None
+                self._report_extraction_complete(file_path)
                 continue
             ext = file_path.suffix.lower()
             if ext not in self.SUPPORTED_EXTS:
@@ -455,6 +517,7 @@ class SimilarityEngine:
                         file_path.name,
                     )
                 results[file_path] = self._cache_negative_and_return_none(file_path)
+                self._report_extraction_complete(file_path)
                 continue
             pending.append(file_path)
 
@@ -523,6 +586,7 @@ class SimilarityEngine:
                     if not isinstance(payload_data, dict):
                         raise ValueError("batch success row missing payload")
                     results[file_path] = self._payload_from_extractor_data(file_path, payload_data)
+                    self._report_extraction_complete(file_path)
                 else:
                     error_text = str(row.get("error") or "")
                     if self._should_retry_extraction_error(error_text):
@@ -535,6 +599,7 @@ class SimilarityEngine:
                     else:
                         logging.error("C++ Extractor Error for %s: %s", file_path.name, error_text.strip())
                         results[file_path] = self._cache_negative_and_return_none(file_path, error_text)
+                        self._report_extraction_complete(file_path)
         except Exception as exc:
             logging.info("C++ batch extractor emitted invalid output; retrying unresolved files: %s", exc)
             batch_incomplete = True

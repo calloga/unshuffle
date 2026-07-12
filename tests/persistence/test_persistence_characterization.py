@@ -866,7 +866,7 @@ class PersistenceTests(unittest.TestCase):
         with mock.patch("os.cpu_count", return_value=64), \
              mock.patch("unshuffle.core.concurrency.sys.platform", "linux"), \
              mock.patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(_extractor_worker_count(20), 8)
+            self.assertEqual(_extractor_worker_count(20), 4)
             self.assertEqual(_extractor_worker_count(3), 3)
 
         with mock.patch.dict("os.environ", {"UNSHUFFLE_EXTRACTOR_WORKERS": "2"}, clear=True):
@@ -884,13 +884,14 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(_extractor_worker_count(20), 2)
 
         with mock.patch("unshuffle.core.concurrency.sys.platform", "darwin"), \
+             mock.patch("unshuffle.logic.planning.service.sys.platform", "darwin"), \
              mock.patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(_extractor_worker_count(20), 4)
+            self.assertEqual(_extractor_worker_count(20), 2)
 
         with mock.patch.dict("os.environ", {"UNSHUFFLE_EXTRACTOR_WORKERS": "invalid"}, clear=True), \
              mock.patch("unshuffle.core.concurrency.sys.platform", "linux"), \
              mock.patch("os.cpu_count", return_value=64):
-            self.assertEqual(_extractor_worker_count(20), 8)
+            self.assertEqual(_extractor_worker_count(20), 4)
 
     def test_run_plan_extracts_duplicate_hash_once_per_scan(self):
         with tempfile.TemporaryDirectory() as tmp:

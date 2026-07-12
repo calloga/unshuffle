@@ -171,6 +171,11 @@ def clear_duplicate_shadow(rec) -> None:
 
 
 def buildable_records(records):
+    store = getattr(records, "store", None)
+    if store is not None and hasattr(store, "iter_buildable_records"):
+        from .staging_session_store import BuildableDbRecordSequence
+
+        return BuildableDbRecordSequence(store)
     return [rec for rec in records or [] if not is_duplicate_shadow(rec)]
 
 

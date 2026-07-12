@@ -832,6 +832,37 @@ def test_acoustic_session_state_uses_db_row_ids_without_hydrating_records(tmp_pa
         db.close()
 
 
+def test_acoustic_session_state_streams_digest_without_hydrating_rows(tmp_path, monkeypatch):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(i) for i in range(5)])
+        store = StagingSessionStore(db, "session")
+        model = DbBackedStagingTableModel(store)
+        monkeypatch.setattr(
+            store,
+            "acoustic_state_rows",
+            lambda: (_ for _ in ()).throw(AssertionError("rows must not be materialized")),
+        )
+        app = type(
+            "App",
+            (),
+            {"model": model, "engine": type("Engine", (), {"session_id": "session"})()},
+        )()
+        state = AcousticSessionState(app)
+
+        first = state.current_key()
+        second = state.current_key()
+        store.update_row(2, {"category": "Changed"})
+        changed = state.current_key()
+
+        assert first
+        assert second == first
+        assert changed != first
+    finally:
+        db.close()
+
+
 def test_db_backed_records_sequence_is_unfiltered_all_records(tmp_path):
     db = UnshuffleDB(tmp_path / "test.db")
     try:
@@ -843,6 +874,29 @@ def test_db_backed_records_sequence_is_unfiltered_all_records(tmp_path):
         assert model.rowCount() == 1
         assert len(model.records) == 5
         assert [record.staging_row_id for record in model.records] == [0, 1, 2, 3, 4]
+    finally:
+        db.close()
+
+
+def test_db_backed_buildable_records_stream_and_exclude_duplicate_shadows(tmp_path):
+    from gui.core.workflow_records import buildable_records
+
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(i) for i in range(5)])
+        db.conn.execute(
+            "UPDATE staging_records SET evidence_json = ? WHERE session_id = ? AND row_id = ?",
+            ('{"duplicate_shadow":{"is_shadow":true}}', "session", 2),
+        )
+        db.conn.commit()
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+
+        records = buildable_records(model.records)
+
+        assert hasattr(records, "store")
+        assert len(records) == 4
+        assert [record.staging_row_id for record in records] == [0, 1, 3, 4]
     finally:
         db.close()
 

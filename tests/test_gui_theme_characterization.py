@@ -36,6 +36,56 @@ class ThemeNormalizationTests(unittest.TestCase):
 
 
 class ThemeManagerTests(unittest.TestCase):
+    def test_theme_binding_refreshes_hidden_reusable_dialog_children(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication, QWidget
+        from gui.main.window_theme import refresh_theme_bindings
+
+        class _ReusableDialog(QWidget):
+            def __init__(self, parent):
+                super().__init__(parent)
+                self.refresh_count = 0
+
+            def refresh_theme(self):
+                self.refresh_count += 1
+
+        app = QApplication.instance() or QApplication([])
+        window = QWidget()
+        dialog = _ReusableDialog(window)
+        dialog.hide()
+        window._style_page_nav_bar = mock.Mock()
+        window.library_tab = None
+        try:
+            refresh_theme_bindings(window)
+            self.assertEqual(dialog.refresh_count, 1)
+        finally:
+            window.close()
+            window.deleteLater()
+            app.processEvents()
+
+    def test_coherence_map_theme_refresh_clears_render_pixmap_history(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.coherence_analyzer import CoherenceMapWidget
+
+        app = QApplication.instance() or QApplication([])
+        widget = CoherenceMapWidget()
+        try:
+            widget._cached_bg_pixmap = object()
+            widget._cached_points_pixmap = object()
+            widget._background_pixmap_cache[("old-theme",)] = object()
+            widget._points_pixmap_cache[("old-theme",)] = object()
+
+            widget.refresh_theme()
+
+            self.assertIsNone(widget._cached_bg_pixmap)
+            self.assertIsNone(widget._cached_points_pixmap)
+            self.assertFalse(widget._background_pixmap_cache)
+            self.assertFalse(widget._points_pixmap_cache)
+        finally:
+            widget.deleteLater()
+            app.processEvents()
+
     def test_theme_manager_tracks_requested_and_effective_theme_keys(self):
         manager = ThemeManager()
 

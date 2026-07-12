@@ -492,7 +492,7 @@ class CoherenceMapWidget(QWidget):
         painter.restore()
 
     def refresh_theme(self) -> None:
-        self._invalidate_cache()
+        self._invalidate_cache(clear_history=True)
         self.update()
 
 

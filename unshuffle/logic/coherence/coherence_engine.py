@@ -6,6 +6,8 @@ from typing import Any, Callable, Iterable, Protocol
 
 import numpy as np
 
+from ...core.numerics import symmetric_eigh
+
 from ...audio import SimilarityEngine
 from ...core.features import (
     DEFAULT_DISTANCE_WEIGHTS,
@@ -146,6 +148,46 @@ class CoherenceEngine:
                 )
             results = updated
         return results, candidates
+
+    def audit_group(
+        self,
+        group_key: tuple[str, str, str],
+        records: list[CoherenceRecord],
+    ) -> tuple[list[CoherenceResult], _GroupContext, list[dict[str, Any]]]:
+        """Audit one already-grouped record batch without retaining session-wide inputs."""
+        return self._audit_group(group_key, records)
+
+    def with_cluster_adjacency_summaries(
+        self,
+        results: list[CoherenceResult],
+        cluster_profiles: list[dict[str, Any]],
+        adjacency_by_cluster: dict[str, dict[str, Any] | None] | None = None,
+    ) -> list[CoherenceResult]:
+        return self._with_cluster_adjacency_summaries(
+            results,
+            cluster_profiles,
+            adjacency_by_cluster=adjacency_by_cluster,
+        )
+
+    def cluster_adjacency_index(
+        self,
+        cluster_profiles: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any] | None]:
+        return {
+            str(profile.get("cluster_id") or ""): self._nearest_adjacent_cluster(
+                profile, cluster_profiles
+            )
+            for profile in cluster_profiles
+        }
+
+    def refinement_candidates(
+        self,
+        records: list[CoherenceRecord],
+        results: list[CoherenceResult],
+        group_context: _GroupContext,
+        cluster_profiles: list[dict[str, Any]],
+    ) -> list[RefinementCandidate]:
+        return self._refinement_candidates(records, results, group_context, cluster_profiles)
 
     def _audit_group(
         self,
@@ -440,6 +482,80 @@ class CoherenceEngine:
             distances = np.where(any_silent, np.where(left_fully_silent == fully_silent, 0.0, 2.0), distances)
         return distances.astype(float, copy=False)
 
+    def _distance_matrix_from_vectorized(
+        self,
+        left_records: list[CoherenceRecord],
+        right_records: list[CoherenceRecord],
+    ) -> np.ndarray | None:
+        weights = getattr(self.similarity_engine, "weights", None)
+        if weights is None or any(key not in weights for key in DEFAULT_DISTANCE_WEIGHTS):
+            return None
+        left_inputs = self._vectorized_inputs(left_records)
+        right_inputs = self._vectorized_inputs(right_records)
+        if left_inputs is None or right_inputs is None:
+            return None
+        left = left_inputs["vectors"]
+        right = right_inputs["vectors"]
+        distances = (
+            float(weights["brightness"])
+            * np.abs(left[:, [IDX_BRIGHTNESS]] - right[:, IDX_BRIGHTNESS])
+            + float(weights["percussivity"])
+            * np.abs(left[:, [IDX_PERCUSSIVITY]] - right[:, IDX_PERCUSSIVITY])
+            + float(weights["fft_register"])
+            * np.abs(left[:, [IDX_FFT_REGISTER]] - right[:, IDX_FFT_REGISTER])
+            + float(weights["zcr"])
+            * np.abs(left[:, [IDX_ZCR]] - right[:, IDX_ZCR])
+            + float(weights["decay"])
+            * np.abs(left[:, [IDX_DECAY]] - right[:, IDX_DECAY])
+            + float(weights["tonalness"])
+            * np.abs(left_inputs["tonalness"][:, None] - right_inputs["tonalness"][None, :])
+        )
+
+        dot = left_inputs["chroma"] @ right_inputs["chroma"].T
+        denom = left_inputs["chroma_norm"][:, None] * right_inputs["chroma_norm"][None, :]
+        cosine = np.ones_like(distances, dtype=np.float32)
+        valid = denom >= 1e-9
+        cosine[valid] = 1.0 - np.clip(dot[valid] / denom[valid], -1.0, 1.0)
+        both_empty = (left_inputs["chroma_norm"][:, None] < 1e-9) & (
+            right_inputs["chroma_norm"][None, :] < 1e-9
+        )
+        cosine[both_empty] = 0.0
+        avg_percussivity = (
+            left[:, [IDX_PERCUSSIVITY]] + right[:, IDX_PERCUSSIVITY]
+        ) / 2.0
+        avg_tonalness = (
+            left_inputs["tonalness"][:, None] + right_inputs["tonalness"][None, :]
+        ) / 2.0
+        distances += (
+            float(weights["chroma"])
+            * avg_tonalness
+            * (1.0 - avg_percussivity)
+            * cosine
+        )
+
+        left_duration = left[:, [IDX_ACTIVE_DURATION]]
+        right_duration = right[:, IDX_ACTIVE_DURATION]
+        duration_valid = (left_duration > 0) & (right_duration[None, :] > 0)
+        max_duration = np.maximum(left_duration, right_duration[None, :])
+        length_penalty = np.zeros_like(distances, dtype=np.float32)
+        length_penalty[duration_valid] = np.minimum(
+            np.abs(left_duration - right_duration[None, :])[duration_valid]
+            / max_duration[duration_valid],
+            1.0,
+        )
+        distances += float(weights["active_duration"]) * length_penalty
+
+        any_silent = left_inputs["silent_feature"][:, None] | right_inputs["silent_feature"][None, :]
+        same_silence = (
+            left_inputs["fully_silent"][:, None] == right_inputs["fully_silent"][None, :]
+        )
+        distances = np.where(
+            any_silent,
+            np.where(same_silence, 0.0, 2.0),
+            distances,
+        )
+        return distances.astype(float, copy=False)
+
     def _vectorized_inputs(self, records: list[CoherenceRecord]) -> dict[str, np.ndarray] | None:
         if records is self._last_vector_records:
             return self._last_vector_inputs
@@ -468,6 +584,21 @@ class CoherenceEngine:
 
     def _knn_similarity(self, distances: np.ndarray, nearest: np.ndarray) -> np.ndarray:
         n = distances.shape[0]
+        if hasattr(distances, "nearest_distances"):
+            from .spatial_index import SparseSimilarityGraph
+
+            nearest_distances = distances.nearest_distances
+            kth = np.maximum(nearest_distances[:, -1].astype(float, copy=False), 1e-9)
+            weights = np.zeros_like(nearest_distances, dtype=np.float64)
+            for i in range(n):
+                for rank, j_value in enumerate(nearest[i]):
+                    j = int(j_value)
+                    if j < 0 or j == i:
+                        continue
+                    denom = max(1e-9, kth[i] * kth[j])
+                    distance = float(nearest_distances[i, rank])
+                    weights[i, rank] = math.exp(-((distance ** 2) / denom))
+            return SparseSimilarityGraph(nearest, weights)
         W = np.zeros((n, n), dtype=float)
         kth = np.array([
             max(float(distances[i, nearest[i][-1]]) if len(nearest[i]) else 0.0, 1e-9)
@@ -480,15 +611,37 @@ class CoherenceEngine:
         return np.maximum(W, W.T)
 
     def _cluster_labels(self, W: np.ndarray, n: int) -> np.ndarray:
+        if hasattr(W, "normalized_matmul"):
+            eigen_count = min(n - 1, min(6, max(1, n // 8)) + 1)
+            if eigen_count <= 1:
+                return np.zeros(n, dtype=int)
+            rng = np.random.default_rng(0)
+            vectors, _ = np.linalg.qr(rng.standard_normal((n, eigen_count)))
+            for _iteration in range(60):
+                updated, _ = np.linalg.qr(W.normalized_matmul(vectors))
+                if np.linalg.norm(np.abs(updated) - np.abs(vectors)) < 1e-7:
+                    vectors = updated
+                    break
+                vectors = updated
+            projected = vectors.T @ W.normalized_matmul(vectors)
+            adjacency_values, rotation = symmetric_eigh(projected)
+            order = np.argsort(adjacency_values)[::-1]
+            adjacency_values = adjacency_values[order]
+            vectors = vectors @ rotation[:, order]
+            values = 1.0 - adjacency_values
+            return self._cluster_labels_from_eigenpairs(values, vectors, n)
         degree = W.sum(axis=1)
         safe_degree = np.where(degree > 1e-12, degree, 1.0)
         inv_d = 1.0 / np.sqrt(safe_degree)
         L = np.eye(n) - inv_d[:, None] * W * inv_d[None, :]
-        values, vectors = np.linalg.eigh(L)
+        values, vectors = symmetric_eigh(L)
         order = np.argsort(values)
         values = values[order]
         vectors = vectors[:, order]
 
+        return self._cluster_labels_from_eigenpairs(values, vectors, n)
+
+    def _cluster_labels_from_eigenpairs(self, values: np.ndarray, vectors: np.ndarray, n: int) -> np.ndarray:
         max_clusters = min(6, max(1, n // 8))
         if max_clusters < 2:
             return np.zeros(n, dtype=int)
@@ -544,7 +697,7 @@ class CoherenceEngine:
         n = len(records)
         cluster_medoids = cluster_medoids or self._cluster_medoid_indexes(clusters, distances)
         density_ratios = density_ratios or self._cluster_density_ratios(clusters, distances, cluster_medoids)
-        local_degree = W.sum(axis=1)
+        local_degree = np.asarray(W.sum(axis=1)).ravel()
         mean_distance = np.array([
             np.mean(distances[i, nearest[i]]) if len(nearest[i]) else 0.0
             for i in range(n)
@@ -590,6 +743,24 @@ class CoherenceEngine:
             if len(member_indexes) <= 1:
                 medoids[label] = int(member_indexes[0])
                 continue
+            if hasattr(distances, "nearest_distances"):
+                member_set = set(int(index) for index in member_indexes)
+                best_index = int(member_indexes[0])
+                best_score = float("inf")
+                for index in member_indexes:
+                    neighbors = distances.nearest[int(index)]
+                    neighbor_distances = distances.nearest_distances[int(index)]
+                    local = [
+                        float(distance)
+                        for neighbor, distance in zip(neighbors, neighbor_distances)
+                        if int(neighbor) in member_set
+                    ]
+                    score = float(np.mean(local)) if local else float("inf")
+                    if score < best_score:
+                        best_index = int(index)
+                        best_score = score
+                medoids[label] = best_index
+                continue
             sub = distances[np.ix_(member_indexes, member_indexes)]
             medoid_local = int(np.argmin(sub.sum(axis=1)))
             medoids[label] = int(member_indexes[medoid_local])
@@ -629,14 +800,13 @@ class CoherenceEngine:
         self,
         results: list[CoherenceResult],
         cluster_profiles: list[dict[str, Any]],
+        *,
+        adjacency_by_cluster: dict[str, dict[str, Any] | None] | None = None,
     ) -> list[CoherenceResult]:
         if len(cluster_profiles) < 2:
             return results
-        profile_by_id = {str(profile.get("cluster_id") or ""): profile for profile in cluster_profiles}
-        adjacency_by_cluster = {
-            str(profile.get("cluster_id") or ""): self._nearest_adjacent_cluster(profile, cluster_profiles)
-            for profile in cluster_profiles
-        }
+        if adjacency_by_cluster is None:
+            adjacency_by_cluster = self.cluster_adjacency_index(cluster_profiles)
         updated: list[CoherenceResult] = []
         for result in results:
             adjacency = adjacency_by_cluster.get(result.cluster_id or "")

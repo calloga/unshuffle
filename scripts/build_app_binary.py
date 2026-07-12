@@ -13,6 +13,7 @@ ASSET_PATHS = (
     ("data/anchors", "data/anchors"),
     ("data/metadata", "data/metadata"),
     ("data/taxonomy", "data/taxonomy"),
+    ("unshuffle/persistence/migrations", "unshuffle/persistence/migrations"),
     ("gui/styles/themes", "gui/styles/themes"),
     ("icons", "icons"),
     ("bin", "bin"),

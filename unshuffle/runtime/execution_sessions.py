@@ -11,9 +11,12 @@ def execution_session_sources(
     target_dir: Path,
 ) -> tuple[Path, list[Path]]:
     effective_sources = list(session_source_roots)
+    first_record = None
     if not effective_sources:
         seen_sources = set()
         for record in plan:
+            if first_record is None:
+                first_record = record
             source_root = record.source_path.parent.resolve()
             source_key = str(source_root)
             if source_key in seen_sources:
@@ -21,7 +24,7 @@ def execution_session_sources(
             seen_sources.add(source_key)
             effective_sources.append(source_root)
     effective_primary_source = session_source_root or (
-        effective_sources[0] if effective_sources else (plan[0].source_path.parent if plan else target_dir)
+        effective_sources[0] if effective_sources else (first_record.source_path.parent if first_record is not None else target_dir)
     )
     return effective_primary_source, effective_sources
 

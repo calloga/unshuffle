@@ -33,6 +33,10 @@ def list_coherence_result_clusters(db, session_id: str) -> List[Dict[str, Any]]:
     return coherence_store.list_coherence_result_clusters(db.conn, session_id)
 
 
+def coherence_cache_stats(db, session_id: str) -> Dict[str, int]:
+    return coherence_store.coherence_cache_stats(db.conn, session_id)
+
+
 def upsert_refinement_candidates(db, session_id: str, candidates: List[Any]) -> None:
     def _write() -> None:
         coherence_store.upsert_refinement_candidates(db.conn, session_id, candidates)
@@ -73,6 +77,11 @@ def list_coherence_review_decisions(
     )
 
 
+def apply_target_review_decisions_to_staging(db, session_id: str) -> int:
+    with db._write_transaction():
+        return coherence_store.apply_target_review_decisions_to_staging(db.conn, session_id)
+
+
 def upsert_anchor_candidates(db, session_id: str, anchors: List[Any]) -> None:
     def _write() -> None:
         coherence_store.upsert_anchor_candidates(db.conn, session_id, anchors)
@@ -84,6 +93,24 @@ def upsert_coherence_audit(db, session_id: str, results: List[Any], candidates: 
         coherence_store.upsert_coherence_results(db.conn, session_id, results)
         coherence_store.upsert_refinement_candidates(db.conn, session_id, candidates)
         coherence_store.upsert_anchor_candidates(db.conn, session_id, anchors)
+    _with_write_retry(db, _write)
+
+
+def clear_generated_coherence_audit(db, session_id: str) -> None:
+    _with_write_retry(db, lambda: coherence_store.clear_generated_coherence_audit(db.conn, session_id))
+
+
+def append_coherence_group(
+    db,
+    session_id: str,
+    results: List[Any],
+    candidates: List[Any] | None = None,
+    anchors: List[Any] | None = None,
+) -> None:
+    def _write() -> None:
+        coherence_store.append_coherence_results(db.conn, session_id, results)
+        coherence_store.append_refinement_candidates(db.conn, session_id, list(candidates or ()))
+        coherence_store.append_anchor_candidates(db.conn, session_id, list(anchors or ()))
     _with_write_retry(db, _write)
 
 

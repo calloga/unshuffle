@@ -33,6 +33,7 @@ def test_coherence_results_and_refinement_candidate_states_round_trip(tmp_path: 
             ],
         )
         assert db.list_coherence_results("s1")[0]["coherence_status"] == "low_coherence"
+        assert db.coherence_cache_stats("s1") == {"result_count": 1, "missing_count": 1}
 
         candidate = RefinementCandidate(
             candidate_id="c1",

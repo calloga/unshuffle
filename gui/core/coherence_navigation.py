@@ -8,8 +8,11 @@ from PySide6.QtCore import QItemSelection, QItemSelectionModel
 def source_rows_for_record_ids(model, record_ids: list[str]) -> list[int]:
     if not record_ids or model is None:
         return []
-    rows = []
     target_ids = set(item for item in record_ids)
+    row_ids = getattr(model, "_row_ids", None)
+    if isinstance(row_ids, list):
+        return [row for row, row_id in enumerate(row_ids) if str(row_id) in target_ids]
+    rows = []
     for row, rec in enumerate(model.records):
         rec_id = str(getattr(rec, "staging_row_id", row) if getattr(rec, "staging_row_id", None) is not None else row)
         if rec_id in target_ids:
@@ -22,6 +25,16 @@ def select_library_path(app, source_path: Path) -> None:
     proxy = getattr(app, "proxy_model", None)
     view = getattr(getattr(app, "library_tab", None), "view_table", None)
     if model is None or proxy is None or view is None:
+        return
+    store = getattr(model, "store", None)
+    row_ids = getattr(model, "_row_ids", None)
+    if store is not None and isinstance(row_ids, list) and hasattr(store, "row_id_for_source_path"):
+        row_id = store.row_id_for_source_path(source_path)
+        if row_id is not None:
+            try:
+                select_source_rows(app, [row_ids.index(row_id)])
+            except ValueError:
+                pass
         return
     target = source_path.resolve().as_posix().lower()
     source_row = None

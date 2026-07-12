@@ -113,5 +113,33 @@ def records_from_staging_rows(rows: Iterable[dict[str, Any]]) -> tuple[list[Cohe
     return records, stats
 
 
+def stats_from_staging_rows(rows: Iterable[dict[str, Any]]) -> VectorIndexStats:
+    total_count = 0
+    eligible_count = 0
+    valid_count = 0
+    group_counts: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        total_count += 1
+        if not eligible_staging_row(row):
+            continue
+        eligible_count += 1
+        if valid_coherence_vector(row.get("feature_vector", row.get("acoustic_vector"))) is None:
+            continue
+        valid_count += 1
+        group_key = (
+            str(row.get("audio_type") or "").strip(),
+            str(row.get("category") or "").strip(),
+            str(row.get("subcategory") or "").strip(),
+        )
+        group_counts[group_key] = group_counts.get(group_key, 0) + 1
+    return VectorIndexStats(
+        total_records=total_count,
+        eligible_records=eligible_count,
+        valid_vector_records=valid_count,
+        coverage=(valid_count / eligible_count) if eligible_count else 0.0,
+        has_minimum_group=any(count >= 8 for count in group_counts.values()),
+    )
+
+
 def current_feature_space_version() -> str:
     return CURRENT_FEATURE_SPACE_VERSION

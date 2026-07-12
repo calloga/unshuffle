@@ -1911,6 +1911,84 @@ class MainWindowDebounceTests(unittest.TestCase):
 
         window._reset_page_history.assert_called_once_with()
 
+    def test_runtime_engine_does_not_query_stale_model_during_rescan(self):
+        from gui.main import window_runtime
+
+        window = SimpleNamespace(
+            engine=None,
+            _scan_finalizing=True,
+            search_controller=SimpleNamespace(
+                engine=None,
+                search_engine=SimpleNamespace(set_bridge=mock.Mock()),
+            ),
+            data_manager=SimpleNamespace(set_bridge=mock.Mock()),
+            library_tab=SimpleNamespace(set_saved_filters=mock.Mock()),
+            settings_controller=SimpleNamespace(get_saved_filters=mock.Mock()),
+            worker_manager=SimpleNamespace(set_engine=mock.Mock()),
+            filter_controller=SimpleNamespace(refresh_dock_filters=mock.Mock()),
+            system_controller=None,
+        )
+        engine = SimpleNamespace()
+
+        window_runtime.apply_runtime_engine(window, engine)
+
+        self.assertIs(window.engine, engine)
+        window.library_tab.set_saved_filters.assert_not_called()
+        window.settings_controller.get_saved_filters.assert_not_called()
+        window.filter_controller.refresh_dock_filters.assert_not_called()
+        window.worker_manager.set_engine.assert_called_once_with(engine)
+
+    def test_map_prewarm_waits_for_running_coherence_worker(self):
+        from gui.core.view_controller import ViewController
+
+        class _Signal:
+            def __init__(self):
+                self.callbacks = []
+
+            def connect(self, callback):
+                self.callbacks.append(callback)
+
+            def disconnect(self, callback):
+                self.callbacks.remove(callback)
+
+            def emit(self):
+                for callback in list(self.callbacks):
+                    callback()
+
+        signal = _Signal()
+        coherence = SimpleNamespace(
+            _running_workers={object()},
+            coherenceFinished=signal,
+        )
+        page = SimpleNamespace(
+            refresh_from_app=mock.Mock(),
+            prewarm_library_projections=mock.Mock(),
+        )
+        app = SimpleNamespace(
+            coherence_controller=coherence,
+            session_store=SimpleNamespace(tagged_row_ids=mock.Mock(return_value=[7, 8])),
+            library_tab=SimpleNamespace(is_view_available=mock.Mock(return_value=True)),
+            _ensure_library_map=mock.Mock(return_value=page),
+        )
+        controller = ViewController()
+        controller.app = app
+
+        with mock.patch(
+            "gui.core.view_controller.QTimer.singleShot",
+            side_effect=lambda _delay, callback: callback(),
+        ):
+            controller.prewarm_possible_duplicate_map()
+            page.refresh_from_app.assert_not_called()
+            coherence._running_workers.clear()
+            signal.emit()
+
+        page.refresh_from_app.assert_called_once_with(
+            app,
+            force=False,
+            priority_row_ids=[7, 8],
+        )
+        page.prewarm_library_projections.assert_called_once_with()
+
     def test_unknown_system_section_restores_to_current_default(self):
         from gui.main import window as window_module
 
@@ -4135,6 +4213,25 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         app.footer.set_status.assert_not_called()
         app.footer.log.assert_not_called()
         app.footer.set_progress.assert_not_called()
+
+    def test_scan_worker_finished_payload_routes_to_controller_boundary(self):
+        from gui.utils.ui_helpers import on_worker_finished
+
+        app = mock.Mock()
+        app.settings.value.return_value = "D:/Library"
+        payload = {
+            "records": [],
+            "append": True,
+            "stats": {"total_scanned": 12, "added_count": 3},
+        }
+
+        with mock.patch("gui.utils.history.invalidate_history_cache") as invalidate:
+            on_worker_finished(app, "scan", payload)
+
+        invalidate.assert_called_once_with("D:/Library")
+        app.workflow_controller.handle_scan_finished.assert_called_once_with(
+            [], True, payload["stats"]
+        )
 
     def test_worker_manager_ignores_stale_finish_and_error_callbacks(self):
         from gui.core.worker_manager import WorkerManager

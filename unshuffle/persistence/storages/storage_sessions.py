@@ -1,4 +1,5 @@
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any, Dict, List, Optional, Tuple
 
 from unshuffle.persistence.stores import staging_store, session_store
@@ -83,6 +84,16 @@ def add_staging_records_bulk(db, session_id: str, records: List[Tuple]) -> None:
         staging_store.add_staging_records_bulk(db.conn, session_id, records)
 
 
+def add_staging_records_iter(db, session_id: str, records: Iterable[Tuple], batch_size: int = 1000) -> int:
+    with db._write_transaction():
+        return staging_store.add_staging_records_iter(
+            db.conn,
+            session_id,
+            records,
+            batch_size=batch_size,
+        )
+
+
 def get_staging_records(db, session_id: str) -> List[Dict]:
     return staging_store.get_staging_records(db.conn, session_id)
 
@@ -97,6 +108,18 @@ def get_coherence_staging_records(db, session_id: str) -> List[Dict]:
 
 def iter_coherence_staging_records(db, session_id: str, batch_size: int = 1000):
     return staging_store.iter_coherence_staging_records(db.conn, session_id, batch_size=batch_size)
+
+
+def iter_coherence_group_keys(db, session_id: str):
+    return staging_store.iter_coherence_group_keys(db.conn, session_id)
+
+
+def coherence_group_records(db, session_id: str, group_key: tuple[str, str, str]):
+    return staging_store.coherence_group_records(db.conn, session_id, group_key)
+
+
+def coherence_records_by_row_ids(db, session_id: str, row_ids: list[int]):
+    return staging_store.coherence_records_by_row_ids(db.conn, session_id, row_ids)
 
 
 def update_staging_record(db, session_id: str, row_id: int, data: Dict[str, str]) -> None:
