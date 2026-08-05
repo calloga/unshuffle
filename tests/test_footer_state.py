@@ -349,6 +349,25 @@ def test_footer_draft_hides_notifications_and_restores_after(monkeypatch):
     assert not footer.btn_view_summary.isHidden()
 
 
+def test_merged_footer_draft_hides_count_and_status_copy(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets.footer import ModernFooter
+    from gui.widgets.preview_control_bar import PreviewControlBar
+
+    _app = QApplication.instance() or QApplication([])
+    footer = ModernFooter(audio_bar=PreviewControlBar())
+    footer.set_count("11489 files ready")
+    footer.set_status("No audio selected")
+    footer.set_reorg_draft_state("Draft changes pending", True, can_save=True)
+
+    assert footer.lbl_count.isHidden()
+    assert footer.lbl_status.isHidden()
+    assert footer.lbl_reorg_draft.isHidden()
+    assert not footer.btn_reorg_discard.isHidden()
+    assert not footer.btn_reorg_save.isHidden()
+
+
 def test_footer_scan_summary_uses_shared_timer(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
@@ -362,6 +381,20 @@ def test_footer_scan_summary_uses_shared_timer(monkeypatch):
     assert not footer.btn_view_summary.isHidden()
     assert footer._notification_timers["summary"].isActive()
     assert footer._notification_timers["summary"].interval() == FOOTER_NOTIFICATION_TIMEOUT_MS
+
+
+def test_footer_update_alert_uses_notification_surface(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets.footer import ModernFooter
+
+    _app = QApplication.instance() or QApplication([])
+    footer = ModernFooter()
+
+    footer.set_update_available(True, "1.2.0")
+
+    assert footer.btn_update_available.text() == "Update 1.2.0"
+    assert not footer.btn_update_available.isHidden()
 
 
 def test_footer_scan_summary_click_dismisses_without_restore(monkeypatch):

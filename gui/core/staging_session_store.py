@@ -14,6 +14,7 @@ from typing import Any, Iterable, Iterator
 
 from unshuffle.core import PlanRecord, parse_tags, plan_record_from_staging_row, tags_to_search_text
 from unshuffle.core.hashing import is_fast_hash
+from unshuffle.core.prefixes import common_filename_tokens_for_packs
 from unshuffle.logic.tree_organization import (
     TreeOrganizationProfile,
     TreeOrganizationResolver,
@@ -71,11 +72,16 @@ MAP_RECORD_COLUMNS = (
 )
 
 
+class StagingRowsUpdateCanceled(RuntimeError):
+    """Raised inside a staging transaction when its worker is canceled."""
+
+
 @dataclass(frozen=True)
 class StagingQuery:
     matched_ids: frozenset[int] | None = None
     audio_types: frozenset[str] | None = None
     show_non_audio_assets: bool = False
+    show_duplicates: bool = True
     path_prefixes: tuple[str, ...] = ()
     confidence_min: float = 0.0
     confidence_max: float = 1.0
@@ -323,6 +329,22 @@ class StagingSessionStore:
         )
         return {int(row[0]) for row in cursor if row[0] is not None}
 
+    def duplicate_shadow_row_ids(self) -> set[int]:
+        cursor = self.conn.execute(
+            """
+            SELECT row_id
+            FROM staging_records
+            WHERE session_id = ?
+              AND COALESCE(
+                    CASE WHEN json_valid(evidence_json)
+                      THEN json_extract(evidence_json, '$.duplicate_shadow.is_shadow') ELSE 0 END,
+                    0
+                  ) = 1
+            """,
+            (self.session_id,),
+        )
+        return {int(row[0]) for row in cursor if row[0] is not None}
+
     def has_any_tags(self, tags: Iterable[str]) -> bool:
         needles = [str(tag or "").strip().lower() for tag in tags if str(tag or "").strip()]
         if not needles:
@@ -394,6 +416,24 @@ class StagingSessionStore:
         ).fetchone()
         return int(row[0] if row is not None else 0)
 
+    def common_filename_tokens_by_pack(self) -> dict[str, frozenset[str]]:
+        cursor = self.conn.execute(
+            """
+            SELECT pack, source_path FROM staging_records
+            WHERE session_id = ?
+              AND COALESCE(is_preserved, 0) = 0
+              AND COALESCE(audio_type, '') NOT IN ('Non-Audio Assets', 'Utility')
+              AND COALESCE(CASE WHEN json_valid(COALESCE(evidence_json, ''))
+                  THEN json_extract(evidence_json, '$.duplicate_shadow.is_shadow') ELSE 0 END, 0) != 1
+            ORDER BY row_id ASC, id ASC
+            """,
+            (self.session_id,),
+        )
+        return common_filename_tokens_for_packs(
+            (str(row[0] or ""), str(row[1] or ""))
+            for row in cursor
+        )
+
     def iter_buildable_records(self, batch_size: int = 1000) -> Iterator[list[PlanRecord]]:
         cursor = self.conn.execute(
             """
@@ -430,6 +470,19 @@ class StagingSessionStore:
             if not rows:
                 break
             yield [plan_record_from_staging_row(dict(row), parse_tags) for row in rows]
+
+    def iter_tree_records_by_ids(
+        self,
+        row_ids: Iterable[int],
+        *,
+        batch_size: int = 1000,
+    ) -> Iterator[list[PlanRecord]]:
+        for rows in self.iter_rows_by_ids(
+            row_ids,
+            ", ".join(TREE_RECORD_COLUMNS),
+            batch_size=batch_size,
+        ):
+            yield [plan_record_from_staging_row(row, parse_tags) for row in rows]
 
     def default_tree_group_values(
         self,
@@ -487,6 +540,8 @@ class StagingSessionStore:
         *,
         confidence_floor: float = 0.0,
         confidence_filter_enabled: bool = True,
+        progress_callback=None,
+        interrupted_check=None,
     ) -> str:
         signature = self.custom_tree_projection_signature(
             profile,
@@ -506,12 +561,67 @@ class StagingSessionStore:
         if projected_count == staging_count:
             return signature
 
+        def check_interrupted() -> None:
+            if callable(interrupted_check) and interrupted_check():
+                raise StagingRowsUpdateCanceled()
+
         validation = TreeOrganizationResolver().validate_profile(profile, [])
         if not validation.valid:
             raise ValueError("\n".join(validation.blocking_messages))
 
-        record_batches = lambda: self.iter_tree_records(None, batch_size=1000)
-        semantic_profile = semantic_profile_for_record_batches(profile, record_batches)
+        processed = 0
+        route_count = staging_count
+
+        def semantic_batches():
+            nonlocal processed
+            for batch in self.iter_tree_records(None, batch_size=1000):
+                check_interrupted()
+                yield batch
+                processed += len(batch)
+                if callable(progress_callback):
+                    progress_callback(processed, staging_count + route_count)
+
+        semantic_profile = semantic_profile_for_record_batches(profile, semantic_batches)
+        missing_row_ids: list[int] | None = None
+        if projected_count:
+            missing_row_ids = [
+                int(row[0])
+                for row in self.conn.execute(
+                    """
+                    SELECT s.row_id
+                    FROM staging_records AS s
+                    WHERE s.session_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM custom_tree_memberships AS m
+                          WHERE m.session_id = s.session_id
+                            AND m.profile_id = ?
+                            AND m.projection_signature = ?
+                            AND m.row_id = s.row_id
+                      )
+                    ORDER BY s.row_id ASC, s.id ASC
+                    """,
+                    (self.session_id, profile.id, signature),
+                )
+            ]
+            route_count = len(missing_row_ids)
+
+        def route_batches():
+            nonlocal processed
+            source = (
+                self.iter_tree_records_by_ids(missing_row_ids or (), batch_size=1000)
+                if missing_row_ids is not None
+                else self.iter_tree_records(None, batch_size=1000)
+            )
+            for batch in source:
+                check_interrupted()
+                yield batch
+                processed += len(batch)
+                if callable(progress_callback):
+                    progress_callback(processed, staging_count + route_count)
+
+        if callable(progress_callback):
+            progress_callback(0, staging_count + route_count)
         builder = TreeRouteBuilder()
         insert_sql = """
             INSERT OR REPLACE INTO custom_tree_memberships (
@@ -522,13 +632,15 @@ class StagingSessionStore:
         """
         pending: list[tuple[Any, ...]] = []
         with self.conn:
-            self._invalidate_custom_tree_cache()
-            self.conn.execute(
-                "DELETE FROM custom_tree_memberships "
-                "WHERE session_id = ? AND profile_id = ? AND projection_signature = ?",
-                (self.session_id, profile.id, signature),
-            )
-            for batch in record_batches():
+            self._invalidate_custom_tree_cache(profile.id)
+            if not projected_count:
+                self.conn.execute(
+                    "DELETE FROM custom_tree_memberships "
+                    "WHERE session_id = ? AND profile_id = ? AND projection_signature = ?",
+                    (self.session_id, profile.id, signature),
+                )
+            for batch in route_batches():
+                check_interrupted()
                 routes = builder.iter_routes(
                     batch,
                     semantic_profile,
@@ -570,9 +682,11 @@ class StagingSessionStore:
                         )
                         parent_key = route_key
                         if len(pending) >= 2000:
+                            check_interrupted()
                             self.conn.executemany(insert_sql, pending)
                             pending.clear()
             if pending:
+                check_interrupted()
                 self.conn.executemany(insert_sql, pending)
         return signature
 
@@ -621,7 +735,6 @@ class StagingSessionStore:
         *,
         keep_signature: str = "",
     ) -> None:
-        self._invalidate_custom_tree_cache()
         if profile_id and keep_signature:
             self.conn.execute(
                 "DELETE FROM custom_tree_memberships "
@@ -638,6 +751,7 @@ class StagingSessionStore:
                 "DELETE FROM custom_tree_memberships WHERE session_id = ?",
                 (self.session_id,),
             )
+        self._invalidate_custom_tree_cache(profile_id, keep_signature=keep_signature)
         self.conn.commit()
 
     def custom_tree_child_counts(
@@ -721,6 +835,30 @@ class StagingSessionStore:
         )
         return [plan_record_from_staging_row(dict(row), parse_tags) for row in cursor]
 
+    def custom_tree_record_count(
+        self,
+        profile_id: str,
+        signature: str,
+        route_key: str,
+        query: StagingQuery | None = None,
+    ) -> int:
+        where, params = self._where(query, table_alias="s")
+        row = self.conn.execute(
+            f"""
+            SELECT COUNT(DISTINCT m.row_id)
+            FROM custom_tree_memberships AS m INDEXED BY idx_custom_tree_memberships_parent
+            JOIN staging_records AS s INDEXED BY idx_staging_records_session_row
+              ON s.session_id = m.session_id AND s.row_id = m.row_id
+            WHERE m.session_id = ?
+              AND m.profile_id = ?
+              AND m.projection_signature = ?
+              AND m.route_key = ?
+              AND {where}
+            """,
+            [self.session_id, profile_id, signature, route_key, *params],
+        ).fetchone()
+        return int(row[0] if row is not None else 0)
+
     def custom_tree_node_counts(
         self,
         profile_id: str,
@@ -756,7 +894,14 @@ class StagingSessionStore:
         if commit:
             self.conn.commit()
 
-    def update_rows(self, updates: Iterable[tuple[int, dict[str, Any]]]) -> None:
+    def update_rows(
+        self,
+        updates: Iterable[tuple[int, dict[str, Any]]],
+        *,
+        batch_size: int = 500,
+        progress_callback=None,
+        interrupted_check=None,
+    ) -> None:
         grouped: dict[tuple[str, ...], list[tuple[Any, ...]]] = {}
         for row_id, fields in updates:
             if not fields:
@@ -768,13 +913,92 @@ class StagingSessionStore:
         if not grouped:
             return
         self._invalidate_custom_tree_cache()
+        completed = 0
+        overall_total = sum(len(values) for values in grouped.values())
         with self.conn:
             for columns, values in grouped.items():
                 assignments = ", ".join(f"{column} = ?" for column in columns)
-                self.conn.executemany(
-                    f"UPDATE staging_records SET {assignments} WHERE session_id = ? AND row_id = ?",
-                    values,
-                )
+                sql = f"UPDATE staging_records SET {assignments} WHERE session_id = ? AND row_id = ?"
+                size = max(1, int(batch_size or 500))
+                for offset in range(0, len(values), size):
+                    if callable(interrupted_check) and interrupted_check():
+                        raise StagingRowsUpdateCanceled()
+                    self.conn.executemany(sql, values[offset : offset + size])
+                    completed += min(size, len(values) - offset)
+                    if callable(progress_callback):
+                        progress_callback(completed, overall_total)
+                    if callable(interrupted_check) and interrupted_check():
+                        raise StagingRowsUpdateCanceled()
+
+    def duplicate_shadow_records_for(
+        self,
+        canonical_records: Iterable[PlanRecord],
+    ) -> list[tuple[PlanRecord, PlanRecord]]:
+        """Return in-session shadows linked to the supplied canonical records."""
+        canonical_by_path = {
+            str(rec.source_path).replace("\\", "/").rstrip("/").lower(): rec
+            for rec in canonical_records
+            if getattr(rec, "is_duplicate_shadow", False) is not True
+        }
+        paths = list(canonical_by_path)
+        if not paths:
+            return []
+
+        matches: list[tuple[PlanRecord, PlanRecord]] = []
+        columns = ", ".join(LIGHTWEIGHT_RECORD_COLUMNS)
+        fast_hashes = sorted({
+            str(getattr(rec, "fast_hash", None) or "")
+            for rec in canonical_by_path.values()
+            if getattr(rec, "fast_hash", None)
+        })
+        rows: dict[int, dict[str, Any]] = {}
+        for offset in range(0, len(fast_hashes), 400):
+            chunk = fast_hashes[offset : offset + 400]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = self.conn.execute(
+                f"""
+                SELECT {columns}
+                FROM staging_records INDEXED BY idx_staging_records_fast_hash
+                WHERE session_id = ?
+                  AND fast_hash IN ({placeholders})
+                  AND COALESCE(CASE WHEN json_valid(COALESCE(evidence_json, ''))
+                      THEN json_extract(evidence_json, '$.duplicate_shadow.is_shadow') ELSE 0 END, 0) = 1
+                ORDER BY row_id ASC, id ASC
+                """,
+                [self.session_id, *chunk],
+            )
+            rows.update((int(row["row_id"]), dict(row)) for row in cursor)
+
+        fallback_paths = [
+            path for path, rec in canonical_by_path.items()
+            if not getattr(rec, "fast_hash", None)
+        ]
+        for offset in range(0, len(fallback_paths), 400):
+            chunk = fallback_paths[offset : offset + 400]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = self.conn.execute(
+                f"""
+                SELECT {columns}
+                FROM staging_records
+                WHERE session_id = ?
+                  AND COALESCE(CASE WHEN json_valid(COALESCE(evidence_json, ''))
+                      THEN json_extract(evidence_json, '$.duplicate_shadow.is_shadow') ELSE 0 END, 0) = 1
+                  AND LOWER(REPLACE(json_extract(
+                      evidence_json, '$.duplicate_shadow.duplicate_of_path'
+                  ), '\\', '/')) IN ({placeholders})
+                ORDER BY row_id ASC, id ASC
+                """,
+                [self.session_id, *chunk],
+            )
+            rows.update((int(row["row_id"]), dict(row)) for row in cursor)
+
+        for data in rows.values():
+            shadow = plan_record_from_staging_row(data, parse_tags)
+            key = str(shadow.duplicate_of_path or "").replace("\\", "/").rstrip("/").lower()
+            canonical = canonical_by_path.get(key)
+            if canonical is not None:
+                matches.append((canonical, shadow))
+        return matches
 
     def has_custom_tree_projection(self, profile_id: str, signature: str) -> bool:
         row = self.conn.execute(
@@ -787,8 +1011,25 @@ class StagingSessionStore:
         ).fetchone()
         return int(row[0] if row is not None else 0) == self.count(None)
 
-    def _invalidate_custom_tree_cache(self) -> None:
-        self._custom_child_count_cache.clear()
+    def _invalidate_custom_tree_cache(
+        self,
+        profile_id: str | None = None,
+        *,
+        keep_signature: str = "",
+    ) -> None:
+        if not profile_id:
+            self._custom_child_count_cache.clear()
+            return
+        profile_key = str(profile_id)
+        retained_signature = str(keep_signature or "")
+        for cache_key in list(self._custom_child_count_cache):
+            cached_profile = str(cache_key[0])
+            cached_signature = str(cache_key[1])
+            if cached_profile != profile_key:
+                continue
+            if retained_signature and cached_signature == retained_signature:
+                continue
+            self._custom_child_count_cache.pop(cache_key, None)
 
     def update_record(self, row_id: int, record: PlanRecord, *, commit: bool = True) -> None:
         evidence = dict(getattr(record, "evidence", {}) or {})
@@ -923,7 +1164,8 @@ class StagingSessionStore:
         return path
 
     def distinct_values(self, column: int | StagingColumn, limit: int = 5000) -> list[str]:
-        db_col = DB_TABLE_COLUMNS.get(StagingColumn(column))
+        staging_column = StagingColumn(column)
+        db_col = DB_TABLE_COLUMNS.get(staging_column)
         if not db_col:
             return []
         cursor = self.conn.execute(
@@ -936,7 +1178,18 @@ class StagingSessionStore:
             """,
             (self.session_id, int(limit)),
         )
-        return [str(row[0]) for row in cursor.fetchall()]
+        values = [str(row[0]) for row in cursor.fetchall()]
+        if staging_column == StagingColumn.TAGS:
+            return sorted(
+                {
+                    str(tag).strip()
+                    for raw_value in values
+                    for tag in parse_tags(raw_value)
+                    if str(tag).strip()
+                },
+                key=str.casefold,
+            )[: int(limit)]
+        return values
 
     def map_candidate_rows(self, *, audio_type: str = "", category: str = "", limit: int = 10000, priority_row_ids: Iterable[int] = ()) -> list[dict[str, Any]]:
         """Return a deterministic, category-balanced map sample.
@@ -1084,6 +1337,14 @@ class StagingSessionStore:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def count_for_fields(self, fields: dict[str, str], query: StagingQuery | None = None) -> int:
+        where, params = self._where_with_fields(fields, query)
+        row = self.conn.execute(
+            f"SELECT COUNT(*) FROM staging_records WHERE {where}",
+            params,
+        ).fetchone()
+        return int(row[0] if row is not None else 0)
+
     def records_for_fields(
         self,
         fields: dict[str, str],
@@ -1132,6 +1393,10 @@ class StagingSessionStore:
                 params.extend(values)
         if not query.show_non_audio_assets:
             clauses.append(f"COALESCE({column('audio_type')}, '') != 'Non-Audio Assets'")
+        if not query.show_duplicates:
+            clauses.append(
+                f"INSTR(' ' || LOWER(COALESCE({column('tags')}, '')) || ' ', ' duplicate ') = 0"
+            )
         for prefix in query.path_prefixes:
             clauses.append(f"LOWER(REPLACE({column('source_path')}, '\\', '/')) LIKE ? ESCAPE '!'")
             params.append(prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%")
@@ -1214,19 +1479,32 @@ class DbRecordSequence:
         for batch in self.store.iter_records(batch_size=1500, query=None):
             yield from batch
 
+    def common_filename_tokens_by_pack(self) -> dict[str, frozenset[str]]:
+        return self.store.common_filename_tokens_by_pack()
+
 
 class BuildableDbRecordSequence:
     """Reiterable bounded DTO stream for build execution."""
 
-    def __init__(self, store: StagingSessionStore):
+    def __init__(self, store: StagingSessionStore, *, include_duplicate_shadows: bool = False):
         self.store = store
+        self.include_duplicate_shadows = bool(include_duplicate_shadows)
 
     def __len__(self) -> int:
+        if self.include_duplicate_shadows:
+            return self.store.count(None)
         return self.store.count_buildable_records()
 
     def __iter__(self) -> Iterator[PlanRecord]:
+        if self.include_duplicate_shadows:
+            for batch in self.store.iter_records(batch_size=1000, query=None):
+                yield from batch
+            return
         for batch in self.store.iter_buildable_records(batch_size=1000):
             yield from batch
+
+    def common_filename_tokens_by_pack(self) -> dict[str, frozenset[str]]:
+        return self.store.common_filename_tokens_by_pack()
 
 
 class LruRecordCache:

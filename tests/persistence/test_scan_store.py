@@ -51,7 +51,14 @@ def test_scan_schema_and_state_transitions_are_additive(tmp_path):
             for row in db.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         assert {"scan_runs", "scan_directories", "scan_items"} <= tables
-        assert db.get_schema_version() >= 9
+        assert db.get_schema_version() >= 10
+        index_columns = [
+            str(row[2])
+            for row in db.conn.execute(
+                "PRAGMA index_info(idx_custom_tree_memberships_session_row)"
+            )
+        ]
+        assert index_columns == ["session_id", "row_id"]
 
         db.create_scan_run(
             scan_id="scan-1",
@@ -120,6 +127,71 @@ def test_scan_schema_and_state_transitions_are_additive(tmp_path):
         db.close()
 
 
+def test_classified_scan_stats_count_duplicate_shadows_as_their_own_category(tmp_path):
+    db = UnshuffleDB(tmp_path / "scan-summary.db")
+    try:
+        db.create_scan_run(
+            scan_id="scan",
+            session_id="session",
+            target_root=tmp_path,
+            roots=[Path("C:/Samples")],
+        )
+        db.insert_scan_directories("scan", _directory_rows(1))
+        db.insert_scan_items("scan", _item_rows(3))
+        db.conn.execute(
+            """
+            UPDATE scan_items SET
+                classification_state = 'done',
+                category = CASE item_id WHEN 0 THEN 'Kicks' WHEN 1 THEN 'Snares' ELSE 'FX' END,
+                effective_hash = CASE WHEN item_id < 2 THEN 'same-hash' ELSE 'unique-hash' END
+            WHERE scan_id = 'scan'
+            """
+        )
+
+        stats = db.classified_scan_session_stats("session")
+
+        assert stats["total"] == 3
+        assert stats["duplicates"] == 1
+        assert stats["category_counts"] == {"Duplicates": 1, "FX": 1, "Kicks": 1}
+    finally:
+        db.close()
+
+
+def test_scan_analysis_hash_update_does_not_mark_non_audio_with_same_hash(tmp_path):
+    db = UnshuffleDB(tmp_path / "scan-analysis.db")
+    try:
+        db.create_scan_run(
+            scan_id="scan-1",
+            session_id="session-1",
+            target_root=tmp_path,
+            roots=[Path("C:/Samples")],
+        )
+        db.insert_scan_directories("scan-1", _directory_rows(1))
+        rows = list(_item_rows(2))
+        rows[1] = (*rows[1][:-1], False)
+        assert db.insert_scan_items("scan-1", rows) == 2
+        db.update_scan_items(
+            "scan-1",
+            [
+                (0, {"effective_hash": "empty-hash"}),
+                (1, {"effective_hash": "empty-hash"}),
+            ],
+        )
+
+        db.update_scan_analysis_by_hash(
+            "scan-1",
+            [("empty-hash", "failed", "decode_error", "Corrupted", "decode failed")],
+        )
+
+        states = db.conn.execute(
+            "SELECT analysis_status FROM scan_items WHERE scan_id = ? ORDER BY item_id",
+            ("scan-1",),
+        ).fetchall()
+        assert [row[0] for row in states] == ["Corrupted", None]
+    finally:
+        db.close()
+
+
 def test_version_nine_database_without_scan_tables_receives_additive_schema(tmp_path):
     import sqlite3
 
@@ -137,7 +209,14 @@ def test_version_nine_database_without_scan_tables_receives_additive_schema(tmp_
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         assert {"scan_runs", "scan_directories", "scan_items"} <= tables
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] >= 9
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] >= 10
+        index_columns = [
+            str(row[2])
+            for row in conn.execute(
+                "PRAGMA index_info(idx_custom_tree_memberships_session_row)"
+            )
+        ]
+        assert index_columns == ["session_id", "row_id"]
     finally:
         conn.close()
 

@@ -68,7 +68,7 @@ class TreeOrganizationIndexCountMixin:
         nodes = self._node_by_id()
         counts: dict[str, int] = defaultdict(int)
         resolver = TreeOrganizationResolver()
-        app = self.parent() if hasattr(self, "parent") else None
+        app = getattr(self, "_app", None)
         controller = getattr(app, "tree_organization_controller", None)
         store = getattr(app, "session_store", None)
         if store is not None and controller is not None:
@@ -105,7 +105,7 @@ class TreeOrganizationIndexCountMixin:
     def _refresh_counts_after_idle(self) -> None:
         if not self._counts_dirty:
             return
-        app = self.parent() if hasattr(self, "parent") else None
+        app = getattr(self, "_app", None)
         store = getattr(app, "session_store", None)
         tree_model = getattr(getattr(app, "library_tab", None), "tree_model", None)
         if store is not None and tree_model is not None:

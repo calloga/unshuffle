@@ -913,7 +913,7 @@ def update_analysis_by_hash(
         UPDATE scan_items SET
             analysis_state = ?, analysis_error_code = ?, analysis_status = ?, analysis_error_text = ?,
             analysis_attempts = analysis_attempts + 1
-        WHERE scan_id = ? AND effective_hash = ?
+        WHERE scan_id = ? AND effective_hash = ? AND is_supported_audio = 1
         """,
         (
             (state, error_code, analysis_status, error_text, scan_id, effective_hash)
@@ -924,12 +924,11 @@ def update_analysis_by_hash(
 
 
 def classified_session_stats(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]:
-    row = conn.execute(
+    rows = conn.execute(
         """
         WITH ranked AS (
             SELECT
                 item.category,
-                item.effective_hash,
                 ROW_NUMBER() OVER (
                     PARTITION BY COALESCE(item.effective_hash, '__item__' || item.scan_id || ':' || item.item_id)
                     ORDER BY run.rowid, item.discovery_order, item.item_id
@@ -938,27 +937,22 @@ def classified_session_stats(conn: sqlite3.Connection, session_id: str) -> dict[
             JOIN scan_runs AS run ON run.scan_id = item.scan_id
             WHERE run.session_id = ? AND item.classification_state = 'done'
         )
-        SELECT COUNT(*) AS total, COALESCE(SUM(duplicate_rank > 1), 0) AS duplicates
+        SELECT
+            CASE WHEN duplicate_rank > 1 THEN 'Duplicates' ELSE category END AS summary_category,
+            COUNT(*) AS item_count,
+            COALESCE(SUM(duplicate_rank > 1), 0) AS duplicate_count
         FROM ranked
+        GROUP BY summary_category
         """,
         (session_id,),
-    ).fetchone()
+    ).fetchall()
     categories = {
         str(category or "Uncategorized"): int(count)
-        for category, count in conn.execute(
-            """
-            SELECT item.category, COUNT(*)
-            FROM scan_items AS item
-            JOIN scan_runs AS run ON run.scan_id = item.scan_id
-            WHERE run.session_id = ? AND item.classification_state = 'done'
-            GROUP BY item.category
-            """,
-            (session_id,),
-        )
+        for category, count, _duplicate_count in rows
     }
     return {
-        "total": int(row[0] if row is not None else 0),
-        "duplicates": int(row[1] if row is not None else 0),
+        "total": sum(int(count) for _category, count, _duplicate_count in rows),
+        "duplicates": sum(int(count) for _category, _item_count, count in rows),
         "category_counts": categories,
     }
 

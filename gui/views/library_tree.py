@@ -7,7 +7,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QTreeView, QAbstractItemView, QApplication, QLabel, QMessageBox
-from PySide6.QtCore import Qt, Signal, QUrl, QMimeData, QPoint, QSortFilterProxyModel, QItemSelectionModel
+from PySide6.QtCore import Qt, Signal, QUrl, QMimeData, QPoint, QSortFilterProxyModel, QItemSelectionModel, QTimer
 from PySide6.QtGui import QDrag, QPixmap
 from unshuffle.core.constants import MAX_SYNC_FOLDER_EXPORT_RECORDS
 from gui.models.library_tree import (
@@ -16,6 +16,7 @@ from gui.models.library_tree import (
     RAW_NAME_ROLE,
     READ_ONLY_ROLE,
     RECORDS_ROLE,
+    RESIDUAL_ROLE,
     SEARCH_TEXT_ROLE,
     SEMANTIC_FIELD_NAMES,
     SOURCE_NODE_ID_ROLE,
@@ -85,6 +86,10 @@ class LibraryTreeView(QTreeView):
         self._export_temp_dirs = []
         self._drag_in_progress = False
         self._internal_drag_active = False
+        self._drag_scroll_direction = 0
+        self._drag_scroll_timer = QTimer(self)
+        self._drag_scroll_timer.setInterval(40)
+        self._drag_scroll_timer.timeout.connect(self._scroll_during_drag)
         self._read_only_discovery = False
         self.header().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._apply_theme_styles()
@@ -209,12 +214,21 @@ class LibraryTreeView(QTreeView):
     def dragMoveEvent(self, event):
         if event.mimeData().hasFormat(TREE_RECORD_MIME):
             pos = event.position().toPoint()
+            self._update_drag_autoscroll(pos)
             target_index = self._drop_index_at(pos)
+            if target_index is None:
+                self._hide_drop_hint()
+                event.ignore()
+                return
             
   
             target_idx = self._source_index(target_index)
+            dragged_nodes = self._source_nodes_from_mime(event.mimeData())
+            if self._nodes_include_utility_branch(dragged_nodes) or self._is_custom_to_custom_drop(dragged_nodes, target_index):
+                self._hide_drop_hint()
+                event.ignore()
+                return
             if target_idx.isValid():
-                dragged_nodes = self._source_nodes_from_mime(event.mimeData())
                 if any(node.get("index") and self._is_ancestor(node["index"], target_idx) for node in dragged_nodes):
                     self._hide_drop_hint()
                     event.ignore()
@@ -234,6 +248,7 @@ class LibraryTreeView(QTreeView):
             super().dragMoveEvent(event)
 
     def dragLeaveEvent(self, event):
+        self._stop_drag_autoscroll()
         self._hide_drop_hint()
         if self._internal_drag_active:
             try: QDrag.cancel()
@@ -241,15 +256,24 @@ class LibraryTreeView(QTreeView):
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
+        self._stop_drag_autoscroll()
         if self._read_only_discovery: self._hide_drop_hint(); event.ignore(); return
         if not event.mimeData().hasFormat(TREE_RECORD_MIME): super().dropEvent(event); return
         target_index = self._drop_index_at(event.position().toPoint())
+        if target_index is None:
+            self._hide_drop_hint()
+            event.ignore()
+            return
+        source_nodes = self._source_nodes_from_mime(event.mimeData())
+        if self._nodes_include_utility_branch(source_nodes) or self._is_custom_to_custom_drop(source_nodes, target_index):
+            self._hide_drop_hint()
+            event.ignore()
+            return
         
    
         target_idx = self._source_index(target_index)
         if target_idx.isValid():
-            dragged_nodes = self._source_nodes_from_mime(event.mimeData())
-            if any(node.get("index") and self._is_ancestor(node["index"], target_idx) for node in dragged_nodes):
+            if any(node.get("index") and self._is_ancestor(node["index"], target_idx) for node in source_nodes):
                 self._hide_drop_hint()
                 event.ignore()
                 return
@@ -257,7 +281,6 @@ class LibraryTreeView(QTreeView):
         target_fields, target_node_type = self._drop_target_fields(target_index), self._drop_target_node_type(target_index)
         records = self._records_from_mime(event.mimeData())
         if target_fields and records:
-            source_nodes = self._source_nodes_from_mime(event.mimeData())
             applied_fields = dict(target_fields); applied_fields["__collision_scope"] = "direct"
             source_label = "selection"
             if len(source_nodes) == 1:
@@ -278,7 +301,17 @@ class LibraryTreeView(QTreeView):
                 if not (source_node_type == "pack" and target_node_type == "pack"):
                     applied_fields = self._bucket_aware_drop_fields(source_node, target_fields, target_node_type)
                     applied_fields["__collision_scope"] = "direct"
-            if not self._confirm_folder_move_if_needed(source_label, self._drop_target_label(applied_fields), records, applied_fields):
+            if not self._records_changed_by_drop(records, applied_fields):
+                self._show_noop_drop_notice(self._drop_target_label(applied_fields), len(records))
+                self._hide_drop_hint(); event.ignore(); return
+            source_index = source_nodes[0].get("index") if len(source_nodes) == 1 else None
+            if not self._confirm_folder_move_if_needed(
+                source_label,
+                self._drop_target_label(applied_fields),
+                records,
+                applied_fields,
+                source_index,
+            ):
                 self._hide_drop_hint(); event.ignore(); return
             self._hide_drop_hint(); self.reorganization_requested.emit(records, applied_fields); event.setDropAction(Qt.MoveAction); event.accept(); return
         self._hide_drop_hint(); event.ignore()
@@ -286,9 +319,11 @@ class LibraryTreeView(QTreeView):
     def startDrag(self, supportedActions):
         selected_indexes = self._selected_source_indexes()
         if not selected_indexes: return
-        mime = QMimeData(); mime.setData(TREE_RECORD_MIME, self._encode_source_indexes(selected_indexes))
         modifiers = QApplication.keyboardModifiers()
         export_drag = self._read_only_discovery or bool(modifiers & Qt.ControlModifier)
+        if not export_drag and any(self._is_utility_branch_index(index) for index in selected_indexes):
+            return
+        mime = QMimeData(); mime.setData(TREE_RECORD_MIME, self._encode_source_indexes(selected_indexes))
         if export_drag:
             folder_nodes = [idx for idx in selected_indexes if idx.data(NODE_TYPE_ROLE) != "file"]
             if folder_nodes and not self._confirm_sync_folder_export(folder_nodes): return
@@ -305,7 +340,9 @@ class LibraryTreeView(QTreeView):
             else:
                 self._internal_drag_active = True
                 try: drag.exec(Qt.MoveAction, Qt.MoveAction)
-                finally: self._internal_drag_active = False
+                finally:
+                    self._internal_drag_active = False
+                    self._stop_drag_autoscroll()
         except Exception: self._internal_drag_active = False; logging.exception("Tree drag failed.")
 
     def _confirm_sync_folder_export(self, folder_nodes) -> bool:
@@ -414,6 +451,13 @@ class LibraryTreeView(QTreeView):
         if rec: recs.append(rec)
         else: self._collect_records_recursive(source_index, recs)
         return recs
+
+    def preview_record_for_index(self, view_index):
+        """Return only the directly clicked file, never a folder descendant."""
+        source_index = self._source_index(view_index)
+        if not source_index.isValid() or source_index.data(NODE_TYPE_ROLE) != "file":
+            return None
+        return source_index.data(Qt.UserRole)
 
     def _collect_records_recursive(self, source_index, out_list):
         model = self._source_model()
@@ -534,15 +578,46 @@ class LibraryTreeView(QTreeView):
             })
         return nodes
 
+    @staticmethod
+    def _contains_custom_folder(nodes) -> bool:
+        return any(
+            str(node.get("node_type") or "") != "file"
+            and str(node.get("source_node_type") or "") == "custom"
+            for node in nodes or []
+        )
+
+    def _is_custom_to_custom_drop(self, nodes, view_index) -> bool:
+        if not self._contains_custom_folder(nodes) or not view_index.isValid():
+            return False
+        target_index = self._source_index(view_index)
+        if target_index.data(NODE_TYPE_ROLE) == "file":
+            target_index = target_index.parent()
+        return str(target_index.data(SOURCE_NODE_TYPE_ROLE) or "") == "custom"
+
+    def _nodes_include_utility_branch(self, nodes) -> bool:
+        return any(
+            node.get("index") is not None
+            and self._is_utility_branch_index(node["index"])
+            for node in nodes or []
+        )
+
     def _drop_target_fields(self, view_index):
-        if not view_index.isValid(): return None
+        if not view_index.isValid():
+            return None
         si = self._source_index(view_index); nt = si.data(NODE_TYPE_ROLE)
         if nt == "file": si = si.parent()
         target_node_id = str(si.data(SOURCE_NODE_ID_ROLE) or "")
-        if (bool(si.data(READ_ONLY_ROLE)) and not target_node_id) or self._is_read_only_utility_index(si):
+        target_source_type = str(si.data(SOURCE_NODE_TYPE_ROLE) or "")
+        if (bool(si.data(READ_ONLY_ROLE)) and not target_node_id) or self._is_utility_branch_index(si):
             return None
         f = {key: value for key, value in dict(si.data(FIELDS_ROLE) or {}).items() if key in SEMANTIC_FIELD_NAMES}
-        target_source_type = str(si.data(SOURCE_NODE_TYPE_ROLE) or "")
+        if target_source_type == "fallback" or bool(si.data(RESIDUAL_ROLE)):
+            if not str(f.get("category") or "").strip():
+                return None
+            f["subcategory"] = ""
+            f["__clear_subcategory"] = True
+            f["__target_profile_label"] = "Other"
+            return f
         if target_node_id and target_source_type == "custom":
             f["__target_profile_node_id"] = target_node_id
             f["__target_profile_label"] = str(si.data(RAW_NAME_ROLE) or si.data(Qt.DisplayRole) or "")
@@ -551,14 +626,41 @@ class LibraryTreeView(QTreeView):
     def _drop_index_at(self, pos):
         index = self.indexAt(pos)
         if not index.isValid():
-            return index
+            return None
         rect = self.visualRect(index)
         if not rect.isValid():
             return index
         margin = max(3, min(8, rect.height() // 4))
         if pos.y() < rect.top() + margin or pos.y() > rect.bottom() - margin:
-            return self.model().index(-1, -1) if self.model() is not None else index.sibling(-1, -1)
+            return None
         return index
+
+    def _update_drag_autoscroll(self, pos) -> None:
+        margin = max(16, int(self.autoScrollMargin()))
+        viewport_height = self.viewport().height()
+        if pos.y() <= margin:
+            direction = -1
+        elif pos.y() >= viewport_height - margin:
+            direction = 1
+        else:
+            direction = 0
+        self._drag_scroll_direction = direction
+        if direction:
+            if not self._drag_scroll_timer.isActive():
+                self._drag_scroll_timer.start()
+        else:
+            self._drag_scroll_timer.stop()
+
+    def _scroll_during_drag(self) -> None:
+        if not self._drag_scroll_direction:
+            return
+        scrollbar = self.verticalScrollBar()
+        step = max(1, int(scrollbar.singleStep()))
+        scrollbar.setValue(scrollbar.value() + self._drag_scroll_direction * step)
+
+    def _stop_drag_autoscroll(self) -> None:
+        self._drag_scroll_direction = 0
+        self._drag_scroll_timer.stop()
 
     def _drop_target_node_type(self, view_index):
         if not view_index.isValid(): return None
@@ -569,25 +671,37 @@ class LibraryTreeView(QTreeView):
     def _drop_target_label(self, fields):
         if fields.get("__target_profile_label"): return str(fields["__target_profile_label"])
         if fields.get("pack"): return f"{fields['pack']} / {fields.get('category', '')}"
+        if fields.get("subcategory"): return fields["subcategory"]
         if fields.get("category"): return fields["category"]
         return fields.get("audio_type", "Library")
 
-    def _confirm_folder_move_if_needed(self, source_name, target_name, records, fields) -> bool:
+    def _confirm_folder_move_if_needed(self, source_name, target_name, records, fields, source_index=None) -> bool:
         changed_records = self._records_changed_by_drop(records, fields)
         lines = self._drop_mutation_lines(changed_records, fields)
         if not lines:
             return True
-        return self._confirm_record_reclassification(
-            str(source_name or "selection"),
-            str(target_name or "target"),
-            lines,
-            len(changed_records),
-        )
+        model = self._source_model()
+        filtered = bool(getattr(model, "has_active_session_filters", lambda: False)())
+        total_count = len(records or [])
+        if source_index is not None and hasattr(model, "total_count_for_index"):
+            total_count = max(total_count, int(model.total_count_for_index(source_index)))
+        self._pending_reclassification_total = total_count
+        self._pending_reclassification_filtered = filtered
+        try:
+            return self._confirm_record_reclassification(
+                str(source_name or "selection"),
+                str(target_name or "target"),
+                lines,
+                len(changed_records),
+            )
+        finally:
+            self._pending_reclassification_total = None
+            self._pending_reclassification_filtered = False
 
     def _confirm_profile_node_move(self, source_name: str, target_name: str) -> bool:
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Question)
-        msg.setWindowTitle("Confirm Tree Reorganization")
+        msg.setWindowTitle("Confirm Library Layout Change")
         msg.setText(f'Move "{source_name}" into "{target_name}"?')
         msg.setInformativeText("This changes the custom tree draft without reclassifying files.")
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
@@ -601,7 +715,7 @@ class LibraryTreeView(QTreeView):
                 if field_name not in fields:
                     continue
                 value = str(fields.get(field_name) or "").strip()
-                if not value:
+                if not value and field_name != "subcategory":
                     continue
                 if str(getattr(record, field_name, "") or "") != value:
                     changed.append(record)
@@ -620,6 +734,10 @@ class LibraryTreeView(QTreeView):
             if field_name not in fields:
                 continue
             value = str(fields.get(field_name) or "").strip()
+            if field_name == "subcategory" and not value:
+                if any(str(getattr(record, field_name, "") or "").strip() for record in records or []):
+                    lines.append("remove subcategory")
+                continue
             if not value:
                 continue
             if any(str(getattr(record, field_name, "") or "") != value for record in records or []):
@@ -629,23 +747,70 @@ class LibraryTreeView(QTreeView):
     def _confirm_folder_move(self, source_name: str, target_name: str, mutation_lines: list[str], record_count: int) -> bool:
         return self._confirm_record_reclassification(source_name, target_name, mutation_lines, record_count)
 
-    def _confirm_record_reclassification(self, source_name: str, target_name: str, mutation_lines: list[str], record_count: int) -> bool:
-        item_word = "record" if record_count == 1 else "records"
+    def _show_noop_drop_notice(self, target_name: str, record_count: int) -> None:
+        count = max(1, int(record_count or 0))
+        subject = "The selected record is" if count == 1 else f"All {count} selected records are"
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("Nothing to Reclassify")
+        msg.setText(f'{subject} already classified as "{target_name}".')
+        msg.setInformativeText("The source and destination have the same classification, so no changes were made.")
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.exec()
+
+    def _confirm_record_reclassification(
+        self,
+        source_name: str,
+        target_name: str,
+        mutation_lines: list[str],
+        record_count: int,
+        *,
+        total_count: int | None = None,
+    ) -> bool:
+        if total_count is None:
+            total_count = getattr(self, "_pending_reclassification_total", None)
+        filtered = bool(getattr(self, "_pending_reclassification_filtered", False))
+        total_count = max(record_count, int(total_count if total_count is not None else record_count))
+        total_word = "sample" if total_count == 1 else "samples"
+        changed_word = "sample" if record_count == 1 else "samples"
         mutation_text = self._format_mutation_lines(mutation_lines)
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Question)
         msg.setWindowTitle("Confirm File Reclassification")
-        msg.setText(f'Reclassify {record_count} {item_word}?')
-        msg.setInformativeText(
-            f'Source: "{source_name}"\n\n'
-            f'File changes: {mutation_text}.\n\n'
-            f'Custom tree folders may still contain these files if they match the filter of the folder.\n'
-            f'To change the tree structure itself, use Edit tree organization.'
+        subset = " matching the active filter(s)" if filtered else ""
+        msg.setText(
+            f'"{source_name}" ({total_count} {total_word}) currently has {record_count} '
+            f'{changed_word}{subset} that are not "{target_name}".'
         )
+        msg.setInformativeText(
+            f'These will be reclassified upon confirmation ({mutation_text}).\n\n'
+            'PS: Reclassification does not <a href="unshuffle://library-structure">change library structure</a>.'
+        )
+        if hasattr(msg, "setTextFormat"):
+            msg.setTextFormat(Qt.RichText)
+        if hasattr(msg, "findChildren"):
+            for label in msg.findChildren(QLabel):
+                label.setOpenExternalLinks(False)
+                label.linkActivated.connect(
+                    lambda _url, dialog=msg: self._cancel_reclassification_and_open_structure(dialog)
+                )
         msg.setMinimumWidth(420)
         msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         msg.setDefaultButton(QMessageBox.Yes)
         return msg.exec() == QMessageBox.Yes
+
+    def _cancel_reclassification_and_open_structure(self, dialog) -> None:
+        dialog.reject()
+        QTimer.singleShot(0, self._request_library_structure_editor)
+
+    def _request_library_structure_editor(self) -> None:
+        parent = self.parentWidget()
+        while parent is not None:
+            signal = getattr(parent, "treeOrganizationEditRequested", None)
+            if signal is not None and hasattr(signal, "emit"):
+                signal.emit()
+                return
+            parent = parent.parentWidget()
 
     @staticmethod
     def _format_mutation_lines(lines: list[str]) -> str:
@@ -685,6 +850,8 @@ class LibraryTreeView(QTreeView):
         source_name = str(source_node.get("name") or "").strip()
         source_node_type = str(source_node.get("node_type") or "")
         fields = dict(target_fields)
+        if fields.get("__clear_subcategory"):
+            return self._normalize_drop_fields(fields)
         if not source_name:
             return self._normalize_drop_fields(fields)
 
@@ -783,6 +950,17 @@ class LibraryTreeView(QTreeView):
         raw_name = str(source_index.data(RAW_NAME_ROLE) or "")
         audio_type = str(fields.get("audio_type") or "")
         return raw_name == "Utility" and audio_type in {"Utility", "Non-Audio Assets"}
+
+    def _is_utility_branch_index(self, source_index) -> bool:
+        index = source_index
+        while index.isValid():
+            fields = dict(index.data(FIELDS_ROLE) or {})
+            raw_name = str(index.data(RAW_NAME_ROLE) or "")
+            audio_type = str(fields.get("audio_type") or "")
+            if raw_name == "Utility" or audio_type in {"Utility", "Non-Audio Assets"}:
+                return True
+            index = index.parent()
+        return False
 
     def _compose_mode(self, modifiers):
         if modifiers & Qt.ShiftModifier: return "or"

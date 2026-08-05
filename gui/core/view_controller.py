@@ -278,6 +278,25 @@ class ViewController(QObject):
         if self.app.stack.currentWidget() is getattr(self.app, "dock_view", None) and self._view_available("map"):
             self.prewarm_docked_map(delay_ms=0)
 
+    def frontload_library_view(self, mode: str) -> None:
+        mode = str(mode or "").strip().lower()
+        if mode == "table":
+            prewarm = getattr(getattr(self.app, "model", None), "prewarm_initial_window", None)
+            if callable(prewarm):
+                prewarm()
+            self.app.library_tab.refresh_table_viewport()
+            return
+        if mode == "tree":
+            if self._tree_rebuild_timer.isActive():
+                self._tree_rebuild_timer.stop()
+            if self.is_tree_visible():
+                self.do_tree_rebuild()
+            else:
+                self._prewarm_library_tree_now()
+            return
+        if mode == "map":
+            self.refresh_library_map(force=False)
+
     def toggle_docked(self, checked):
         if checked:
             self.app.settings_controller.settings.setValue("window_geometry", self.app.saveGeometry())

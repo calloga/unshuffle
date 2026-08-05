@@ -19,7 +19,8 @@ class UpdateController(QObject):
         super().__init__(parent)
         self._checking = False
         self._prompted_versions: set[str] = set()
-        self.updateAvailable.connect(self._show_update_prompt)
+        self._available_update: UpdateInfo | None = None
+        self.updateAvailable.connect(self._show_update_alert)
 
     def check_for_updates(self, *, manual: bool = False) -> None:
         if self._checking:
@@ -43,23 +44,24 @@ class UpdateController(QObject):
         thread.start()
 
     @Slot(object)
-    def _show_update_prompt(self, info: UpdateInfo) -> None:
+    def _show_update_alert(self, info: UpdateInfo) -> None:
         if info.version in self._prompted_versions:
             return
         self._prompted_versions.add(info.version)
-        parent = self._parent_widget()
-        message = QMessageBox(parent)
-        message.setIcon(QMessageBox.Information)
-        message.setWindowTitle("Update Available")
-        message.setText(f"{APP_NAME} {info.version} is available.")
-        message.setInformativeText(f"You are running {APP_NAME} {APP_VERSION}.")
-        open_button = message.addButton("Update", QMessageBox.AcceptRole)
-        message.addButton("Later", QMessageBox.RejectRole)
-        message.exec()
-        if message.clickedButton() is open_button:
-            update_url = info.download_url or info.url
-            if update_url:
-                QDesktopServices.openUrl(QUrl(update_url))
+        self._available_update = info
+        parent = self.parent()
+        footer = getattr(parent, "footer", None)
+        if footer is not None and hasattr(footer, "set_update_available"):
+            footer.set_update_available(True, info.version)
+
+    @Slot()
+    def open_available_update(self) -> None:
+        info = self._available_update
+        if info is None:
+            return
+        update_url = info.download_url or info.url
+        if update_url:
+            QDesktopServices.openUrl(QUrl(update_url))
 
     @Slot()
     def show_no_update_message(self) -> None:

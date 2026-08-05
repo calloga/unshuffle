@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from PySide6.QtWidgets import (
     QFrame, QVBoxLayout, QHBoxLayout, QLabel, 
@@ -33,6 +34,7 @@ class ModernFooter(QFrame):
     openBuildTargetRequested = Signal()
     openBuildSourceRequested = Signal()
     undoBuildRequested = Signal()
+    updateRequested = Signal()
 
     def __init__(self, parent=None, *, audio_bar=None):
         super().__init__(parent)
@@ -62,6 +64,7 @@ class ModernFooter(QFrame):
         apply_style(self, footer_base_style())
         self._setup_ui()
         self._setup_notification_state()
+        self._refresh_footer_presentation()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -157,6 +160,13 @@ class ModernFooter(QFrame):
         self.btn_undo_build.setVisible(False)
         self.btn_undo_build.clicked.connect(self.undoBuildRequested.emit)
 
+        self.btn_update_available = QPushButton("Update Available")
+        self.btn_update_available.setProperty("role", "primary")
+        apply_style(self.btn_update_available, footer_cta_button_style())
+        self.btn_update_available.setToolTip("Open the latest Unshuffle release")
+        self.btn_update_available.setVisible(False)
+        self.btn_update_available.clicked.connect(self.updateRequested.emit)
+
         self.btn_reorg_discard = QPushButton("Discard")
         self.btn_reorg_discard.setObjectName("danger")
         apply_style(self.btn_reorg_discard, footer_cta_button_style("danger"))
@@ -188,16 +198,17 @@ class ModernFooter(QFrame):
         notification_group.addWidget(self.btn_open_build_target)
         notification_group.addWidget(self.btn_open_build_source)
         notification_group.addWidget(self.btn_undo_build)
+        notification_group.addWidget(self.btn_update_available)
         process_group.addWidget(self.btn_reorg_discard)
         process_group.addWidget(self.btn_reorg_save)
         process_group.addWidget(self.btn_cancel)
         status_row.addWidget(self.lbl_count, 0)
         status_row.addLayout(notification_group, 0)
-        status_row.addLayout(status_group, 1)
+        status_row.addLayout(status_group, 0 if self._merged_presentation else 1)
         status_row.addLayout(process_group, 0)
         if self.audio_bar is not None:
             self.audio_bar.setParent(self)
-            status_row.addWidget(self.audio_bar, 0, Qt.AlignVCenter)
+            status_row.addWidget(self.audio_bar, 1, Qt.AlignVCenter)
         layout.addLayout(status_row)
         
         self.progress_bar = QProgressBar()
@@ -342,6 +353,11 @@ class ModernFooter(QFrame):
     def clear_build_handover_state(self):
         self.set_build_handover_state("", False)
 
+    def set_update_available(self, visible: bool, version: str = "") -> None:
+        label = f"Update {version}" if str(version or "").strip() else "Update Available"
+        self.btn_update_available.setText(label)
+        self._set_notification_visible("update", bool(visible))
+
     def set_busy_state(self, busy):
         busy = bool(busy)
         self._busy = busy
@@ -402,6 +418,7 @@ class ModernFooter(QFrame):
             "open_target": self.btn_open_build_target,
             "open_source": self.btn_open_build_source,
             "undo_build": self.btn_undo_build,
+            "update": self.btn_update_available,
         }
         self._notification_desired = {name: False for name in self._notification_widgets}
         self._notification_remaining = {name: 0 for name in self._notification_widgets}
@@ -472,10 +489,12 @@ class ModernFooter(QFrame):
         docked = bool(self._docked_presentation)
         display_text = "Ready" if docked else self._status_text
         self.lbl_status.setText("" if self._merged_presentation and not docked and display_text == "Ready" else display_text)
-        self.lbl_reorg_draft.setVisible(self._draft_visible and not docked)
-        self.lbl_tagging_status.setVisible(self._tagging_visible and not blocked)
-        self.lbl_coherence_status.setVisible(self._coherence_label_visible and not blocked)
-        self.lbl_build_handover.setVisible(self._build_handover_label_visible and not blocked)
+        self.lbl_status.setVisible(not self._merged_presentation and not docked)
+        self.lbl_count.setVisible(not self._draft_visible and not docked)
+        self.lbl_reorg_draft.setVisible(False)
+        self.lbl_tagging_status.setVisible(not self._merged_presentation and self._tagging_visible and not blocked)
+        self.lbl_coherence_status.setVisible(not self._merged_presentation and self._coherence_label_visible and not blocked)
+        self.lbl_build_handover.setVisible(not self._merged_presentation and self._build_handover_label_visible and not blocked)
         self.btn_reorg_discard.setVisible(self._draft_visible and not docked)
         self.btn_reorg_save.setVisible(self._draft_visible and not docked)
         self.btn_cancel.setVisible(False)
@@ -495,6 +514,7 @@ class ModernFooter(QFrame):
         self.buildRequested.emit()
 
     def _on_cancel_clicked(self) -> None:
+        logging.info("Footer Cancel clicked.")
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.setText("Stopping")
         self.cancelRequested.emit()

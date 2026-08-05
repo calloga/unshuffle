@@ -8,7 +8,7 @@ from typing import Iterable
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -70,10 +70,10 @@ class CoherenceMapWidget(QWidget):
         self._category_filter = ""
         self._visible_record_ids: set[str] | None = None
         self._zoom_level = 2
-        self._cached_bg_pixmap = None
-        self._cached_points_pixmap = None
-        self._background_pixmap_cache: OrderedDict[tuple, object] = OrderedDict()
-        self._points_pixmap_cache: OrderedDict[tuple, object] = OrderedDict()
+        self._cached_bg_pixmap: QPixmap | None = None
+        self._cached_points_pixmap: QPixmap | None = None
+        self._background_pixmap_cache: OrderedDict[tuple, QPixmap] = OrderedDict()
+        self._points_pixmap_cache: OrderedDict[tuple, QPixmap] = OrderedDict()
         self._visible_ids_signature: tuple[int, int] | None = None
         self.setMinimumHeight(scaled_px(260))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -355,30 +355,27 @@ class CoherenceMapWidget(QWidget):
             zoom = _map_zoom_factor(self._zoom_level)
 
             background_key = self._background_pixmap_key()
-            self._cached_bg_pixmap = self._background_pixmap_cache.get(background_key)
-            if self._cached_bg_pixmap is None:
-                from PySide6.QtGui import QPixmap
-
-                self._cached_bg_pixmap = QPixmap(self.size())
-                self._cached_bg_pixmap.fill(Qt.transparent)
-                bg_painter = QPainter(self._cached_bg_pixmap)
+            background_pixmap = self._background_pixmap_cache.get(background_key)
+            if background_pixmap is None:
+                background_pixmap = QPixmap(self.size())
+                background_pixmap.fill(Qt.transparent)
+                bg_painter = QPainter(background_pixmap)
                 try:
                     bg_painter.setRenderHint(QPainter.Antialiasing)
                     self._paint_layer_backgrounds(bg_painter, QRectF(rect), zoom)
                 finally:
                     bg_painter.end()
-                self._cache_pixmap(self._background_pixmap_cache, background_key, self._cached_bg_pixmap)
+                self._cache_pixmap(self._background_pixmap_cache, background_key, background_pixmap)
+            self._cached_bg_pixmap = background_pixmap
 
-            painter.drawPixmap(0, 0, self._cached_bg_pixmap)
+            painter.drawPixmap(0, 0, background_pixmap)
 
             points_key = self._points_pixmap_key()
-            self._cached_points_pixmap = self._points_pixmap_cache.get(points_key)
-            if self._cached_points_pixmap is None:
-                from PySide6.QtGui import QPixmap
-
-                self._cached_points_pixmap = QPixmap(self.size())
-                self._cached_points_pixmap.fill(Qt.transparent)
-                pts_painter = QPainter(self._cached_points_pixmap)
+            points_pixmap = self._points_pixmap_cache.get(points_key)
+            if points_pixmap is None:
+                points_pixmap = QPixmap(self.size())
+                points_pixmap.fill(Qt.transparent)
+                pts_painter = QPainter(points_pixmap)
                 try:
                     pts_painter.setRenderHint(QPainter.Antialiasing)
 
@@ -397,9 +394,10 @@ class CoherenceMapWidget(QWidget):
                     self._paint_points(pts_painter, points)
                 finally:
                     pts_painter.end()
-                self._cache_pixmap(self._points_pixmap_cache, points_key, self._cached_points_pixmap)
+                self._cache_pixmap(self._points_pixmap_cache, points_key, points_pixmap)
+            self._cached_points_pixmap = points_pixmap
 
-            painter.drawPixmap(0, 0, self._cached_points_pixmap)
+            painter.drawPixmap(0, 0, points_pixmap)
             painter.setPen(make_qcolor(ColorPalette.TEXT_MUTED))
         finally:
             painter.end()
@@ -418,7 +416,7 @@ class CoherenceMapWidget(QWidget):
         return (*self._background_pixmap_key(), self._visible_ids_signature)
 
     @staticmethod
-    def _cache_pixmap(cache: OrderedDict, key: tuple, pixmap) -> None:
+    def _cache_pixmap(cache: OrderedDict[tuple, QPixmap], key: tuple, pixmap: QPixmap) -> None:
         cache[key] = pixmap
         cache.move_to_end(key)
         while len(cache) > 4:
@@ -511,8 +509,8 @@ class CoherenceAnalyzerPage(QFrame):
         *,
         show_header: bool = True,
         show_filters: bool = True,
-        show_zoom: bool = True,
-        default_zoom: int = 2,
+        show_zoom: bool = False,
+        default_zoom: int = 4,
     ):
         super().__init__(parent)
         self._show_header = show_header
@@ -676,7 +674,7 @@ class CoherenceAnalyzerPage(QFrame):
                     self._data_priority_row_ids = frozenset(priority_ids)
                     self._refresh_category_options()
                     self._sync_analyzer_data()
-                    self.status.setText(f"{len(self._results)} sound-map results loaded.")
+                    self.status.clear()
                     return
                 if not force and self._can_reuse_source_data(
                     app,
@@ -686,7 +684,7 @@ class CoherenceAnalyzerPage(QFrame):
                 ):
                     self._refresh_category_options()
                     self._sync_analyzer_data()
-                    self.status.setText(f"{len(self._results)} sound-map results loaded.")
+                    self.status.clear()
                     return
                 records, results = coherence_points_from_app(
                     app,
@@ -708,7 +706,7 @@ class CoherenceAnalyzerPage(QFrame):
                     self._data_source_signature = source_signature
                     self._refresh_category_options()
                     self._sync_analyzer_data()
-                    self.status.setText(f"{len(results)} sound-map results loaded.")
+                    self.status.clear()
                     return
                 self._records = records
                 self._results = results
@@ -725,7 +723,7 @@ class CoherenceAnalyzerPage(QFrame):
                 self._refresh_category_options()
                 self._sync_analyzer_data()
                 if not self._show_filters:
-                    self.status.setText(f"{len(results)} sound-map results loaded.")
+                    self.status.clear()
                     return
                 types = {point.audio_type for point in records}
                 if self._selected_audio_type not in types and "Loops" not in types and "Oneshots" in types:
@@ -737,7 +735,7 @@ class CoherenceAnalyzerPage(QFrame):
                 elif self._selected_audio_type in self.type_buttons:
                     self.type_buttons[self._selected_audio_type].setChecked(True)
                     self._set_audio_type(self._selected_audio_type)
-                self.status.setText(f"{len(results)} sound-map results loaded.")
+                self.status.clear()
             except Exception:
                 logging.exception("Sound map refresh failed.")
                 self._records = []

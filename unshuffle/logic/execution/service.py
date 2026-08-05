@@ -44,7 +44,8 @@ class ExecutionMixin:
         self._last_effective_action = "move" if move else "copy"
         self._last_record_hash = None
         self._last_record_error = ""
-        if getattr(record, "is_duplicate_shadow", False) is True:
+        is_duplicate_shadow = getattr(record, "is_duplicate_shadow", False) is True
+        if is_duplicate_shadow and getattr(self, "skip_confirmed_duplicates", True):
             self._last_record_error = "Duplicate shadow records are excluded from builds."
             return "duplicate_shadow", record.source_path
         if record.is_preserved:
@@ -70,6 +71,7 @@ class ExecutionMixin:
                     self.prefix_map,
                     active_tree_profile=getattr(self, "active_tree_profile", None),
                     records=[record],
+                    common_pack_tokens=getattr(self, "pack_common_filename_tokens", None),
                 )
             except DestinationContainmentError as exc:
                 self._last_record_error = str(exc)
@@ -82,7 +84,18 @@ class ExecutionMixin:
                 self.log(f"  ! {self._last_record_error}", level=logging.ERROR)
                 return "error", dest_path
 
-            result = handle_duplicate_record(self, record, file_hash, move=move, dry_run=dry_run, move_file=shutil.move) or "copied"
+            result = (
+                "copied"
+                if is_duplicate_shadow
+                else handle_duplicate_record(
+                    self,
+                    record,
+                    file_hash,
+                    move=move,
+                    dry_run=dry_run,
+                    move_file=shutil.move,
+                ) or "copied"
+            )
 
             if result == "copied":
                 result, dest_path = place_record_file(self, record, dest_path, dest_folder, file_hash, move=move, dry_run=dry_run)

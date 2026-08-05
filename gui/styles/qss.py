@@ -14,7 +14,7 @@ def build_main_style(colors: ThemeColors) -> str:
     QFrame#AppWindow, QWidget#AppWindow {{ background-color: {colors.bg_dark}; border: none; border-radius: 12px; }}
     QGroupBox {{ background: {colors.surface_card}; border: none; margin-top: 12px; padding-top: 10px; color: {colors.text_light}; border-radius: 6px; }}
     QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 6px; color: {colors.primary_bright}; }}
-    QMenuBar {{ background-color: {colors.bg_list}; color: {colors.text_light}; border: none; }}
+    QMenuBar {{ background-color: {colors.bg_dark}; color: {colors.text_light}; border: none; }}
     QMenuBar::item {{ background: transparent; padding: 7px 12px; border-radius: 4px; }}
     QMenuBar::item:selected {{ background: {colors.bg_hover}; }}
     QMenu {{ background-color: {colors.bg_dropdown}; color: {colors.text_light}; border: none; padding: 6px; border-radius: 6px; }}

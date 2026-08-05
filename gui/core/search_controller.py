@@ -123,8 +123,6 @@ class SearchController(QObject):
         self._audio_types = types
         if self.proxy_model:
             self.proxy_model.set_audio_types(types)
-            if hasattr(self.proxy_model, "set_show_non_audio_assets"):
-                self.proxy_model.set_show_non_audio_assets(bool(all_files))
         if self.app and hasattr(self.app, "sync_type_filter_state"):
             self.app.sync_type_filter_state()
         
@@ -152,7 +150,7 @@ class SearchController(QObject):
 
     def clear_query_state(self, *, sync_ui: bool = True):
         """Clear search/filter state without starting a search worker."""
-        self._search_timer.stop()
+        self.invalidate_pending_searches()
         self._current_query = ""
         if sync_ui:
             self.filterChanged.emit("")
@@ -162,6 +160,12 @@ class SearchController(QObject):
             self.model.clear_similarity_scores()
         if self.proxy_model:
             self.proxy_model.set_matched_ids(None)
+
+    def invalidate_pending_searches(self) -> None:
+        """Make all outstanding worker callbacks stale before replacing a session."""
+        self._search_timer.stop()
+        self._search_request_id += 1
+        self._active_worker = None
 
     def set_query(self, text: str, immediate=False):
         text = (text or "").strip()
@@ -224,6 +228,8 @@ class SearchController(QObject):
             except Exception: pass
             
         worker = SearchWorker(request_id, self.search_engine.bridge, query)
+        search_model = self.model
+        search_proxy = self.proxy_model
         self._active_worker = worker
         self._running_workers.add(worker)
         
@@ -231,7 +237,11 @@ class SearchController(QObject):
             if worker in self._running_workers:
                 self._running_workers.remove(worker)
             
-            if result.get("request_id") != self._search_request_id:
+            if (
+                result.get("request_id") != self._search_request_id
+                or search_model is not self.model
+                or search_proxy is not self.proxy_model
+            ):
                 return
             
             matched_ids = result.get("matched_ids")
@@ -239,18 +249,19 @@ class SearchController(QObject):
             
             if matched_ids is not None:
                 if self.search_engine.is_similarity_query(active_query) and isinstance(matched_ids, list):
-                    if self.model:
-                        self.model.apply_similarity_ranking(matched_ids)
+                    if search_model:
+                        search_model.apply_similarity_ranking(matched_ids)
                 else:
-                    if self.model:
-                        self.model.clear_similarity_scores()
+                    if search_model:
+                        search_model.clear_similarity_scores()
                 
-                self.proxy_model.set_matched_ids(set(matched_ids) if isinstance(matched_ids, list) else matched_ids)
+                if search_proxy:
+                    search_proxy.set_matched_ids(set(matched_ids) if isinstance(matched_ids, list) else matched_ids)
             else:
-                if self.model:
-                    self.model.clear_similarity_scores()
-                if self.proxy_model:
-                    self.proxy_model.set_matched_ids(None)
+                if search_model:
+                    search_model.clear_similarity_scores()
+                if search_proxy:
+                    search_proxy.set_matched_ids(None)
                 
             self.searchFinished.emit(result)
         
@@ -258,11 +269,15 @@ class SearchController(QObject):
             if worker in self._running_workers:
                 self._running_workers.remove(worker)
             
-            if request_id != self._search_request_id:
+            if (
+                request_id != self._search_request_id
+                or search_model is not self.model
+                or search_proxy is not self.proxy_model
+            ):
                 return
             logging.warning("Background search failed; clearing filter state: %s", err_msg)
-            if self.proxy_model:
-                self.proxy_model.set_matched_ids(set())
+            if search_proxy:
+                search_proxy.set_matched_ids(set())
             self._set_search_error_status(err_msg)
             self.searchError.emit(err_msg)
 
@@ -385,7 +400,7 @@ class SearchController(QObject):
 
     def apply_filter(self, filter_text: str, is_active: bool, mode: str = "replace"):
         """High-level API to modify the current query."""
-        from .filter_query import query_contains_token, remove_filter_query
+        from .filter_query import combine_filter_queries, query_contains_token, remove_filter_query
         
         current = self._current_query
         new_query = current
@@ -393,12 +408,7 @@ class SearchController(QObject):
         if not is_active:
             new_query = remove_filter_query(current, filter_text)
         elif not query_contains_token(current, filter_text):
-            if mode == "or" and current:
-                new_query = f"{current} OR {filter_text}"
-            elif mode == "and" and current:
-                new_query = f"{current} AND {filter_text}"
-            else:
-                new_query = filter_text
+            new_query = combine_filter_queries(current, filter_text, mode)
         
         self.set_query(new_query)
 

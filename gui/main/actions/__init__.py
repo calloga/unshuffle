@@ -21,7 +21,8 @@ from .selection import (
     set_selection_category,
     set_selection_type,
 )
-from .session import load_staging_session
+from .session import load_staging_session, request_new_session
+from .system import refresh_system_menu
 
 __all__ = [
     "_recent_scan_sources",
@@ -38,8 +39,10 @@ __all__ = [
     "refresh_history_menu",
     "refresh_library_menu",
     "refresh_selection_menu",
+    "refresh_system_menu",
     "remove_folder_clicked",
     "remove_folder_clicked_via_pill",
+    "request_new_session",
     "reset_learning",
     "selected_records",
     "selection_target",

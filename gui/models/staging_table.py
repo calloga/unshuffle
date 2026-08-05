@@ -158,7 +158,10 @@ class StagingTableModel(QAbstractTableModel):
             elif col == StagingColumn.CATEGORY:
                 val = rec.category
             elif col == StagingColumn.TAGS:
-                val = str(rec.tags) if rec.tags else ""
+                for tag in rec.tags or []:
+                    if str(tag).strip():
+                        values.add(str(tag).strip())
+                continue
             elif col == StagingColumn.CONFIDENCE:
                 score = self.scores.get(row) or rec.confidence
                 if score is not None:

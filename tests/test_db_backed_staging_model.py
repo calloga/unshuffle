@@ -3,15 +3,19 @@ from dataclasses import replace
 import json
 import struct
 
+import pytest
+
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QStandardItem
 
 from gui.core import workflow_model_cleanup
-from gui.core.staging_session_store import StagingSessionStore
+from gui.core.staging_session_store import StagingQuery, StagingRowsUpdateCanceled, StagingSessionStore
 from gui.core.acoustic_session_state import AcousticSessionState
 from gui.models.db_staging_table import DbBackedStagingTableModel
 from gui.models.library_tree import (
     FIELDS_ROLE,
     LibraryTreeModel,
+    NODE_TYPE_ROLE,
     RAW_NAME_ROLE,
     clear_tree_color_caches,
     tree_file_sequence_icon,
@@ -63,6 +67,251 @@ def test_store_counts_and_orders_rows(tmp_path):
             "sample_2.wav",
             "sample_3.wav",
         ]
+    finally:
+        db.close()
+
+
+def test_db_model_bulk_edit_avoids_full_index_refresh_when_order_is_unchanged(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(1), _row(2), _row(3)])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+        records = model.records_for_rows(range(3))
+        refresh_calls = []
+        model.refresh_index = lambda: refresh_calls.append(True)
+
+        model._apply_bulk_values([
+            (record, StagingColumn.CATEGORY, "Snares")
+            for record in records
+        ])
+
+        assert refresh_calls == []
+        categories = db.conn.execute(
+            "SELECT DISTINCT category FROM staging_records WHERE session_id = ?",
+            ("session",),
+        ).fetchall()
+        assert [row[0] for row in categories] == ["Snares"]
+    finally:
+        db.close()
+
+
+def test_db_model_semantic_edit_mirrors_duplicate_shadow(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        canonical = list(_row(1, category="Kicks"))
+        shadow = list(_row(2, category="Kicks"))
+        shadow[10] = canonical[10]
+        shadow[11] = canonical[11]
+        shadow[13] = json.dumps({
+            "duplicate_shadow": {
+                "is_shadow": True,
+                "duplicate_of_hash": "hash-1",
+                "duplicate_of_path": canonical[1],
+            }
+        })
+        db.add_staging_records_bulk("session", [tuple(canonical), tuple(shadow)])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+
+        model._apply_bulk_values([
+            (model.record(0), StagingColumn.CATEGORY, "Snares"),
+        ])
+
+        rows = db.get_staging_records("session")
+        assert [row["category"] for row in rows] == ["Snares", "Snares"]
+        reloaded_shadow = model.store.record_by_row_id(2)
+        assert reloaded_shadow is not None
+        assert reloaded_shadow.is_duplicate_shadow is True
+        assert reloaded_shadow.duplicate_of_path == Path(canonical[1])
+    finally:
+        db.close()
+
+
+def test_store_canceled_bulk_update_rolls_back_transaction(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(1), _row(2)])
+        store = StagingSessionStore(db, "session")
+        canceled = []
+
+        with pytest.raises(StagingRowsUpdateCanceled):
+            store.update_rows(
+                [(1, {"category": "Snares"}), (2, {"category": "Snares"})],
+                batch_size=1,
+                progress_callback=lambda _current, _total: canceled.append(True),
+                interrupted_check=lambda: bool(canceled),
+            )
+
+        assert [row["category"] for row in db.get_staging_records("session")] == ["Kicks", "Kicks"]
+    finally:
+        db.close()
+
+
+def test_db_model_bulk_edit_refreshes_index_when_active_sort_changes(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(1), _row(2)])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+        model.group_column = StagingColumn.CATEGORY
+        record = model.record(0)
+        refresh_calls = []
+        model.refresh_index = lambda: refresh_calls.append(True)
+
+        model._apply_bulk_values([(record, StagingColumn.CATEGORY, "Snares")])
+
+        assert refresh_calls == [True]
+    finally:
+        db.close()
+
+
+def test_store_returns_individual_tag_filter_values(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        first = list(_row(1))
+        first[7] = "warm, duplicate"
+        second = list(_row(2))
+        second[7] = "warm, possibleduplicate"
+        db.add_staging_records_bulk("session", [tuple(first), tuple(second)])
+
+        assert StagingSessionStore(db, "session").distinct_values(StagingColumn.TAGS) == [
+            "duplicate",
+            "possibleduplicate",
+            "warm",
+        ]
+    finally:
+        db.close()
+
+
+def test_tree_branch_total_ignores_active_result_filter(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk(
+            "session",
+            [_row(1, category="Kicks"), _row(2, category="Kicks"), _row(3, category="Snares")],
+        )
+        store = StagingSessionStore(db, "session")
+        query = StagingQuery(matched_ids=frozenset({1}), show_non_audio_assets=True)
+        model = LibraryTreeModel()
+        model._session_store = store
+        model._session_query = query
+        item = QStandardItem("Oneshots (1)")
+        item.setData("audio_type", NODE_TYPE_ROLE)
+        item.setData({"audio_type": "Oneshots"}, FIELDS_ROLE)
+        model.appendRow(item)
+
+        oneshots = model.index(0, 0)
+        assert model.has_active_session_filters()
+        assert model.total_count_for_index(oneshots) == 3
+        assert store.count_for_fields({"audio_type": "Oneshots", "category": "Kicks"}) == 2
+    finally:
+        db.close()
+
+
+def test_store_computes_pack_common_tokens_from_buildable_audio_columns(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        kick = list(_row(0))
+        kick[1], kick[2], kick[3] = (
+            "D:/Samples/Cymatics Cobra/Cymatics kick.wav",
+            "Cymatics kick.wav",
+            "Cymatics Cobra",
+        )
+        snare = list(_row(1))
+        snare[1], snare[2], snare[3] = (
+            "D:/Samples/Cymatics Cobra/Cymatics snare.wav",
+            "Cymatics snare.wav",
+            "Cymatics Cobra",
+        )
+        shadow = list(_row(2))
+        shadow[1], shadow[2], shadow[3] = (
+            "D:/Samples/Cymatics Cobra/plain.wav",
+            "plain.wav",
+            "Cymatics Cobra",
+        )
+        shadow[13] = json.dumps({"duplicate_shadow": {"is_shadow": True}})
+        non_audio = list(_row(3, audio_type="Non-Audio Assets"))
+        non_audio[1], non_audio[2], non_audio[3] = (
+            "D:/Samples/Cymatics Cobra/cover.jpg",
+            "cover.jpg",
+            "Cymatics Cobra",
+        )
+        db.add_staging_records_bulk(
+            "session",
+            [tuple(kick), tuple(snare), tuple(shadow), tuple(non_audio)],
+        )
+
+        common = StagingSessionStore(db, "session").common_filename_tokens_by_pack()
+
+        assert common == {"cymatics cobra": frozenset({"cymatics"})}
+    finally:
+        db.close()
+
+
+def test_db_backed_model_can_hide_confirmed_duplicate_rows(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        normal = list(_row(0))
+        duplicate = list(_row(1))
+        duplicate[7] = "duplicate"
+        duplicate[13] = json.dumps({"duplicate_shadow": {"is_shadow": True}})
+        db.add_staging_records_bulk("session", [tuple(normal), tuple(duplicate)])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+
+        assert model.rowCount() == 2
+
+        model.set_show_duplicates(False)
+
+        assert model.rowCount() == 1
+        assert model.record(0).source_path.name == "sample_0.wav"
+    finally:
+        db.close()
+
+
+def test_db_backed_model_hides_non_audio_assets_by_default(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk(
+            "session",
+            [_row(0), _row(1, audio_type="Non-Audio Assets")],
+        )
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+
+        assert model.rowCount() == 1
+        assert model.record(0).source_path.name == "sample_0.wav"
+
+        model.set_show_non_audio_assets(True)
+
+        assert model.rowCount() == 2
+    finally:
+        db.close()
+
+
+def test_model_does_not_begin_reset_when_index_query_fails(tmp_path, monkeypatch):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(0)])
+        store = StagingSessionStore(db, "session")
+        model = DbBackedStagingTableModel(store)
+        began = []
+        ended = []
+        monkeypatch.setattr(model, "beginResetModel", lambda: began.append(True))
+        monkeypatch.setattr(model, "endResetModel", lambda: ended.append(True))
+        monkeypatch.setattr(store, "row_ids", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("closed")))
+
+        with pytest.raises(RuntimeError, match="closed"):
+            model.refresh_index()
+
+        assert began == []
+        assert ended == []
     finally:
         db.close()
 
@@ -185,6 +434,109 @@ def test_db_backed_draft_discard_restores_record_and_staging_row(tmp_path, monke
         db.close()
 
 
+def test_layout_bulk_update_monitor_keeps_qt_event_loop_responsive(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QObject, QTimer
+    from PySide6.QtWidgets import QApplication
+    from gui.core.drafting_controller import DraftingController
+
+    _app = QApplication.instance() or QApplication([])
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(0, category="Kicks")])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+        record = model.record(0)
+        monitor_calls = []
+
+        class FakeMonitor:
+            def start(self, title, **_kwargs):
+                monitor_calls.append(("start", title))
+                return 9
+
+            def update(self, payload, **_kwargs):
+                monitor_calls.append(("update", payload.get("current")))
+
+            def finish(self, text=None, **_kwargs):
+                monitor_calls.append(("finish", text))
+
+            def fail(self, text, **_kwargs):
+                monitor_calls.append(("fail", text))
+
+        class FakeApp(QObject):
+            def __init__(self):
+                super().__init__()
+                self.model = model
+                self.operation_monitor = FakeMonitor()
+
+        controller = DraftingController(FakeApp())
+        event_loop_ticks = []
+        QTimer.singleShot(0, lambda: event_loop_ticks.append(True))
+
+        controller._apply_model_bulk_values(
+            [(record, StagingColumn.CATEGORY, "Snares")],
+            operation_title="Updating Library Layout",
+            completion_text="Library layout updated.",
+        )
+
+        assert event_loop_ticks == [True]
+        assert db.get_staging_records("session")[0]["category"] == "Snares"
+        assert monitor_calls[0] == ("start", "Updating Library Layout")
+        assert monitor_calls[-1] == ("finish", "Library layout updated.")
+    finally:
+        db.close()
+
+
+def test_layout_bulk_update_cancel_rolls_back_model_and_database(tmp_path, monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QObject
+    from PySide6.QtWidgets import QApplication
+    from gui.core.drafting_controller import DraftingController
+
+    _app = QApplication.instance() or QApplication([])
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(0, category="Kicks")])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+        record = model.record(0)
+        finishes = []
+
+        class FakeMonitor:
+            def start(self, _title, **kwargs):
+                assert kwargs["cancellable"] is True
+                kwargs["on_cancel"]()
+                return 4
+
+            def update(self, _payload, **_kwargs):
+                pass
+
+            def finish(self, text=None, **_kwargs):
+                finishes.append(text)
+
+            def fail(self, text, **_kwargs):
+                pytest.fail(text)
+
+        class FakeApp(QObject):
+            def __init__(self):
+                super().__init__()
+                self.model = model
+                self.operation_monitor = FakeMonitor()
+
+        controller = DraftingController(FakeApp())
+        applied = controller._apply_model_bulk_values(
+            [(record, StagingColumn.CATEGORY, "Snares")],
+            operation_title="Updating Library Layout",
+        )
+
+        assert applied is False
+        assert record.category == "Kicks"
+        assert db.get_staging_records("session")[0]["category"] == "Kicks"
+        assert finishes == ["Operation canceled."]
+    finally:
+        db.close()
+
+
 def test_store_iterates_requested_rows_in_bounded_ordered_batches(tmp_path):
     db = UnshuffleDB(tmp_path / "test.db")
     try:
@@ -200,13 +552,15 @@ def test_store_iterates_requested_rows_in_bounded_ordered_batches(tmp_path):
         db.close()
 
 
-def test_custom_tree_projection_is_invalidated_by_staging_update(tmp_path):
+def test_custom_tree_projection_repairs_only_the_updated_staging_row(tmp_path, monkeypatch):
     db = UnshuffleDB(tmp_path / "test.db")
     try:
         db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
         row = list(_row(0, category="Kicks"))
         row[7] = "favorite"
-        db.add_staging_records_bulk("session", [tuple(row)])
+        other_row = list(_row(1, category="Snares"))
+        other_row[7] = "favorite"
+        db.add_staging_records_bulk("session", [tuple(row), tuple(other_row)])
         profile = TreeOrganizationProfile(
             "profile",
             "Custom",
@@ -227,11 +581,122 @@ def test_custom_tree_projection_is_invalidated_by_staging_update(tmp_path):
 
         store.update_row(0, {"tags": ""})
 
-        count = db.conn.execute(
-            "SELECT COUNT(*) FROM custom_tree_memberships WHERE session_id = ?",
+        projected_rows = db.conn.execute(
+            "SELECT DISTINCT row_id FROM custom_tree_memberships WHERE session_id = ? ORDER BY row_id",
             ("session",),
+        ).fetchall()
+        assert [int(projected[0]) for projected in projected_rows] == [1]
+
+        routed_row_ids = []
+        original_iter = store.iter_tree_records_by_ids
+
+        def track_rows(row_ids, *, batch_size=1000):
+            routed_row_ids.extend(row_ids)
+            yield from original_iter(row_ids, batch_size=batch_size)
+
+        monkeypatch.setattr(store, "iter_tree_records_by_ids", track_rows)
+        store.ensure_custom_tree_projection(
+            profile,
+            [("audio_type", "type"), ("category", "category")],
+        )
+
+        assert routed_row_ids == [0]
+        projected_rows = db.conn.execute(
+            "SELECT DISTINCT row_id FROM custom_tree_memberships WHERE session_id = ? ORDER BY row_id",
+            ("session",),
+        ).fetchall()
+        assert [int(projected[0]) for projected in projected_rows] == [0, 1]
+    finally:
+        db.close()
+
+
+def test_projection_cleanup_retains_active_root_cache_and_other_profiles(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        store = StagingSessionStore(db, "session")
+        active_key = ("profile-a", "active", "", None)
+        stale_key = ("profile-a", "stale", "", None)
+        other_key = ("profile-b", "active", "", None)
+        store._custom_child_count_cache[active_key] = ({"label": "Active"},)
+        store._custom_child_count_cache[stale_key] = ({"label": "Stale"},)
+        store._custom_child_count_cache[other_key] = ({"label": "Other"},)
+
+        store.clear_custom_tree_projections("profile-a", keep_signature="active")
+
+        assert active_key in store._custom_child_count_cache
+        assert stale_key not in store._custom_child_count_cache
+        assert other_key in store._custom_child_count_cache
+    finally:
+        db.close()
+
+
+def test_opening_existing_database_replaces_session_wide_projection_trigger(tmp_path):
+    db_path = tmp_path / "test.db"
+    db = UnshuffleDB(db_path)
+    try:
+        db.conn.executescript(
+            """
+            DROP TRIGGER custom_tree_memberships_staging_au;
+            CREATE TRIGGER custom_tree_memberships_staging_au
+            AFTER UPDATE ON staging_records BEGIN
+                DELETE FROM custom_tree_memberships WHERE session_id = new.session_id;
+            END;
+            """
+        )
+    finally:
+        db.close()
+
+    reopened = UnshuffleDB(db_path)
+    try:
+        trigger_sql = reopened.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' "
+            "AND name = 'custom_tree_memberships_staging_au'"
         ).fetchone()[0]
-        assert count == 0
+        assert "row_id = old.row_id" in trigger_sql
+        assert "row_id = new.row_id" in trigger_sql
+    finally:
+        reopened.close()
+
+
+def test_custom_tree_projection_worker_builds_projection_off_controller_path(tmp_path):
+    from gui.core.workers import CustomTreeProjectionWorker
+
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(0), _row(1, category="Snares")])
+        profile = TreeOrganizationProfile(
+            "profile",
+            "Custom",
+            "root",
+            [
+                TreeOrganizationNode("root", None, "Root", None, "system", 0, True),
+                TreeOrganizationNode("kicks", "root", "Kicks", 'cat:"Kicks"', "custom", 1, True),
+            ],
+            "now",
+            "now",
+        )
+        payloads = []
+        worker = CustomTreeProjectionWorker(
+            7,
+            db,
+            "session",
+            profile,
+            [("audio_type", "type"), ("category", "category")],
+            0.0,
+            True,
+        )
+        worker.finished.connect(payloads.append)
+
+        worker.run()
+
+        assert payloads[0]["request_id"] == 7
+        assert payloads[0]["profile_id"] == profile.id
+        assert StagingSessionStore(db, "session").has_custom_tree_projection(
+            profile.id,
+            payloads[0]["signature"],
+        )
     finally:
         db.close()
 
@@ -419,6 +884,7 @@ def test_db_backed_initial_all_query_includes_utility(tmp_path):
         row[2] = "cover.jpg"
         db.add_staging_records_bulk("session", [tuple(row)])
         model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+        model.set_show_non_audio_assets(True)
         tree = LibraryTreeModel()
 
         tree.rebuild_from_store(model.store, model.query)
@@ -570,6 +1036,42 @@ def test_db_backed_model_hydrates_and_evictions_are_bounded(tmp_path):
         assert model.data(model.index(0, 1), Qt.DisplayRole) == "sample_0.wav"
         assert model.record_id(19) == 9
         assert len(model._record_cache._cache) <= 5
+    finally:
+        db.close()
+
+
+def test_db_backed_model_uses_small_ui_hydration_windows(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(i) for i in range(600)])
+        store = StagingSessionStore(db, "session")
+        model = DbBackedStagingTableModel(store)
+
+        model.record(0)
+
+        assert model.CHUNK_SIZE == 256
+        assert len(model._record_cache._cache) == 256
+    finally:
+        db.close()
+
+
+def test_db_backed_flags_do_not_hydrate_records(tmp_path, monkeypatch):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        normal = list(_row(1))
+        shadow = list(_row(2))
+        shadow[13] = json.dumps({"duplicate_shadow": {"is_shadow": True}})
+        db.add_staging_records_bulk("session", [tuple(normal), tuple(shadow)])
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+        monkeypatch.setattr(model, "record", lambda _row: (_ for _ in ()).throw(AssertionError("flags hydrated a record")))
+
+        normal_flags = model.flags(model.index(0, StagingColumn.PACK))
+        shadow_flags = model.flags(model.index(1, StagingColumn.PACK))
+
+        assert normal_flags & Qt.ItemFlag.ItemIsEditable
+        assert not shadow_flags & Qt.ItemFlag.ItemIsEditable
     finally:
         db.close()
 
@@ -897,6 +1399,30 @@ def test_db_backed_buildable_records_stream_and_exclude_duplicate_shadows(tmp_pa
         assert hasattr(records, "store")
         assert len(records) == 4
         assert [record.staging_row_id for record in records] == [0, 1, 3, 4]
+    finally:
+        db.close()
+
+
+def test_db_backed_build_stream_can_include_duplicate_shadows(tmp_path):
+    from gui.core.staging_session_store import BuildableDbRecordSequence
+
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        db.add_staging_records_bulk("session", [_row(i) for i in range(3)])
+        db.conn.execute(
+            "UPDATE staging_records SET evidence_json = ? WHERE session_id = ? AND row_id = ?",
+            ('{"duplicate_shadow":{"is_shadow":true}}', "session", 1),
+        )
+        db.conn.commit()
+        records = BuildableDbRecordSequence(
+            StagingSessionStore(db, "session"),
+            include_duplicate_shadows=True,
+        )
+
+        assert len(records) == 3
+        assert [record.staging_row_id for record in records] == [0, 1, 2]
+        assert list(records)[1].is_duplicate_shadow is True
     finally:
         db.close()
 

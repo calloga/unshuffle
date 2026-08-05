@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any, cast
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction
@@ -122,6 +123,7 @@ class LibraryTab(QWidget):
     bulkTypeRequested = Signal(str, list)
     headerMenuRequested = Signal(int, object)
     scanRequested = Signal(list, bool)
+    newSessionRequested = Signal()
     refreshRequested = Signal(Path)
     removeFolderRequested = Signal(Path)
     deleteRecordsRequested = Signal(object)
@@ -139,6 +141,7 @@ class LibraryTab(QWidget):
     unpreserveRequested = Signal(object, object)
     treeOrganizationEditRequested = Signal()
     treeOrganizationSwitchRequested = Signal(str)
+    previewSelectionChanged = Signal(object)
 
     def __init__(self, undo_stack, parent=None):
         super().__init__(parent)
@@ -337,10 +340,12 @@ class LibraryTab(QWidget):
         header.setContextMenuPolicy(Qt.CustomContextMenu)
         header.customContextMenuRequested.connect(self._on_header_context_menu)
         self.view_table.doubleClicked.connect(self._on_table_double_clicked)
+        self.view_table.clicked.connect(self.previewSelectionChanged.emit)
         self.view_table.quickFilterRequested.connect(self._handle_table_quick_filter)
         self.view_table.focusSearchRequested.connect(self.focusSearchRequested.emit)
         self.view_table.playRequested.connect(lambda: self.playRequested.emit(self.view_table.currentIndex()))
         self.view_table.sortColumnRequested.connect(self._on_table_sort_column_requested)
+        self.view_table.horizontalHeader().sectionResizeFinished.connect(self._finish_column_resize)
         self.view_table.resized.connect(self._apply_proportional_column_widths)
         self.view_table.resized.connect(self._sync_view_scrollbar)
         self.lib_stack.addWidget(self.view_table)
@@ -360,6 +365,7 @@ class LibraryTab(QWidget):
         self.view_tree.quick_filter_requested.connect(lambda query, mode: self.quickFilterRequested.emit(query, mode))
         self.view_tree.open_explorer_requested.connect(lambda target: self.openExplorerRequested.emit(target))
         self.view_tree.focus_search_requested.connect(self.focusSearchRequested.emit)
+        self.view_tree.clicked.connect(self._emit_tree_preview_selection)
 
         self.tree_page = QWidget()
         tree_page_layout = QVBoxLayout(self.tree_page)
@@ -373,11 +379,13 @@ class LibraryTab(QWidget):
         self.lbl_tree_org_badge.setVisible(False)
         tree_footer.addWidget(self.lbl_tree_org_badge, 0)
         tree_footer.addStretch(1)
-        self.btn_tree_org = QPushButton("Switch tree organization")
+        self.btn_tree_org = QPushButton("Switch library layout")
         self.tree_org_menu = QMenu(self.btn_tree_org)
         self.btn_tree_org.setMenu(self.tree_org_menu)
         self.btn_tree_org.setObjectName("secondary")
-        apply_style(self.btn_tree_org, workspace_sidebar_button_style())
+        # A pixel-sized font on a QPushButton with an attached QMenu makes Qt's
+        # Windows style try to copy pointSize() == -1 into the menu font.
+        apply_style(self.btn_tree_org, workspace_sidebar_button_style(include_font_size=False))
         tree_footer.addWidget(self.btn_tree_org, 0)
         tree_page_layout.addLayout(tree_footer, 0)
         self.lib_stack.addWidget(self.tree_page)
@@ -398,9 +406,10 @@ class LibraryTab(QWidget):
         apply_layout_spacing(view_frame_layout, 0)
         self.view_content = QWidget()
         view_content_layout = QVBoxLayout(self.view_content)
+        self.view_content_layout = view_content_layout
         apply_layout_margins(view_content_layout, (8, 8, 8, 8))
         apply_layout_spacing(view_content_layout, 0)
-        view_content_layout.addWidget(self.lib_stack)
+        view_content_layout.addWidget(self.lib_stack, 1)
         view_frame_layout.addWidget(self.view_content, 1)
         view_frame_layout.addWidget(self.view_scrollbar, 0)
         right_layout.addWidget(self.view_frame, 1)
@@ -462,7 +471,10 @@ class LibraryTab(QWidget):
         self.combo_sort.setCurrentIndex(self.sort_columns.index(staging_column))
 
     def _category_options_for_type_state(self, oneshots: bool, loops: bool, all_files: bool) -> list[tuple[str, object]]:
-        options = list(category_options_for_type_state(CATEGORIES, oneshots, loops, all_files))
+        options: list[tuple[str, object]] = [
+            (label, value)
+            for label, value in category_options_for_type_state(CATEGORIES, oneshots, loops, all_files)
+        ]
         for custom in self._custom_tree_filter_options:
             if custom.placement != "category":
                 continue
@@ -587,10 +599,8 @@ class LibraryTab(QWidget):
         self.edit_search.setEnabled(not busy)
         self._refresh_search_button_state()
         
-        app = self.window()
-        has_draft = getattr(app, "drafting_controller", None) is not None and app.drafting_controller.has_changes()
-        self.btn_undo.setEnabled(not busy and not has_draft and self.undo_stack.canUndo())
-        self.btn_redo.setEnabled(not busy and not has_draft and self.undo_stack.canRedo())
+        self.btn_undo.setEnabled(not busy and self.undo_stack.canUndo())
+        self.btn_redo.setEnabled(not busy and self.undo_stack.canRedo())
         self.combo_sort.setEnabled(not busy)
         self.btn_view_switch.setEnabled(not busy)
         self.btn_table_view.setEnabled(not busy and self.is_view_available("table"))
@@ -603,12 +613,7 @@ class LibraryTab(QWidget):
         self.setCursor(Qt.WaitCursor if busy else Qt.ArrowCursor)
 
     def _on_new_clicked(self):
-        settings = create_app_settings()
-        last_src = str(settings.value("last_scan_source", "") or "")
-        p = QFileDialog.getExistingDirectory(self, "Select Folder to Scan", last_src)
-        if p:
-            self._remember_scan_source(p)
-            self.scanRequested.emit([p], False)
+        self.newSessionRequested.emit()
 
     def _on_add_clicked(self):
         settings = create_app_settings()
@@ -703,7 +708,13 @@ class LibraryTab(QWidget):
     def ensure_coherence_map(self):
         if self.coherence_map is not None:
             return self.coherence_map
-        self.coherence_map = CoherenceAnalyzerPage(self, show_header=False, show_filters=False)
+        self.coherence_map = CoherenceAnalyzerPage(
+            self,
+            show_header=False,
+            show_filters=False,
+            show_zoom=False,
+            default_zoom=4,
+        )
         self.coherence_map.vibeRequested.connect(lambda path: self.similarityRequested.emit(Path(path)))
         self.lib_stack.addWidget(self.coherence_map)
         return self.coherence_map
@@ -730,6 +741,12 @@ class LibraryTab(QWidget):
             QTimer.singleShot(0, self._apply_proportional_column_widths)
             self.view_table.viewport().update()
         QTimer.singleShot(0, self._sync_view_scrollbar)
+
+    def attach_transport_bar(self, widget) -> None:
+        if widget is None:
+            return
+        widget.setParent(self.view_content)
+        self.view_content_layout.addWidget(widget, 0)
 
     def _normalize_view_mode(self, mode) -> str:
         return normalize_view_mode(mode, self.available_view_modes())
@@ -759,7 +776,7 @@ class LibraryTab(QWidget):
         limit_fn = getattr(page, "_map_point_limit", None)
         if callable(limit_fn):
             try:
-                return max(1, int(limit_fn()))
+                return max(1, int(cast(Any, limit_fn())))
             except Exception:
                 pass
         return 10000
@@ -831,7 +848,9 @@ class LibraryTab(QWidget):
             for option in self._custom_tree_filter_options
             if option.placement == "category" and query_contains_token(query, option.query)
         }
-        return set(canonical_categories) | custom
+        values: set[object] = set(canonical_categories)
+        values.update(custom)
+        return values
 
     def set_tree_organization_state(self, active: bool, profile_name: str = "") -> None:
         text = str(profile_name or "Custom Tree") if active else "Default"
@@ -861,7 +880,7 @@ class LibraryTab(QWidget):
             seen_ids.add(profile_id)
             add_profile(profile_name, profile_id)
         self.tree_org_menu.addSeparator()
-        manage = self.tree_org_menu.addAction("Manage Tree Organizations...")
+        manage = self.tree_org_menu.addAction("Manage Library Layouts...")
         manage.triggered.connect(self.treeOrganizationEditRequested.emit)
 
     def focus_search(self):
@@ -910,7 +929,7 @@ class LibraryTab(QWidget):
         if self.coherence_map is not None:
             self.coherence_map.refresh_theme()
         apply_style(self.btn_save_search, dock_save_search_button_style())
-        apply_style(self.btn_tree_org, workspace_sidebar_button_style())
+        apply_style(self.btn_tree_org, workspace_sidebar_button_style(include_font_size=False))
         self._refresh_search_button_state()
         self._sync_view_scrollbar()
 
@@ -947,6 +966,9 @@ class LibraryTab(QWidget):
             return [model.record(row) for row in rows if 0 <= row < model.rowCount()]
         return [model.records[row] for row in rows if 0 <= row < len(model.records)]
 
+    def _emit_tree_preview_selection(self, _index) -> None:
+        self.previewSelectionChanged.emit(self.view_tree.preview_record_for_index(_index))
+
     def _on_row_resized(self, row, oldSize, newSize):
         if not self.proxy_model:
             return
@@ -957,9 +979,41 @@ class LibraryTab(QWidget):
     def _on_column_resized(self, logicalIndex, oldSize, newSize):
         if self._applying_proportional_resize:
             return
+        if getattr(self.view_table.horizontalHeader(), "user_resize_active", False):
+            return
         if logicalIndex == StagingColumn.PATH:
             self._resize_timer.start(LIB_TAB_RESIZE_DEBOUNCE_MS)
         self._capture_column_width_ratios()
+
+    def _finish_column_resize(self, logicalIndex, oldSize, newSize):
+        self._rebalance_adjacent_column(logicalIndex, oldSize, newSize)
+        if logicalIndex == StagingColumn.PATH:
+            self._resize_timer.start(LIB_TAB_RESIZE_DEBOUNCE_MS)
+        self._capture_column_width_ratios()
+
+    def _rebalance_adjacent_column(self, logicalIndex, oldSize, newSize):
+        header = self.view_table.horizontalHeader()
+        columns = sorted(self._visible_table_columns(), key=header.visualIndex)
+        if logicalIndex in columns and oldSize != newSize:
+            position = columns.index(logicalIndex)
+            neighbor = columns[position + 1] if position + 1 < len(columns) else (
+                columns[position - 1] if position > 0 else None
+            )
+            if neighbor is not None:
+                neighbor_width = self.view_table.columnWidth(neighbor)
+                minimum = header.minimumSectionSize()
+                requested_delta = newSize - oldSize
+                applied_delta = min(requested_delta, neighbor_width - minimum) if requested_delta > 0 else requested_delta
+                balanced_size = oldSize + applied_delta
+                balanced_neighbor_width = neighbor_width - applied_delta
+                self._applying_proportional_resize = True
+                try:
+                    if balanced_size != newSize:
+                        self.view_table.setColumnWidth(logicalIndex, balanced_size)
+                    self.view_table.setColumnWidth(neighbor, balanced_neighbor_width)
+                finally:
+                    self._applying_proportional_resize = False
+                self._last_applied_column_widths = {}
 
     def _optimize_row_heights(self):
         if not self.proxy_model:

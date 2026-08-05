@@ -8,6 +8,7 @@ from typing import List, Optional
 from ..audio.metadata import get_audio_duration
 from ..core.constants import BPM_REGEX_PATTERN, KEY_REGEX_PATTERN
 from ..core.logging import logger
+from ..core.prefixes import common_filename_tokens_by_pack
 from ..logic.execution import ExecutionMixin
 from ..persistence import DIRECTORY_DUMP_FILE, UnshuffleDB, cleanup_session_meta, get_db, get_local_db
 from ..runtime.cache import CacheMixin
@@ -24,7 +25,11 @@ from ..runtime.execution_records import (
 from ..runtime.execution_reports import execution_report_filename, open_execution_report
 from ..runtime.execution_sessions import execution_session_sources, register_execution_session
 from ..runtime.execution_validation import tree_profile_error
-from ..runtime.undo_cleanup import cleanup_empty_target_folders, remove_prefix_legend
+from ..runtime.undo_cleanup import (
+    cleanup_empty_target_folders,
+    cleanup_session_transfer_temps,
+    remove_prefix_legend,
+)
 from ..runtime.undo_actions import undo_record_action as apply_undo_record_action
 from ..runtime.undo_results import undo_failure_result, undo_success_result
 from ..runtime.undo_sessions import (
@@ -65,6 +70,7 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
         self.bootstrapper = bootstrapper or getattr(self, "bootstrapper", None)
         self.seen_hashes = {}
         self.prefix_map = {}
+        self.pack_common_filename_tokens = {}
         self.moved_preserved_roots = set()
         self.progress_callback = progress_callback
         self.interrupted = False
@@ -267,11 +273,38 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
         cleanup_session_meta(self.target_dir, self.session_id, self.db)
         return plan
 
-    def execute_plan(self, plan: List, move: bool = False, dry_run: bool = False, flat: bool = False, no_prefix: bool = False):
+    def execute_plan(
+        self,
+        plan: List,
+        move: bool = False,
+        dry_run: bool = False,
+        flat: bool = False,
+        no_prefix: bool = False,
+        *,
+        skip_confirmed_duplicates: bool = True,
+    ):
         self.interrupted = False
+        self.skip_confirmed_duplicates = bool(skip_confirmed_duplicates)
         self.moved_preserved_roots = set()
+        if flat and not no_prefix:
+            common_tokens = getattr(plan, "common_filename_tokens_by_pack", None)
+            self.pack_common_filename_tokens = (
+                common_tokens()
+                if callable(common_tokens)
+                else common_filename_tokens_by_pack(
+                    record
+                    for record in plan
+                    if getattr(record, "is_duplicate_shadow", False) is not True
+                )
+            )
+        else:
+            self.pack_common_filename_tokens = {}
         active_tree_profile = getattr(self, "active_tree_profile", None)
-        validation_records = [] if hasattr(plan, "store") else list(plan)
+        validation_records = (
+            []
+            if hasattr(plan, "store")
+            else [record for record in plan if getattr(record, "is_duplicate_shadow", False) is not True]
+        )
         tree_error = tree_profile_error(active_tree_profile, validation_records)
         if tree_error is not None:
             self.log(f"Custom tree organization is invalid. Build blocked.\n{tree_error}", level=logging.ERROR)
@@ -510,6 +543,13 @@ class RuntimeUnshuffler(CacheMixin, ExecutionMixin):
             database.remove_from_cache_by_paths(undone_relative_paths)
 
         remove_prefix_legend(self.target_dir, self.log)
+        temp_folders, temp_cleanup_failures = cleanup_session_transfer_temps(
+            self.target_dir,
+            records,
+            self.log,
+        )
+        target_folders.update(temp_folders)
+        cleanup_failures.extend(temp_cleanup_failures)
         cleanup_failures.extend(cleanup_empty_target_folders(self.target_dir, target_folders, self.log))
 
         self.seen_hashes = self.db.get_all_hashes()

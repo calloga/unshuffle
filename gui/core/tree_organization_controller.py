@@ -30,15 +30,22 @@ class TreeOrganizationController(QObject):
         self.repository = TreeOrganizationRepository()
         self.active_profile: TreeOrganizationProfile | None = self._load_persisted_active_profile()
         self.editor_widget = None
+        self._editor_refresh_pending = False
         self._sync_profile_options()
 
     def open_editor(self) -> None:
         from gui.widgets.tree_organization import TreeOrganizationEditor
 
         if self.editor_widget is not None:
+            if self._editor_refresh_pending:
+                self._refresh_editor(force=True)
             self.show_profile_list()
             if getattr(self.app, "system_page", None):
-                self.app.system_page.set_tree_organization_panel(self.editor_widget)
+                stage_panel = getattr(self.app.system_page, "stage_tree_organization_panel", None)
+                if callable(stage_panel):
+                    stage_panel(self.editor_widget)
+                else:
+                    self.app.system_page.set_tree_organization_panel(self.editor_widget)
             if getattr(self.app, "open_system_workspace", None):
                 self.app.open_system_workspace("tree_organization")
             return
@@ -56,8 +63,13 @@ class TreeOrganizationController(QObject):
         editor.profileDeleted.connect(self.delete_profile)
         editor.profileDisabled.connect(self.disable_profile)
         self.editor_widget = editor
+        self._editor_refresh_pending = False
         if getattr(self.app, "system_page", None):
-            self.app.system_page.set_tree_organization_panel(editor)
+            stage_panel = getattr(self.app.system_page, "stage_tree_organization_panel", None)
+            if callable(stage_panel):
+                stage_panel(editor)
+            else:
+                self.app.system_page.set_tree_organization_panel(editor)
         if getattr(self.app, "open_system_workspace", None):
             self.app.open_system_workspace("tree_organization")
 
@@ -99,7 +111,12 @@ class TreeOrganizationController(QObject):
                 self.editor_widget = None
         self._sync_profile_options()
 
-    def apply_profile(self, profile: TreeOrganizationProfile) -> None:
+    def apply_profile(
+        self,
+        profile: TreeOrganizationProfile,
+        *,
+        retain_projection: bool = True,
+    ) -> None:
         from unshuffle.logic.tree_organization import TreeOrganizationResolver
 
         validation = TreeOrganizationResolver().validate_profile(profile, [])
@@ -108,18 +125,23 @@ class TreeOrganizationController(QObject):
             return
         monitor = getattr(self.app, "operation_monitor", None)
         needs_projection = not self._has_profile_projection(profile)
-        token = monitor.start("Switching Tree Organization", compact=True) if monitor is not None and needs_projection else None
+        token = monitor.start("Switching Library Organization", compact=True) if monitor is not None and needs_projection else None
         if token is not None:
             monitor.update({"percent": 50}, token=token)
             QApplication.processEvents()
         try:
-            signature = self._ensure_profile_projection(profile)
+            signature = (
+                self._ensure_profile_projection(profile)
+                if needs_projection
+                else self._profile_projection_signature(profile)
+            )
         except ValueError as exc:
             if token is not None:
                 monitor.fail(str(exc), token=token)
             QMessageBox.warning(self.app, "Invalid Custom Tree", str(exc))
             return
-        self._retain_profile_projection(profile.id, signature)
+        if retain_projection:
+            self._retain_profile_projection(profile.id, signature)
         self.active_profile = profile
         self._persist_active_profile_id(profile.id)
         self._sync_active_profile()
@@ -134,7 +156,7 @@ class TreeOrganizationController(QObject):
         ):
             return
         drafting = getattr(self.app, "drafting_controller", None)
-        if drafting is not None and not drafting.confirm_clear_pending_draft("switch tree organization"):
+        if drafting is not None and not drafting.confirm_clear_pending_draft("switch library layout"):
             self._sync_profile_options()
             return
         if not profile_id:
@@ -148,7 +170,7 @@ class TreeOrganizationController(QObject):
         if profile is None:
             self._sync_profile_options()
             return
-        self.apply_profile(profile)
+        self.apply_profile(profile, retain_projection=False)
 
     def delete_profile(self, profile_id: str) -> None:
         self._clear_profile_projection(profile_id)
@@ -249,18 +271,24 @@ class TreeOrganizationController(QObject):
             updated_at=now,
         )
 
-    def _refresh_editor(self) -> None:
+    def _refresh_editor(self, *, force: bool = False) -> None:
         editor = self.editor_widget
         if editor is None:
+            return
+        is_visible = getattr(editor, "isVisible", None)
+        if not force and callable(is_visible) and not is_visible():
+            self._editor_refresh_pending = True
             return
         try:
             records = self._record_source()
             profile = self.active_profile or self._editable_profile_from_default(records)
             editor.reload(self.repository.list_profiles(), profile, records)
+            self._editor_refresh_pending = False
         except TreeOrganizationProfileStoreError as exc:
             QMessageBox.warning(self.app, "Tree Profiles Unavailable", str(exc))
         except RuntimeError:
             self.editor_widget = None
+            self._editor_refresh_pending = False
 
     def _record_source(self):
         if getattr(self.app, "session_store", None) is not None:
@@ -304,13 +332,20 @@ class TreeOrganizationController(QObject):
         tree_model = getattr(getattr(self.app, "library_tab", None), "tree_model", None)
         if store is None or tree_model is None:
             return True
-        signature = store.custom_tree_projection_signature(
+        signature = self._profile_projection_signature(profile)
+        return store.has_custom_tree_projection(profile.id, signature)
+
+    def _profile_projection_signature(self, profile: TreeOrganizationProfile) -> str:
+        store = getattr(self.app, "session_store", None)
+        tree_model = getattr(getattr(self.app, "library_tab", None), "tree_model", None)
+        if store is None or tree_model is None:
+            return ""
+        return store.custom_tree_projection_signature(
             profile,
             list(tree_model._active_tree_levels()),
             confidence_floor=float(getattr(tree_model, "confidence_floor", 0.0)),
             confidence_filter_enabled=bool(getattr(tree_model, "confidence_filter_enabled", True)),
         )
-        return store.has_custom_tree_projection(profile.id, signature)
 
     def _sync_profile_options(self) -> None:
         tab = getattr(self.app, "library_tab", None)

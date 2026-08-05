@@ -15,6 +15,80 @@ from unshuffle.core import PlanRecord
 
 
 class TableShortcutTests(unittest.TestCase):
+    def test_column_resize_rebalances_with_visual_neighbor(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtGui import QUndoStack
+        from PySide6.QtWidgets import QApplication
+        from gui.models.staging_table import StagingTableModel
+        from gui.widgets.library_tab import LibraryTab
+
+        app = QApplication.instance() or QApplication([])
+        tab = LibraryTab(QUndoStack())
+        try:
+            tab.view_table.setModel(StagingTableModel([]))
+            header = tab.view_table.horizontalHeader()
+            header.setMinimumSectionSize(40)
+            columns = sorted(tab._visible_table_columns(), key=header.visualIndex)
+            resized, neighbor = columns[:2]
+            tab._applying_proportional_resize = True
+            tab.view_table.setColumnWidth(resized, 150)
+            tab.view_table.setColumnWidth(neighbor, 200)
+            tab._applying_proportional_resize = False
+
+            tab._rebalance_adjacent_column(resized, 200, 150)
+
+            self.assertEqual(tab.view_table.columnWidth(resized), 150)
+            self.assertEqual(tab.view_table.columnWidth(neighbor), 250)
+        finally:
+            close_qt_window(tab, app)
+
+    def test_header_sort_requires_double_click(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+        view = StagingTableView()
+        requested = []
+        view.sortColumnRequested.connect(requested.append)
+
+        view.horizontalHeader().sectionClicked.emit(2)
+        self.assertEqual(requested, [])
+
+        view.horizontalHeader().sectionDoubleClicked.emit(2)
+        self.assertEqual(requested, [2])
+
+    def test_internal_column_resize_does_not_rebalance_columns(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtGui import QUndoStack
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.library_tab import LibraryTab
+
+        app = QApplication.instance() or QApplication([])
+        tab = LibraryTab(QUndoStack())
+        try:
+            with mock.patch.object(tab, "_rebalance_adjacent_column") as rebalance:
+                tab._on_column_resized(StagingColumn.PACK, 150, 175)
+            rebalance.assert_not_called()
+        finally:
+            close_qt_window(tab, app)
+
+    def test_live_header_resize_defers_ratio_work_until_release(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtGui import QUndoStack
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.library_tab import LibraryTab
+
+        app = QApplication.instance() or QApplication([])
+        tab = LibraryTab(QUndoStack())
+        try:
+            header = tab.view_table.horizontalHeader()
+            header._user_resize_section = int(StagingColumn.PACK)
+            with mock.patch.object(tab, "_capture_column_width_ratios") as capture:
+                tab._on_column_resized(StagingColumn.PACK, 150, 175)
+            capture.assert_not_called()
+        finally:
+            close_qt_window(tab, app)
+
     def test_ctrl_f_requests_global_search_focus(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication

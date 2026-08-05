@@ -5,6 +5,7 @@ from typing import cast
 import pytest
 
 from unshuffle.core import PlanRecord
+from unshuffle.core.prefixes import common_filename_tokens_by_pack, get_pack_prefix
 from unshuffle.logic.execution.destination import DestinationContainmentError, DefaultDestinationResolver, DestinationResolver
 from unshuffle.logic.tree_organization import (
     FilterEvaluator,
@@ -51,6 +52,45 @@ def test_default_destination_resolver_preserves_normal_flat_and_non_audio_paths(
 
     non_audio = resolver.resolve(_record("cover.jpg", pack="A Pack", audio_type="Non-Audio Assets"), target, False, False, {})
     assert non_audio.relative_path == Path("Non-Audio Assets") / "A Pack" / "cover.jpg"
+
+
+def test_flat_prefix_omits_pack_tokens_shared_by_every_filename():
+    records = [
+        _record("Cymatics kick.wav", pack="Cymatics Cobra Pack"),
+        _record("Cymatics snare.wav", pack="Cymatics Cobra Pack"),
+    ]
+    common = common_filename_tokens_by_pack(records)
+
+    assert common["cymatics cobra pack"] == frozenset({"cymatics"})
+    assert get_pack_prefix(
+        "Cymatics Cobra Pack",
+        common_filename_tokens=common["cymatics cobra pack"],
+    ) == "COBRA_PACK"
+
+    resolver = DefaultDestinationResolver()
+    resolved = resolver.resolve(
+        records[0],
+        Path("D:/Out"),
+        True,
+        False,
+        {},
+        common,
+    )
+    assert resolved.final_name == "COBRA_PACK_Cymatics kick.wav"
+
+
+def test_flat_prefix_keeps_pack_token_not_shared_by_every_filename():
+    records = [
+        _record("Cymatics kick.wav", pack="Cymatics Cobra"),
+        _record("snare.wav", pack="Cymatics Cobra"),
+    ]
+    common = common_filename_tokens_by_pack(records)
+
+    assert common["cymatics cobra"] == frozenset()
+    assert get_pack_prefix(
+        "Cymatics Cobra",
+        common_filename_tokens=common["cymatics cobra"],
+    ) == "CYMATICS_COBRA"
 
 
 def test_filter_evaluator_matches_existing_saved_filter_shapes():
@@ -254,6 +294,44 @@ def test_build_compare_shows_flat_options_for_custom_tree(monkeypatch):
     assert "strip pack prefixes" in dialog.after_footer.text()
     assert "Structure:" not in dialog.after_footer.text()
     assert "Filename handling:" not in dialog.after_footer.text()
+
+
+def test_build_skip_confirmed_duplicates_defaults_checked_for_copy_and_move(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets.build_page import BuildPage
+
+    class FakeSettings:
+        def __init__(self):
+            self.values = {
+                "exec_move": False,
+                "exec_flat": False,
+                "exec_no_px": False,
+                "last_target": "D:/Out",
+            }
+
+        def value(self, key, default=None, type=None):
+            value = self.values.get(key, default)
+            return bool(value) if type is bool else value
+
+        def setValue(self, key, value):
+            self.values[key] = value
+
+    _app = QApplication.instance() or QApplication([])
+    dialog = BuildPage(FakeSettings(), [_record("kick.wav")], [])
+
+    assert dialog.check_skip_duplicates.isChecked()
+    assert dialog.check_skip_duplicates.isEnabled()
+    assert dialog.get_options()["skip_confirmed_duplicates"] is True
+
+    dialog.check_move.setChecked(True)
+
+    assert dialog.check_skip_duplicates.isEnabled()
+    assert dialog.get_options()["skip_confirmed_duplicates"] is True
+
+    dialog.check_skip_duplicates.setChecked(False)
+
+    assert dialog.get_options()["skip_confirmed_duplicates"] is False
 
 
 def test_build_compare_preview_keeps_preserved_utility_out_of_build_paths(monkeypatch):
@@ -783,7 +861,7 @@ def test_tree_switcher_reserves_default_and_shows_active_profile_name(monkeypatc
     tab.set_tree_organization_state(True, "My Tree")
 
     labels = [action.text() for action in tab.tree_org_menu.actions() if not action.isSeparator()]
-    assert labels == ["Default", "My Tree", "Manage Tree Organizations..."]
+    assert labels == ["Default", "My Tree", "Manage Library Layouts..."]
     assert tab.btn_tree_org.text() == "My Tree"
     assert not tab.lbl_tree_org_badge.isVisible()
 
@@ -893,6 +971,66 @@ def test_tree_organization_sync_can_skip_immediate_refresh(monkeypatch):
 
     controller._sync_active_profile()
     assert app.view_controller.refresh_calls == [0]
+
+
+def test_tree_switch_activates_cached_profile_without_pruning_projections():
+    from unittest.mock import Mock
+    from PySide6.QtCore import QObject
+    from gui.core.tree_organization_controller import TreeOrganizationController
+
+    profile = _profile([
+        TreeOrganizationNode("dupes", "root", "Dupes", 'tag:"dupe"', "custom", 1),
+    ])
+
+    class FakeApp(QObject):
+        pass
+
+    controller = TreeOrganizationController(FakeApp())
+    controller.repository = SimpleNamespace(get_profile=lambda profile_id: profile if profile_id == profile.id else None)
+    controller.apply_profile = Mock()
+
+    controller.switch_profile(profile.id)
+
+    controller.apply_profile.assert_called_once_with(profile, retain_projection=False)
+
+
+def test_hidden_tree_editor_refresh_is_deferred_until_reopened():
+    from PySide6.QtCore import QObject
+    from gui.core.tree_organization_controller import TreeOrganizationController
+
+    profile = _profile([
+        TreeOrganizationNode("dupes", "root", "Dupes", 'tag:"dupe"', "custom", 1),
+    ])
+    events = []
+
+    class FakeEditor:
+        def isVisible(self):
+            return False
+
+        def reload(self, profiles, active_profile, records):
+            events.append((profiles, active_profile, records))
+
+        def show_profile_list(self):
+            events.append("show-list")
+
+    class FakeApp(QObject):
+        pass
+
+    controller = TreeOrganizationController(FakeApp())
+    controller.repository = SimpleNamespace(list_profiles=lambda: [profile])
+    controller.active_profile = profile
+    controller.editor_widget = FakeEditor()
+
+    controller._refresh_editor()
+
+    assert events == []
+    assert controller._editor_refresh_pending is True
+
+    controller.open_editor()
+
+    assert events[0] == ([profile], profile, [])
+    assert events[1] == "show-list"
+    assert controller._editor_refresh_pending is False
 
 
 def test_tree_organization_controller_restores_persisted_active_profile(monkeypatch, tmp_path):
@@ -1039,7 +1177,7 @@ def test_custom_tree_items_expose_normal_reorganization_fields(monkeypatch):
     }
 
 
-def test_utility_tree_row_is_read_only_but_children_keep_actions(monkeypatch):
+def test_utility_tree_branch_cannot_be_reorganized_but_children_keep_actions(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
     from gui.models.library_tree import FIELDS_ROLE, LibraryTreeModel, RAW_NAME_ROLE
@@ -1071,7 +1209,10 @@ def test_utility_tree_row_is_read_only_but_children_keep_actions(monkeypatch):
 
     assert docs is not None
     docs_index = model.indexFromItem(docs)
-    assert view._drop_target_fields(docs_index) == {"audio_type": "Utility", "category": "Docs"}
+    assert view._drop_target_fields(docs_index) is None
+    assert view._is_utility_branch_index(utility_index)
+    assert view._is_utility_branch_index(docs_index)
+    assert view._nodes_include_utility_branch([{"index": docs_index}])
     assert docs.data(FIELDS_ROLE) == {"audio_type": "Utility", "category": "Docs"}
     assert view._quick_filter_query_for_index(docs_index) == 'cat:"Docs"'
 
@@ -1160,6 +1301,221 @@ def test_tree_drop_bucket_aware_fields_skip_invalid_oneshot_category(monkeypatch
         target,
         "type",
     ) == {"audio_type": "Oneshots"}
+
+
+def test_custom_tree_fallback_is_not_a_drop_target_and_root_is(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.models.library_tree import LibraryTreeModel
+    from gui.views.library_tree import LibraryTreeView
+
+    _app = QApplication.instance() or QApplication([])
+    model = LibraryTreeModel()
+    profile = _profile(
+        [
+            TreeOrganizationNode("test", "root", "test", 'name:"bass"', "custom", 1),
+            TreeOrganizationNode("other", "root", "Other", None, "fallback", 2),
+        ]
+    )
+    model.set_custom_tree_profile(profile)
+    model.rebuild([_record("other.wav", category="Bass")])
+    view = LibraryTreeView()
+    view.setModel(model)
+
+    other_index = model.index_for_path(("Other",))
+    assert other_index is not None
+    assert view._drop_target_fields(other_index) is None
+    assert view._drop_target_fields(model.index(-1, -1)) is None
+
+
+def test_custom_folder_drop_is_rejected_only_for_another_custom_folder(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.models.library_tree import LibraryTreeModel
+    from gui.views.library_tree import LibraryTreeView
+
+    _app = QApplication.instance() or QApplication([])
+    model = LibraryTreeModel()
+    profile = _profile(
+        [
+            TreeOrganizationNode("custom-a", "root", "Custom A", 'tag:"a"', "custom", 1),
+            TreeOrganizationNode("custom-b", "root", "Custom B", 'tag:"b"', "custom", 2),
+            TreeOrganizationNode("oneshots", "root", "Oneshots", 'type:"Oneshots"', "system", 3),
+        ]
+    )
+    model.set_custom_tree_profile(profile)
+    model.rebuild([
+        _record("a.wav", tags=["a"]),
+        _record("b.wav", tags=["b"]),
+        _record("plain.wav", tags=[]),
+    ])
+    view = LibraryTreeView()
+    view.setModel(model)
+    source_nodes = [{"node_type": "filter", "source_node_type": "custom"}]
+
+    custom_target = model.index_for_path(("Custom B",))
+    semantic_target = model.index_for_path(("Oneshots",))
+    assert custom_target is not None
+    assert semantic_target is not None
+    assert view._is_custom_to_custom_drop(source_nodes, custom_target)
+    assert not view._is_custom_to_custom_drop(source_nodes, semantic_target)
+    assert not view._is_custom_to_custom_drop(source_nodes, model.index(-1, -1))
+
+
+def test_generated_residual_other_clears_subcategory(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QStandardItem
+    from PySide6.QtWidgets import QApplication
+    from gui.models.library_tree import FIELDS_ROLE, NODE_TYPE_ROLE, RESIDUAL_ROLE, LibraryTreeModel
+    from gui.views.library_tree import LibraryTreeView
+
+    _app = QApplication.instance() or QApplication([])
+    model = LibraryTreeModel()
+    other = QStandardItem("Other")
+    other.setData("subcategory", NODE_TYPE_ROLE)
+    other.setData({"category": "Bass", "subcategory": "Other"}, FIELDS_ROLE)
+    other.setData(True, RESIDUAL_ROLE)
+    model.appendRow(other)
+    view = LibraryTreeView()
+    view.setModel(model)
+
+    fields = view._drop_target_fields(model.index(0, 0))
+
+    assert fields == {
+        "category": "Bass",
+        "subcategory": "",
+        "__clear_subcategory": True,
+        "__target_profile_label": "Other",
+    }
+    assigned = _record("assigned.wav", category="Bass", subcategory="Hard")
+    unassigned = _record("unassigned.wav", category="Bass", subcategory="")
+    assert view._records_changed_by_drop([assigned], fields) == [assigned]
+    assert view._records_changed_by_drop([unassigned], fields) == []
+    assert view._drop_mutation_lines([assigned], fields) == ["remove subcategory"]
+
+
+def test_top_level_residual_other_remains_non_semantic_drop_target(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QStandardItem
+    from PySide6.QtWidgets import QApplication
+    from gui.models.library_tree import FIELDS_ROLE, RESIDUAL_ROLE, LibraryTreeModel
+    from gui.views.library_tree import LibraryTreeView
+
+    _app = QApplication.instance() or QApplication([])
+    model = LibraryTreeModel()
+    other = QStandardItem("Other")
+    other.setData({}, FIELDS_ROLE)
+    other.setData(True, RESIDUAL_ROLE)
+    model.appendRow(other)
+    view = LibraryTreeView()
+    view.setModel(model)
+
+    assert view._drop_target_fields(model.index(0, 0)) is None
+
+
+def test_tree_reorganization_can_remove_subcategory(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QObject
+    from PySide6.QtWidgets import QApplication
+    from gui.core.drafting_controller import DraftingController
+    from gui.models.staging_table import StagingTableModel
+
+    _app = QApplication.instance() or QApplication([])
+    record = _record("assigned.wav", category="Bass", subcategory="Hard")
+
+    class FakeFooter:
+        def log(self, _message):
+            pass
+
+        def set_status(self, _message):
+            pass
+
+        def set_reorg_draft_state(self, *_args, **_kwargs):
+            pass
+
+    class FakeViewController:
+        def is_tree_visible(self):
+            return False
+
+        def update_library_views(self, tree_delay_ms=0):
+            pass
+
+    class FakeApp(QObject):
+        def __init__(self):
+            super().__init__()
+            self.model = StagingTableModel([record])
+            self.undo_stack = None
+            self.footer = FakeFooter()
+            self.view_controller = FakeViewController()
+            self.tree_organization_controller = None
+            self.library_tab = SimpleNamespace()
+
+    controller = DraftingController(FakeApp())
+    controller.schedule_reorg_impact_analysis = lambda: None
+
+    controller.handle_tree_reorganize(
+        [record],
+        {"category": "Bass", "subcategory": "", "__clear_subcategory": True},
+    )
+
+    assert record.category == "Bass"
+    assert not record.subcategory
+    assert controller.has_changes()
+
+
+def test_noop_tree_drop_explains_that_destination_already_matches(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.views.library_tree import LibraryTreeView
+
+    _app = QApplication.instance() or QApplication([])
+    captured = {}
+
+    class FakeMessageBox:
+        Information = object()
+        Ok = object()
+
+        def __init__(self, _parent):
+            pass
+
+        def setIcon(self, icon):
+            captured["icon"] = icon
+
+        def setWindowTitle(self, title):
+            captured["title"] = title
+
+        def setText(self, text):
+            captured["text"] = text
+
+        def setInformativeText(self, text):
+            captured["informative"] = text
+
+        def setStandardButtons(self, buttons):
+            captured["buttons"] = buttons
+
+        def exec(self):
+            captured["shown"] = True
+
+    monkeypatch.setattr("gui.views.library_tree.QMessageBox", FakeMessageBox)
+    view = LibraryTreeView()
+
+    view._show_noop_drop_notice("Other", 62)
+
+    assert captured["title"] == "Nothing to Reclassify"
+    assert captured["text"] == 'All 62 selected records are already classified as "Other".'
+    assert "source and destination have the same classification" in captured["informative"]
+    assert captured["shown"]
+
+
+def test_drop_target_label_prefers_subcategory_over_parent_category(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.views.library_tree import LibraryTreeView
+
+    _app = QApplication.instance() or QApplication([])
+    view = LibraryTreeView()
+
+    assert view._drop_target_label({"category": "FX", "subcategory": "Air"}) == "Air"
 
 
 def test_custom_exact_category_can_drag_into_exact_type(monkeypatch):
@@ -2846,12 +3202,122 @@ def test_library_tree_drop_dialog_explains_file_reclassification(monkeypatch):
 
     assert not view._confirm_record_reclassification("Dupes", "Loops", ["type to Loops"], 2)
     assert captured["title"] == "Confirm File Reclassification"
-    assert captured["text"] == "Reclassify 2 records?"
-    assert 'Source: "Dupes"' in captured["informative"]
-    assert "File changes: type to Loops." in captured["informative"]
-    assert "Custom tree folders may still contain these files" in captured["informative"]
-    assert "Edit tree organization" in captured["informative"]
+    assert captured["text"] == '"Dupes" (2 samples) currently has 2 samples that are not "Loops".'
+    assert "These will be reclassified upon confirmation" in captured["informative"]
+    assert "change library structure" in captured["informative"]
     assert captured["minimum_width"] >= 420
+
+
+def test_library_tree_drop_dialog_explains_filtered_subset(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from gui.views import library_tree
+    from gui.views.library_tree import LibraryTreeView
+
+    _app = QApplication.instance() or QApplication([])
+    captured = {}
+
+    class FakeMessageBox:
+        Question = QMessageBox.Question
+        Yes = QMessageBox.Yes
+        No = QMessageBox.No
+
+        def __init__(self, _parent=None):
+            pass
+
+        def setIcon(self, _icon):
+            pass
+
+        def setWindowTitle(self, _title):
+            pass
+
+        def setText(self, text):
+            captured["text"] = text
+
+        def setInformativeText(self, _text):
+            pass
+
+        def setMinimumWidth(self, _width):
+            pass
+
+        def setStandardButtons(self, _buttons):
+            pass
+
+        def setDefaultButton(self, _button):
+            pass
+
+        def exec(self):
+            return QMessageBox.No
+
+    monkeypatch.setattr(library_tree, "QMessageBox", FakeMessageBox, raising=False)
+    view = LibraryTreeView()
+    view._pending_reclassification_filtered = True
+
+    assert not view._confirm_record_reclassification(
+        "Snares",
+        "Claps",
+        ["category to Claps"],
+        7,
+        total_count=42,
+    )
+    assert captured["text"] == (
+        '"Snares" (42 samples) currently has 7 samples matching the active filter(s) '
+        'that are not "Claps".'
+    )
+
+
+def test_library_structure_link_cancels_reclassification_before_navigation(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.views import library_tree
+    from gui.views.library_tree import LibraryTreeView
+
+    _app = QApplication.instance() or QApplication([])
+    events = []
+
+    class FakeDialog:
+        def reject(self):
+            events.append("rejected")
+
+    dialog = FakeDialog()
+    view = LibraryTreeView()
+    view._request_library_structure_editor = lambda: events.append("opened")  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        library_tree.QTimer,
+        "singleShot",
+        lambda delay, callback: events.append(("queued", delay)) or callback(),
+    )
+
+    view._cancel_reclassification_and_open_structure(dialog)
+
+    assert events == ["rejected", ("queued", 0), "opened"]
+
+
+def test_library_tree_preview_only_returns_direct_file(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+    from gui.models.library_tree import LibraryTreeModel
+    from gui.views.library_tree import LibraryTreeView
+
+    _app = QApplication.instance() or QApplication([])
+    rec = _record("kick.wav", audio_type="Oneshots", category="Kicks", row_id=1)
+    model = LibraryTreeModel()
+    model.rebuild([rec])
+    view = LibraryTreeView()
+    view.setModel(model)
+
+    folder = model.index(0, 0)
+    assert view.preview_record_for_index(folder) is None
+
+    model.populate_index(folder)
+    category = model.index(0, 0, folder)
+    model.populate_index(category)
+    file_index = model.index(0, 0, category)
+    while file_index.isValid() and file_index.data(Qt.UserRole) is None:
+        model.populate_index(file_index)
+        file_index = model.index(0, 0, file_index)
+    assert view.preview_record_for_index(file_index) is rec
 
 
 def test_library_tree_drop_index_requires_row_center(monkeypatch):
@@ -2880,7 +3346,31 @@ def test_library_tree_drop_index_requires_row_center(monkeypatch):
 
     assert view._drop_index_at(rect.center()).isValid()
     edge = QPoint(rect.center().x(), rect.top() + 1)
-    assert not view._drop_index_at(edge).isValid()
+    assert view._drop_index_at(edge) is None
+
+    blank_space = QPoint(view.viewport().width() - 2, view.viewport().height() - 2)
+    assert view._drop_index_at(blank_space) is None
+
+
+def test_library_tree_drag_autoscroll_moves_at_view_edges(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication
+    from gui.views.library_tree import LibraryTreeView
+
+    _app = QApplication.instance() or QApplication([])
+    view = LibraryTreeView()
+    view.resize(420, 240)
+    view.verticalScrollBar().setRange(0, 100)
+    view.verticalScrollBar().setValue(50)
+
+    view._update_drag_autoscroll(QPoint(20, view.viewport().height() - 1))
+    assert view._drag_scroll_timer.isActive()
+    view._scroll_during_drag()
+    assert view.verticalScrollBar().value() > 50
+
+    view._update_drag_autoscroll(QPoint(20, view.viewport().height() // 2))
+    assert not view._drag_scroll_timer.isActive()
 
 
 def test_preserve_pack_is_staged_as_discardable_draft(monkeypatch):
@@ -3267,6 +3757,35 @@ def test_tree_editor_filter_suggestions_use_saved_filters_and_record_values(monk
     assert 'category:"Kicks" tag:"warm"' in editor.node_filter._saved_filter_suggestions
     assert 'packname:"ADEN Massamolla"' in editor.node_filter._suggestions
     assert 'type:"Oneshots"' in editor.node_filter._matching_suggestions("on")
+
+
+def test_tree_editor_db_suggestions_survive_embedding_reparent(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QWidget
+    from gui.widgets.tree_organization import TreeOrganizationEditor
+
+    _app = QApplication.instance() or QApplication([])
+    app = QWidget()
+    app.settings_controller = SimpleNamespace(get_saved_filters=lambda: [])
+    app.session_store = SimpleNamespace(
+        filter_suggestion_values=lambda: {
+            "category": {"Bass"},
+            "subcategory": {"Sub"},
+            "tag": {"warm"},
+        }
+    )
+    profile = _profile([TreeOrganizationNode("bass", "root", "Bass", 'cat:"Bass"', "system", 1)])
+    editor = TreeOrganizationEditor([profile], profile, [], app, embedded=True)
+    host = QWidget()
+    editor.setParent(host)
+
+    editor._ensure_editor_built()
+
+    assert 'category:"Bass"' in editor.node_filter._suggestions
+    assert 'subcategory:"Sub"' in editor.node_filter._suggestions
+    assert 'tag:"warm"' in editor.node_filter._suggestions
 
 
 @pytest.mark.parametrize("query", [

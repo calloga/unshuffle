@@ -525,6 +525,54 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
         self.assertIn("Copy complete", app.footer.handover[0][0])
         self.assertFalse(app.footer.handover[1]["can_undo"])
 
+    def test_copy_build_handover_uses_cached_model_count_when_record_store_is_closed(self):
+        class _ClosedRecords:
+            def __len__(self):
+                raise RuntimeError("database handle is closed")
+
+        class _Footer:
+            def __init__(self):
+                self.count = None
+
+            def set_status(self, _text):
+                pass
+
+            def set_count(self, text):
+                self.count = text
+
+            def set_build_handover_state(self, *_args, **_kwargs):
+                pass
+
+            def log(self, *_args, **_kwargs):
+                pass
+
+        app = SimpleNamespace(
+            model=SimpleNamespace(rowCount=lambda: 11925, records=_ClosedRecords()),
+            footer=_Footer(),
+        )
+        engine = SimpleNamespace(
+            target_dir=Path("D:/Target"),
+            session_id="copy-session",
+            session_source_roots=[Path("D:/Source")],
+        )
+        controller = WorkflowController(engine, mock.Mock(), mock.Mock(), None)
+        controller.app = app
+        controller._last_build_options = {"target": "D:/Target", "move": False}
+
+        controller._enter_build_handover_state(
+            {
+                "session_id": "copy-session",
+                "copied": 11846,
+                "duplicates": 0,
+                "failed": 0,
+                "move": False,
+            },
+            "Copied 11846 files.",
+        )
+
+        self.assertEqual(app.footer.count, "11925 files ready")
+        self.assertEqual(app._build_handover_state["workbench_record_count"], 11925)
+
     def test_build_handover_persists_for_relaunch(self):
         from gui.core.workflow_handover import BUILD_HANDOVER_STATE_KEY
 
@@ -855,6 +903,38 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
             },
         )
 
+    def test_successful_undo_rebinds_session_before_offering_source_scan(self):
+        controller = WorkflowController(mock.Mock(), mock.Mock(), mock.Mock(), None)
+        calls = []
+
+        class _ClosedStore:
+            @property
+            def conn(self):
+                raise RuntimeError("database is closed")
+
+        controller.app = SimpleNamespace(
+            settings=mock.Mock(),
+            history_page=SimpleNamespace(mark_undone=mock.Mock(), refresh_from_target=mock.Mock()),
+            model=SimpleNamespace(store=_ClosedStore()),
+            current_records=mock.Mock(side_effect=lambda: calls.append("rebind")),
+        )
+        controller._prompt_scan_restored_sources = mock.Mock(
+            side_effect=lambda *_args: calls.append("prompt") or False
+        )
+
+        with mock.patch("PySide6.QtWidgets.QMessageBox.information"):
+            controller.handle_undo_finished(
+                {
+                    "session_id": "move-session",
+                    "target_root": "D:/Target",
+                    "undone": 4,
+                    "already_undone": 0,
+                    "sources": ["D:/Source"],
+                }
+            )
+
+        self.assertEqual(calls, ["rebind", "prompt"])
+
     def test_successful_move_undo_persists_all_restored_sources_as_startup_roots(self):
         import json
         from gui.core.settings_controller import STARTUP_LAUNCHER_LAST_CHOICE_KEY
@@ -1096,6 +1176,45 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
         worker_manager.start_commit.assert_called_once()
         records_arg = worker_manager.start_commit.call_args.args[0]
         self.assertEqual(records_arg, [normal])
+
+    def test_start_commit_includes_duplicate_shadows_when_skipping_is_disabled(self):
+        engine = SimpleNamespace(
+            target_dir=Path("D:/Target"),
+            session_source_roots=[],
+            _init_db_and_hashes=mock.Mock(),
+        )
+        worker_manager = mock.Mock()
+
+        class _App(QObject):
+            def __init__(self):
+                super().__init__()
+                self.settings = mock.Mock()
+                self.audio_controller = SimpleNamespace(player=None)
+
+        app = _App()
+        controller = WorkflowController(engine, worker_manager, mock.Mock(), app)
+        normal = PlanRecord(Path("D:/Samples/original.wav"), "Pack", "Kicks", "Oneshots", "0.9")
+        shadow = PlanRecord(
+            Path("D:/Samples/dupe.wav"),
+            "Pack",
+            "Kicks",
+            "Oneshots",
+            "0.9",
+            is_duplicate_shadow=True,
+            duplicate_of_hash="hash-a",
+            duplicate_of_path=normal.source_path,
+        )
+
+        controller.start_commit(
+            [normal, shadow],
+            "D:/Target",
+            move=False,
+            skip_confirmed_duplicates=False,
+        )
+
+        args = worker_manager.start_commit.call_args.args
+        self.assertEqual(args[0], [normal, shadow])
+        self.assertFalse(args[-1])
 
 
 if __name__ == "__main__":

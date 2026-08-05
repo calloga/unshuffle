@@ -28,15 +28,19 @@ ON custom_tree_memberships (session_id, profile_id, projection_signature, row_id
 
 CREATE TRIGGER IF NOT EXISTS custom_tree_memberships_staging_ai
 AFTER INSERT ON staging_records BEGIN
-    DELETE FROM custom_tree_memberships WHERE session_id = new.session_id;
+    DELETE FROM custom_tree_memberships
+    WHERE session_id = new.session_id AND row_id = new.row_id;
 END;
 
 CREATE TRIGGER IF NOT EXISTS custom_tree_memberships_staging_au
 AFTER UPDATE ON staging_records BEGIN
-    DELETE FROM custom_tree_memberships WHERE session_id = new.session_id;
+    DELETE FROM custom_tree_memberships
+    WHERE (session_id = old.session_id AND row_id = old.row_id)
+       OR (session_id = new.session_id AND row_id = new.row_id);
 END;
 
 CREATE TRIGGER IF NOT EXISTS custom_tree_memberships_staging_ad
 AFTER DELETE ON staging_records BEGIN
-    DELETE FROM custom_tree_memberships WHERE session_id = old.session_id;
+    DELETE FROM custom_tree_memberships
+    WHERE session_id = old.session_id AND row_id = old.row_id;
 END;

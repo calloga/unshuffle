@@ -49,9 +49,44 @@ class GroupedRowHeader(QHeaderView):
 class OffsetSortHeader(QHeaderView):
     """Horizontal header with a lower, quieter custom sort indicator."""
 
+    sectionResizeFinished = Signal(int, int, int)
+
     def __init__(self, parent=None):
         super().__init__(Qt.Horizontal, parent)
         self.setSortIndicatorShown(True)
+        self._user_resize_section = -1
+        self._user_resize_start = 0
+
+    @property
+    def user_resize_active(self) -> bool:
+        return self._user_resize_section >= 0
+
+    def mousePressEvent(self, event):
+        self._user_resize_section = self._section_edge_at(int(event.position().x()))
+        if self._user_resize_section >= 0:
+            self._user_resize_start = self.sectionSize(self._user_resize_section)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        section = self._user_resize_section
+        start_size = self._user_resize_start
+        super().mouseReleaseEvent(event)
+        self._user_resize_section = -1
+        self._user_resize_start = 0
+        if section >= 0:
+            end_size = self.sectionSize(section)
+            if end_size != start_size:
+                self.sectionResizeFinished.emit(section, start_size, end_size)
+
+    def _section_edge_at(self, x: int) -> int:
+        tolerance = 5
+        for logical in range(self.count()):
+            if self.isSectionHidden(logical):
+                continue
+            edge = self.sectionViewportPosition(logical) + self.sectionSize(logical)
+            if abs(x - edge) <= tolerance:
+                return logical
+        return -1
 
     def paintSection(self, painter, rect, logicalIndex):
         super().paintSection(painter, rect, logicalIndex)
@@ -106,10 +141,12 @@ class StagingTableView(QTableView):
         self._preserve_selection_for_drag = False
         self._drag_started = False
         self._selection_drag_anchor: QModelIndex | None = None
+        self._pack_fill_limits = {-1: -1, 1: -1}
+        self._pack_fill_blocked: dict[int, int] = {}
         self.setSortingEnabled(False)
         self.horizontalHeader().setSectionsClickable(True)
         self.horizontalHeader().setSectionsMovable(True)
-        self.horizontalHeader().sectionClicked.connect(self.sortColumnRequested.emit)
+        self.horizontalHeader().sectionDoubleClicked.connect(self.sortColumnRequested.emit)
         self.refresh_theme()
 
     def _get_handle_rect(self, index):
@@ -210,18 +247,7 @@ class StagingTableView(QTableView):
             if curr_idx.isValid() and curr_idx.column() == self.fill_start_idx.column():
                 if curr_idx.column() == StagingColumn.PACK:
                     val = self.model().data(self.fill_start_idx, Qt.EditRole)
-                    start_row, end_row = self.fill_start_idx.row(), curr_idx.row()
-                    step = 1 if end_row >= start_row else -1
-                    last_valid = start_row
-                    for r in range(start_row + step, end_row + step, step):
-                        if r < 0 or r >= self.model().rowCount():
-                            break
-                        cand_list = self.model().data(self.model().index(r, 0), Qt.UserRole)
-                        if not cand_list or val in [c[0] for c in cand_list]:
-                            last_valid = r
-                        else:
-                            break
-                    self.current_drag_row = last_valid
+                    self.current_drag_row = self._pack_fill_target_row(curr_idx.row(), val)
                 else:
                     self.current_drag_row = curr_idx.row()
             self.viewport().update()
@@ -278,6 +304,8 @@ class StagingTableView(QTableView):
             self.is_filling = True
             self.fill_start_idx = idx
             self.current_drag_row = idx.row()
+            self._pack_fill_limits = {-1: idx.row(), 1: idx.row()}
+            self._pack_fill_blocked.clear()
             self._selection_drag_anchor = None
             return
         
@@ -319,6 +347,7 @@ class StagingTableView(QTableView):
             source_model = self._source_model()
             updates = []
             if source_model:
+                source_rows = []
                 for r in range(start_row, end_row + 1):
                     proxy_index = self.model().index(r, col)
                     if not proxy_index.isValid():
@@ -326,18 +355,49 @@ class StagingTableView(QTableView):
                     source_index = self._to_source_index(proxy_index)
                     if not source_index.isValid():
                         continue
-                    rec = source_model.record(source_index.row()) if hasattr(source_model, "record") else None
-                    if rec is not None:
-                        updates.append((rec, col, val))
+                    source_rows.append(source_index.row())
+                if hasattr(source_model, "records_for_rows"):
+                    records = source_model.records_for_rows(source_rows)
+                else:
+                    records = [
+                        source_model.record(row)
+                        for row in source_rows
+                        if hasattr(source_model, "record")
+                    ]
+                updates.extend((rec, col, val) for rec in records if rec is not None)
                 if hasattr(source_model, "apply_bulk_updates"):
                     source_model.apply_bulk_updates(updates, f"Fill {val}")
             self.viewport().update()
             self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._pack_fill_blocked.clear()
             return
         self._preserve_selection_for_drag = False
         self._drag_started = False
         self._selection_drag_anchor = None
         super().mouseReleaseEvent(event)
+
+    def _pack_fill_target_row(self, requested_row: int, value) -> int:
+        if self.fill_start_idx is None:
+            return requested_row
+        start_row = self.fill_start_idx.row()
+        step = 1 if requested_row >= start_row else -1
+        blocked_row = self._pack_fill_blocked.get(step)
+        if blocked_row is not None and (requested_row - blocked_row) * step >= 0:
+            return blocked_row - step
+
+        validated_row = self._pack_fill_limits.get(step, start_row)
+        if (requested_row - validated_row) * step <= 0:
+            return requested_row
+
+        for row in range(validated_row + step, requested_row + step, step):
+            if row < 0 or row >= self.model().rowCount():
+                break
+            candidates = self.model().data(self.model().index(row, StagingColumn.PACK), Qt.UserRole)
+            if candidates and value not in [candidate[0] for candidate in candidates]:
+                self._pack_fill_blocked[step] = row
+                return row - step
+            self._pack_fill_limits[step] = row
+        return self._pack_fill_limits[step]
 
     def _select_drag_range(self, start: QModelIndex, end: QModelIndex, *, additive: bool = False) -> None:
         selection_model = self.selectionModel()

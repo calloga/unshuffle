@@ -4,7 +4,7 @@ import logging
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QPersistentModelIndex
 from PySide6.QtGui import QColor, QUndoStack
@@ -26,7 +26,7 @@ from unshuffle.core.constants import SUB_TAXONOMY_MAP
 class DbBackedStagingTableModel(QAbstractTableModel):
     """Windowed staging table model backed by the active staging_records table."""
 
-    CHUNK_SIZE = 1500
+    CHUNK_SIZE = 256
     MAX_HYDRATED_ROWS = 5000
     _GROUP_COLUMN_ATTR_MAP = StagingTableModel._GROUP_COLUMN_ATTR_MAP
 
@@ -52,12 +52,15 @@ class DbBackedStagingTableModel(QAbstractTableModel):
         self.sub_taxonomy_map = sub_taxonomy_map or SUB_TAXONOMY_MAP
         self._sync_suspended = False
         self._row_ids: list[int] = []
+        self._row_positions: dict[int, int] = {}
         self._record_cache = LruRecordCache(self.MAX_HYDRATED_ROWS)
+        self._duplicate_shadow_ids = self.store.duplicate_shadow_row_ids()
         self._unique_values_cache: dict[int, list[str]] = {}
         self._matched_ids: set[int] | None = None
         self.matched_ids: set[int] | None = None
         self.audio_types: set[str] | None = None
-        self.show_non_audio_assets: bool = True
+        self.show_non_audio_assets: bool = False
+        self.show_duplicates: bool = True
         self.path_filters: set[str] = set()
         self._norm_path_filters: list[str] = []
         self.confidence_min: float = 0.0
@@ -79,6 +82,7 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             matched_ids=frozenset(self.matched_ids) if self.matched_ids is not None else None,
             audio_types=frozenset(self.audio_types) if self.audio_types is not None else None,
             show_non_audio_assets=self.show_non_audio_assets,
+            show_duplicates=self.show_duplicates,
             path_prefixes=tuple(self._norm_path_filters),
             confidence_min=self.confidence_min,
             confidence_max=self.confidence_max,
@@ -106,14 +110,18 @@ class DbBackedStagingTableModel(QAbstractTableModel):
 
     def refresh_index(self) -> None:
         started = time.perf_counter()
-        self.beginResetModel()
-        self._row_ids = self.store.row_ids(
+        row_ids = self.store.row_ids(
             self.query,
             self.group_column,
             descending=self.sort_order == Qt.DescendingOrder,
         )
-        self._unique_values_cache.clear()
-        self.endResetModel()
+        self.beginResetModel()
+        try:
+            self._row_ids = row_ids
+            self._row_positions = {row_id: row for row, row_id in enumerate(row_ids)}
+            self._unique_values_cache.clear()
+        finally:
+            self.endResetModel()
         if self._row_ids:
             self.headerDataChanged.emit(Qt.Vertical, 0, len(self._row_ids) - 1)
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -154,6 +162,28 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             return record
         return cached
 
+    def records_for_rows(self, rows) -> list[PlanRecord]:
+        """Hydrate a group of logical rows with one batched store read."""
+        positions = [int(row) for row in rows if 0 <= int(row) < len(self._row_ids)]
+        row_ids = [self._row_ids[row] for row in positions]
+        records_by_id: dict[int, PlanRecord] = {}
+        missing_ids = []
+        for row_id in row_ids:
+            cached = self._record_cache.get(row_id)
+            if cached is None:
+                missing_ids.append(row_id)
+            else:
+                records_by_id[row_id] = cached
+        if missing_ids:
+            hydrated = {
+                int(db_row["row_id"]): plan_record_from_staging_row(db_row, parse_tags)
+                for db_row in self.store.lightweight_rows_by_ids(missing_ids)
+                if db_row.get("row_id") is not None
+            }
+            records_by_id.update(hydrated)
+            self._record_cache.put_many(hydrated)
+        return [records_by_id[row_id] for row_id in row_ids if row_id in records_by_id]
+
     def _hydrate_window(self, row: int) -> None:
         chunk = max(0, row // self.CHUNK_SIZE)
         start = chunk * self.CHUNK_SIZE
@@ -165,6 +195,13 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             if db_row.get("row_id") is not None
         }
         self._record_cache.put_many(records)
+
+    def prewarm_initial_window(self) -> None:
+        if self._row_ids:
+            self._hydrate_window(0)
+
+    def refresh_duplicate_shadow_ids(self) -> None:
+        self._duplicate_shadow_ids = self.store.duplicate_shadow_row_ids()
 
     def normalized_source_path(self, row: int) -> str:
         try:
@@ -231,7 +268,7 @@ class DbBackedStagingTableModel(QAbstractTableModel):
                 return self.scores.get(self.record_id(index.row())) or rec.confidence
             return getattr(rec, "pack_candidates", None)
         if role == Qt.ToolTipRole and col in (StagingColumn.PACK, StagingColumn.FILENAME, StagingColumn.CATEGORY):
-            return StagingTableModel._classification_tooltip(self, rec)
+            return StagingTableModel._classification_tooltip(cast(Any, self), rec)
         return None
 
     def setData(self, index: QModelIndex | QPersistentModelIndex, value: Any, role: int = Qt.EditRole) -> bool:
@@ -283,36 +320,73 @@ class DbBackedStagingTableModel(QAbstractTableModel):
                 self.sync_callback(int(row_id), rec)
         return True
 
-    def _apply_bulk_values(self, updates: list[tuple[PlanRecord, int, Any]]) -> None:
+    def _apply_bulk_values(self, updates: list[tuple[PlanRecord, int, Any]], *, progress_callback=None) -> None:
         """Apply draft values without re-entering the draft callback."""
+        prepared = self._prepare_bulk_values(updates)
+        if prepared is None:
+            return
+        self._write_prepared_bulk_values(prepared, progress_callback=progress_callback)
+        self._finalize_prepared_bulk_values(prepared)
+
+    def _prepare_bulk_values(self, updates: list[tuple[PlanRecord, int, Any]]):
         updates = [
             (rec, col, value)
             for rec, col, value in updates
             if getattr(rec, "is_duplicate_shadow", False) is not True
         ]
         if not updates:
-            return
+            return None
+
+        semantic_columns = {
+            StagingColumn.PACK,
+            StagingColumn.CATEGORY,
+            StagingColumn.SUBCATEGORY,
+            StagingColumn.TYPE,
+        }
+        updates_by_record: dict[int, list[tuple[int, Any]]] = {}
+        canonical_records: dict[int, PlanRecord] = {}
+        for rec, col, value in updates:
+            if col not in semantic_columns:
+                continue
+            key = int(getattr(rec, "staging_row_id", id(rec)))
+            canonical_records[key] = rec
+            updates_by_record.setdefault(key, []).append((col, value))
+        for canonical, shadow in self.store.duplicate_shadow_records_for(canonical_records.values()):
+            key = int(getattr(canonical, "staging_row_id", id(canonical)))
+            updates.extend((shadow, col, value) for col, value in updates_by_record.get(key, ()))
 
         touched: dict[int, PlanRecord] = {}
-        touched_columns = set()
+        columns_by_row: dict[int, set[int]] = {}
+        snapshots: dict[int, tuple[PlanRecord, dict[str, Any]]] = {}
         for rec, col, value in updates:
             row_id = getattr(rec, "staging_row_id", None)
             if row_id is None:
                 continue
+            normalized_row_id = int(row_id)
+            if normalized_row_id not in snapshots:
+                snapshots[normalized_row_id] = (
+                    rec,
+                    {
+                        "pack": rec.pack,
+                        "category": rec.category,
+                        "subcategory": rec.subcategory,
+                        "audio_type": rec.audio_type,
+                        "tags": list(rec.tags or []),
+                        "is_preserved": rec.is_preserved,
+                        "preserved_root": rec.preserved_root,
+                        "is_manual": rec.is_manual,
+                    },
+                )
             self._set_record_value(rec, col, value)
-            touched[int(row_id)] = rec
-            touched_columns.add(col)
+            touched[normalized_row_id] = rec
+            columns_by_row.setdefault(normalized_row_id, set()).add(col)
         if not touched:
-            return
+            return None
 
         db_updates: list[tuple[int, dict[str, Any]]] = []
         for row_id, rec in touched.items():
             fields: dict[str, Any] = {}
-            record_columns = {
-                col
-                for candidate, col, _value in updates
-                if getattr(candidate, "staging_row_id", None) == row_id
-            }
+            record_columns = columns_by_row.get(row_id, set())
             if StagingColumn.PACK in record_columns:
                 fields["pack"] = rec.pack
             if StagingColumn.CATEGORY in record_columns:
@@ -331,19 +405,79 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             if fields:
                 db_updates.append((row_id, fields))
 
-        self.store.update_rows(db_updates)
+        return {
+            "db_updates": db_updates,
+            "touched": touched,
+            "columns_by_row": columns_by_row,
+            "snapshots": snapshots,
+        }
 
-        self.refresh_index()
+    def _write_prepared_bulk_values(self, prepared, *, progress_callback=None) -> None:
+        db_updates = list(prepared.get("db_updates") or [])
+        if progress_callback is None:
+            self.store.update_rows(db_updates)
+        else:
+            self.store.update_rows(db_updates, progress_callback=progress_callback)
+
+    def _finalize_prepared_bulk_values(self, prepared) -> None:
+        touched = dict(prepared.get("touched") or {})
+        columns_by_row = dict(prepared.get("columns_by_row") or {})
+
         self._record_cache.put_many(touched)
+        touched_columns = {column for columns in columns_by_row.values() for column in columns}
+        for column in touched_columns:
+            self._unique_values_cache.pop(int(column), None)
+        if self._bulk_update_requires_index_refresh(touched_columns):
+            self.refresh_index()
+            return
+
+        visible_rows = sorted(
+            self._row_positions[row_id]
+            for row_id in touched
+            if row_id in self._row_positions
+        )
+        if visible_rows:
+            self.dataChanged.emit(
+                self.index(visible_rows[0], 0),
+                self.index(visible_rows[-1], self.columnCount() - 1),
+            )
+
+    def _rollback_prepared_bulk_values(self, prepared) -> None:
+        snapshots = dict(prepared.get("snapshots") or {})
+        restored: dict[int, PlanRecord] = {}
+        for row_id, (rec, state) in snapshots.items():
+            for attr, value in state.items():
+                setattr(rec, attr, list(value) if attr == "tags" else value)
+            restored[int(row_id)] = rec
+        self._record_cache.put_many(restored)
+        visible_rows = sorted(
+            self._row_positions[row_id]
+            for row_id in restored
+            if row_id in self._row_positions
+        )
+        if visible_rows:
+            self.dataChanged.emit(
+                self.index(visible_rows[0], 0),
+                self.index(visible_rows[-1], self.columnCount() - 1),
+            )
+
+    def _bulk_update_requires_index_refresh(self, columns: set[int]) -> bool:
+        if int(self.group_column) in columns:
+            return True
+        if any(int(column) in self.column_filters for column in columns):
+            return True
+        if StagingColumn.TYPE in columns and (
+            self.audio_types is not None or not self.show_non_audio_assets
+        ):
+            return True
+        if StagingColumn.TAGS in columns and not self.show_duplicates:
+            return True
+        return False
 
     def flags(self, index: QModelIndex | QPersistentModelIndex) -> Qt.ItemFlags:
         if not index.isValid():
             return Qt.ItemFlag.ItemIsEnabled
-        try:
-            rec = self.record(index.row())
-        except IndexError:
-            return Qt.ItemFlag.ItemIsEnabled
-        if getattr(rec, "is_duplicate_shadow", False) is True:
+        if self.record_id(index.row()) in self._duplicate_shadow_ids:
             return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
         if index.column() in [StagingColumn.PACK, StagingColumn.CATEGORY, StagingColumn.SUBCATEGORY, StagingColumn.TAGS]:
             return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsEnabled
@@ -372,7 +506,17 @@ class DbBackedStagingTableModel(QAbstractTableModel):
         self.refresh_index()
 
     def set_show_non_audio_assets(self, show: bool):
-        self.show_non_audio_assets = bool(show)
+        show = bool(show)
+        if self.show_non_audio_assets == show:
+            return
+        self.show_non_audio_assets = show
+        self.refresh_index()
+
+    def set_show_duplicates(self, show: bool):
+        show = bool(show)
+        if self.show_duplicates == show:
+            return
+        self.show_duplicates = show
         self.refresh_index()
 
     def set_path_filter(self, root_path: str, is_active: bool):
@@ -472,28 +616,28 @@ class DbBackedStagingTableModel(QAbstractTableModel):
         return self.store.record_by_row_id(int(row[0]))
 
     def _get_record_value(self, rec: PlanRecord, col: int) -> Any:
-        return StagingTableModel._get_record_value(self, rec, col)
+        return StagingTableModel._get_record_value(cast(Any, self), rec, col)
 
     def _set_record_value(self, rec: PlanRecord, col: int, value: Any) -> None:
-        StagingTableModel._set_record_value(self, rec, col, value)
+        StagingTableModel._set_record_value(cast(Any, self), rec, col, value)
 
     def _group_value_for_record(self, rec: PlanRecord) -> str:
-        return StagingTableModel._group_value_for_record(self, rec)
+        return StagingTableModel._group_value_for_record(cast(Any, self), rec)
 
     def _normalized_subcategory(self, value: Any) -> str:
-        return StagingTableModel._normalized_subcategory(self, value)
+        return StagingTableModel._normalized_subcategory(cast(Any, self), value)
 
     def _matched_tokens_for_component(self, component_trace: Any, category: str) -> list[str]:
-        return StagingTableModel._matched_tokens_for_component(self, component_trace, category)
+        return StagingTableModel._matched_tokens_for_component(cast(Any, self), component_trace, category)
 
     def _quoted_list(self, values: list[str]) -> str:
-        return StagingTableModel._quoted_list(self, values)
+        return StagingTableModel._quoted_list(cast(Any, self), values)
 
     def _positive_offset(self, value: Any) -> bool:
-        return StagingTableModel._positive_offset(self, value)
+        return StagingTableModel._positive_offset(cast(Any, self), value)
 
     def _top_score_lines(self, raw_scores: dict[str, float], selected_category: str) -> list[str]:
-        return StagingTableModel._top_score_lines(self, raw_scores, selected_category)
+        return StagingTableModel._top_score_lines(cast(Any, self), raw_scores, selected_category)
 
     def _visible_staging_column(self, col) -> StagingColumn | None:
         return StagingTableModel._visible_staging_column(col)
@@ -513,7 +657,7 @@ class DbBackedStagingTableModel(QAbstractTableModel):
         return make_qcolor(palette[index])
 
     def suspended_sync(self):
-        return StagingTableModel.suspended_sync(self)
+        return StagingTableModel.suspended_sync(cast(Any, self))
 
 
 def _normalize_source_path_filter(path: str) -> str:

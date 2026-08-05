@@ -8,6 +8,30 @@ from unshuffle.bridge.persistence_bridge import PersistenceBridge
 from unshuffle.bridge.search_bridge import SearchBridge
 from unshuffle.bridge.workflow_bridge import create_workflow_bridge
 
+
+def request_new_session(app) -> bool:
+    reply = QMessageBox.question(
+        app,
+        "Start New Session",
+        "Close Unshuffle and open the startup launcher to begin a new session?",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+    )
+    if reply != QMessageBox.StandardButton.Yes:
+        return False
+
+    settings_controller = getattr(app, "settings_controller", None)
+    if settings_controller is not None:
+        settings_controller.set_show_startup_launcher(True)
+        settings = getattr(settings_controller, "settings", None)
+        if settings is not None and hasattr(settings, "sync"):
+            settings.sync()
+    app._restart_with_startup_launcher = True
+    if not app.close():
+        app._restart_with_startup_launcher = False
+        return False
+    return True
+
 def load_staging_session(app, sess, show_errors=True):
     drafting = getattr(app, "drafting_controller", None)
     if drafting is not None and not drafting.confirm_clear_pending_draft("load another session"):
@@ -74,6 +98,8 @@ def load_staging_session(app, sess, show_errors=True):
         if old_engine:
             try:
                 app.worker_manager.cancel_all()
+                if getattr(app, "search_controller", None):
+                    app.search_controller.invalidate_pending_searches()
                 old_engine.close()
             except Exception:
                 logging.exception("Failed to close previous engine after resuming session.")

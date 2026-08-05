@@ -32,11 +32,10 @@ def apply_theme(window, theme_key: str) -> None:
 
 def apply_theme_stylesheet(window, qss: str, app: object | None) -> None:
     set_app_style = getattr(app, "setStyleSheet", None)
-    if app is not None and not window.isVisible() and callable(set_app_style):
+    if app is not None and callable(set_app_style):
         set_app_style(qss)
-        return
-
-    window.setStyleSheet(qss)
+    else:
+        window.setStyleSheet(qss)
     if app is None:
         return
 
@@ -51,7 +50,6 @@ def apply_theme_stylesheet(window, qss: str, app: object | None) -> None:
             continue
         if not isinstance(widget, QWidget):
             continue
-        widget.setStyleSheet(qss)
         refresh = getattr(widget, "refresh_theme", None)
         if callable(refresh):
             refresh()

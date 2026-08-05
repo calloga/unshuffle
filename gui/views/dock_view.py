@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
 )
 from PySide6.QtCore import QSize, Signal, Qt
+from PySide6.QtGui import QIcon
 
 from unshuffle.core.constants import CATEGORIES
 
@@ -43,6 +44,9 @@ from ..utils.styles import (
 from ..utils.layout_helpers import apply_layout_margins, apply_layout_spacing
 from ..utils.widget_helpers import apply_fixed_height, apply_fixed_width, apply_minimum_width
 from ..widgets.buttons import SidebarIconButton
+from ..widgets import AnimatedIconButton
+from ..widgets.preview_control_bar import DragOutIconButton
+from ..utils.constants import PAUSE_ICON, PLAY_ICON, STOP_ICON
 
 
 class DockView(QWidget):
@@ -137,7 +141,7 @@ class DockView(QWidget):
         self.btn_save_search.clicked.connect(lambda: self.saveSearchRequested.emit(self.edit_search.text()))
         search_row.addWidget(self.btn_save_search)
 
-        self.main_layout.addLayout(search_row)
+        self._search_row = search_row
 
         view_row = QHBoxLayout()
         apply_layout_margins(view_row, DOCKED_SEARCH_ROW_MARGINS)
@@ -167,6 +171,21 @@ class DockView(QWidget):
         view_row.addWidget(self.btn_tree_view)
         view_row.addWidget(self.btn_map_view)
         view_row.addStretch(1)
+        from gui.core.audio_player import SoundPreviewPlayer
+
+        self._preview_player = SoundPreviewPlayer.instance()
+        self.btn_preview_play = AnimatedIconButton(PLAY_ICON, QSize(18, 18))
+        self.btn_preview_play.setToolTip("Play/Pause")
+        self.btn_preview_play.clicked.connect(lambda checked=False: self._toggle_docked_playback())
+        self.btn_preview_stop = AnimatedIconButton(STOP_ICON, QSize(16, 16))
+        self.btn_preview_stop.setToolTip("Stop")
+        self.btn_preview_stop.clicked.connect(lambda checked=False: self._preview_player.stop())
+        self.btn_preview_export = DragOutIconButton(self._preview_player)
+        self.btn_preview_export.setToolTip("Export current sample")
+        for button in (self.btn_preview_play, self.btn_preview_stop, self.btn_preview_export):
+            button.setEnabled(False)
+            view_row.addWidget(button, 0, Qt.AlignVCenter)
+        self._preview_player.stateChanged.connect(self._update_docked_play_icon)
         self.main_layout.addLayout(view_row)
 
         self.options_section = sw.CollapsibleSection("OPTIONS", use_scroll=False)
@@ -207,6 +226,7 @@ class DockView(QWidget):
         self.view_tree.category_change_requested.connect(lambda rec, category: self.categoryChangeRequested.emit(rec, category))
         self.view_tree.tags_edit_requested.connect(lambda records, add_tags, remove_tags: self.tagsEditRequested.emit(records, add_tags, remove_tags))
         self.view_tree.open_explorer_requested.connect(lambda target: self.openExplorerRequested.emit(target))
+        self.view_tree.clicked.connect(lambda _index: self._sync_docked_transport_selection())
         self._force_single_tree_column()
         if hasattr(self.tree_model, "modelReset"):
             self.tree_model.modelReset.connect(self._force_single_tree_column)
@@ -214,8 +234,44 @@ class DockView(QWidget):
             self.tree_model.rebuildFinished.connect(self._force_single_tree_column)
         self.view_stack.addWidget(self.view_tree)
         self.main_layout.addWidget(self.view_stack, 1)
+        self.main_layout.addLayout(self._search_row)
 
         self.set_docked_view_mode("tree", emit=False)
+
+    def _selected_audio_path(self):
+        records = self.selected_records()
+        if not records:
+            return None
+        record = records[0]
+        if str(getattr(record, "audio_type", "") or "") in {"Non-Audio Assets", "Utility"}:
+            return None
+        path = getattr(record, "source_path", None)
+        return Path(path) if path else None
+
+    def _sync_docked_transport_selection(self) -> None:
+        path = self._selected_audio_path()
+        available = bool(path and path.exists())
+        self.btn_preview_export.selected_path = path if available else None
+        for button in (self.btn_preview_play, self.btn_preview_stop, self.btn_preview_export):
+            button.setEnabled(available)
+
+    def _toggle_docked_playback(self) -> None:
+        path = self._selected_audio_path()
+        if path is None:
+            return
+        if self._preview_player.current_path == path:
+            self._preview_player.toggle_play_pause()
+        else:
+            self.playRequested.emit(path)
+
+    def _update_docked_play_icon(self, state) -> None:
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        playing = state == QMediaPlayer.PlayingState or (
+            hasattr(QMediaPlayer, "PlaybackState")
+            and state == QMediaPlayer.PlaybackState.PlayingState
+        )
+        self.btn_preview_play.setIcon(QIcon(str(PAUSE_ICON if playing else PLAY_ICON)))
 
     def _force_single_tree_column(self) -> None:
         from PySide6.QtWidgets import QHeaderView

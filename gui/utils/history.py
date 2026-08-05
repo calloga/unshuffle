@@ -208,10 +208,21 @@ def load_pending_scan_sessions(target: str, limit: int = 10) -> list[dict]:
     cached = _SESSION_CACHE.get(cache_key)
     if cached is not None:
         return list(cached)
-    sessions = _first_nonempty(
-        target,
-        lambda db: db.get_recent_sessions(limit=limit, only_executed=False),
-    )
+    def _load(db):
+        sessions = db.get_recent_sessions(limit=limit, only_executed=False)
+        enriched = []
+        for session in sessions:
+            item = dict(session)
+            session_id = str(item.get("session_id") or "")
+            sources = db.get_session_sources(session_id) if session_id else []
+            fallback_source = str(item.get("source_path") or "").strip()
+            item["source_paths"] = [str(source) for source in sources] or (
+                [fallback_source] if fallback_source else []
+            )
+            enriched.append(item)
+        return enriched
+
+    sessions = _first_nonempty(target, _load)
     pending = [s for s in sessions if s.get("file_count", 0) == 0]
     _SESSION_CACHE[cache_key] = list(pending)
     return list(pending)

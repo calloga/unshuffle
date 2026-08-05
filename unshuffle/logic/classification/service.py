@@ -71,9 +71,9 @@ def compute_component_score(
 def get_subcategory(category: str, tokens: Set[str], runtime: Optional[dict] = None) -> Optional[str]:
     runtime = runtime or get_runtime_config_snapshot()
     cat_map = runtime["sub_taxonomy_map"].get(category, {})
-    for token in tokens:
-        if token in cat_map:
-            sub = cat_map[token]
+    normalized_tokens = {str(token).casefold() for token in tokens}
+    for token, sub in cat_map.items():
+        if str(token).casefold() in normalized_tokens:
             return None if sub == "no-sub" else sub
     
     res = runtime.get("default_sub_map", {}).get(category)

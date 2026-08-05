@@ -45,13 +45,12 @@ class TaggingController(QObject):
         cached = session_state.cached_tagging_state() if session_state is not None else None
         if cached is not None:
             duplicate_count = int(cached.get("duplicate_count") or 0)
-            tagged_count = session_state.tagged_duplicate_count() if session_state is not None else self._tagged_duplicate_count(records)
+            tagged_count = session_state.tagged_duplicate_count()
             if duplicate_count == 0 or tagged_count > 0:
                 if tagged_count:
                     duplicate_count = tagged_count
                 self._last_duplicate_count = duplicate_count
-                if getattr(self.app, "library_tab", None):
-                    self.app.library_tab.set_possible_duplicate_filter_enabled(bool(duplicate_count))
+                self._refresh_duplicate_filter_state()
                 if getattr(self.app, "filter_controller", None):
                     self.app.filter_controller.refresh_dock_filters()
                 if getattr(self.app, "footer", None):
@@ -88,8 +87,7 @@ class TaggingController(QObject):
                     if tagged_count:
                         duplicate_count = tagged_count
                     self._last_duplicate_count = duplicate_count
-                    if getattr(self.app, "library_tab", None):
-                        self.app.library_tab.set_possible_duplicate_filter_enabled(bool(duplicate_count))
+                    self._refresh_duplicate_filter_state()
                     if getattr(self.app, "filter_controller", None):
                         self.app.filter_controller.refresh_dock_filters()
                     if getattr(self.app, "footer", None):
@@ -168,13 +166,18 @@ class TaggingController(QObject):
         elif "percent" in payload:
             footer.set_progress(int(payload["percent"]), 100)
 
-    def clear_state(self) -> None:
+    def clear_state(self, *, refresh_filter_state: bool = True) -> None:
         self._request_id += 1
         self._last_duplicate_count = 0
         if getattr(self.app, "footer", None):
             self.app.footer.set_tagging_state("", False)
-        if getattr(self.app, "library_tab", None):
-            self.app.library_tab.set_possible_duplicate_filter_enabled(False)
+        if refresh_filter_state:
+            self._refresh_duplicate_filter_state()
+            return
+
+        library_tab = getattr(self.app, "library_tab", None)
+        if hasattr(library_tab, "set_possible_duplicate_filter_enabled"):
+            library_tab.set_possible_duplicate_filter_enabled(False)
         if getattr(self.app, "filter_controller", None):
             self.app.filter_controller.refresh_dock_filters()
 
@@ -255,10 +258,7 @@ class TaggingController(QObject):
         else:
             self._store_cached_state(duplicate_count)
         summary = self._summary_text(duplicate_count)
-        if getattr(self.app, "library_tab", None):
-            self.app.library_tab.set_possible_duplicate_filter_enabled(bool(duplicate_count))
-        if getattr(self.app, "filter_controller", None):
-            self.app.filter_controller.refresh_dock_filters()
+        self._refresh_duplicate_filter_state()
         if duplicate_count and hasattr(getattr(self.app, "view_controller", None), "prewarm_possible_duplicate_map"):
             QTimer.singleShot(0, self.app.view_controller.prewarm_possible_duplicate_map)
         if getattr(self.app, "footer", None):
@@ -282,6 +282,11 @@ class TaggingController(QObject):
             True,
             mode="replace",
         )
+
+    def _refresh_duplicate_filter_state(self) -> None:
+        from .workflow_scan_finalization import update_possible_duplicate_filter_state
+
+        update_possible_duplicate_filter_state(self.app)
 
     def _hide_tagging_notice(self, request_id: int) -> None:
         if request_id != self._request_id:

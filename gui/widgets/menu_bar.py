@@ -28,6 +28,7 @@ class ModernMenuBar(QMenuBar):
     startupLauncherVisibilityRequested = Signal(bool)
     tableColumnVisibilityRequested = Signal(int, bool)
     showNonAudioAssetsRequested = Signal(bool)
+    showDuplicatesRequested = Signal(bool)
     libraryRequested = Signal()
     systemRequested = Signal()
     historyRequested = Signal()
@@ -124,7 +125,7 @@ class ModernMenuBar(QMenuBar):
         self.menu_view_tree.addAction(act_tree)
         self.library_view_actions["tree"] = act_tree
         
-        self.act_edit_tree_org = QAction("Edit Tree Organization", self)
+        self.act_edit_tree_org = QAction("Edit Library Structure", self)
         self.act_edit_tree_org.triggered.connect(self.treeOrganizationEditRequested.emit)
         self.menu_view_tree.addAction(self.act_edit_tree_org)
         
@@ -155,6 +156,14 @@ class ModernMenuBar(QMenuBar):
             lambda checked=False: self.showNonAudioAssetsRequested.emit(self.act_show_non_audio.isChecked())
         )
         self.menu_preferences.addAction(self.act_show_non_audio)
+
+        self.act_show_duplicates = QAction("Show Duplicates", self)
+        self.act_show_duplicates.setCheckable(True)
+        self.act_show_duplicates.setChecked(True)
+        self.act_show_duplicates.triggered.connect(
+            lambda checked=False: self.showDuplicatesRequested.emit(self.act_show_duplicates.isChecked())
+        )
+        self.menu_preferences.addAction(self.act_show_duplicates)
 
         self.act_high_performance_scan = QAction("High Performance Scan", self)
         self.act_high_performance_scan.setCheckable(True)

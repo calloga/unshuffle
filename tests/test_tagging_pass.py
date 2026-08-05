@@ -200,6 +200,51 @@ def test_tagging_controller_clear_state_hides_footer_and_invalidates_results():
     app.filter_controller.refresh_dock_filters.assert_called_once_with()
 
 
+def test_tagging_controller_scan_clear_does_not_query_disposed_session_store():
+    class _ClosedStore:
+        def has_any_tags(self, _tags):
+            raise RuntimeError("database handle is closed")
+
+    class _App(QObject):
+        def __init__(self):
+            super().__init__()
+            self.footer = mock.Mock()
+            self.library_tab = mock.Mock()
+            self.filter_controller = mock.Mock()
+            self.session_store = _ClosedStore()
+
+    app = _App()
+    controller = TaggingController(app)
+
+    controller.clear_state(refresh_filter_state=False)
+
+    app.footer.set_tagging_state.assert_called_once_with("", False)
+    app.library_tab.set_possible_duplicate_filter_enabled.assert_called_once_with(False)
+    app.filter_controller.refresh_dock_filters.assert_called_once_with()
+
+
+def test_tagging_controller_keeps_filter_for_confirmed_duplicate_shadows():
+    class _Store:
+        def has_any_tags(self, tags):
+            assert tags == {"possibleduplicate", "duplicate"}
+            return True
+
+    class _App(QObject):
+        def __init__(self):
+            super().__init__()
+            self.footer = mock.Mock()
+            self.library_tab = mock.Mock()
+            self.filter_controller = mock.Mock()
+            self.session_store = _Store()
+
+    app = _App()
+    controller = TaggingController(app)
+
+    controller.clear_state()
+
+    app.library_tab.set_possible_duplicate_filter_enabled.assert_called_once_with(True)
+
+
 def test_tagging_controller_quiet_progress_does_not_touch_footer():
     class _App(QObject):
         def __init__(self):
@@ -445,4 +490,49 @@ def test_dock_filters_include_builtin_possible_duplicates_when_enabled():
     controller.refresh_dock_filters()
 
     options = app.dock_view.set_filters.call_args.args[0]
-    assert ("Filter: Possible duplicates", POSSIBLE_DUPLICATE_FILTER_QUERY) in options
+    assert ("Filter: Possible/Confirmed Duplicates", POSSIBLE_DUPLICATE_FILTER_QUERY) in options
+
+
+def test_header_filter_routes_through_search_query_and_clear_restores_it():
+    from types import SimpleNamespace
+    from gui.core.filter_controller import FilterController
+    from gui.utils.constants import StagingColumn
+
+    search_controller = SimpleNamespace(
+        current_query='source:"D:/Samples"',
+        set_query=mock.Mock(),
+    )
+    app = SimpleNamespace(
+        search_controller=search_controller,
+        library_tab=SimpleNamespace(update_header_labels=mock.Mock()),
+    )
+    controller = FilterController(SimpleNamespace(), app)
+
+    controller._set_header_filter_query(StagingColumn.PACK, "Pack A")
+
+    search_controller.set_query.assert_called_once_with(
+        'source:"D:/Samples" AND pack:"Pack A"',
+        immediate=True,
+    )
+
+    search_controller.current_query = 'source:"D:/Samples" AND pack:"Pack A"'
+    search_controller.set_query.reset_mock()
+    controller.clear_header_filter(StagingColumn.PACK)
+
+    search_controller.set_query.assert_called_once_with('source:"D:/Samples"', immediate=True)
+
+
+def test_confidence_header_filter_uses_an_exact_range_query():
+    from types import SimpleNamespace
+    from gui.core.filter_controller import FilterController
+    from gui.utils.constants import StagingColumn
+
+    search_controller = SimpleNamespace(current_query="", set_query=mock.Mock())
+    app = SimpleNamespace(
+        search_controller=search_controller,
+        library_tab=SimpleNamespace(update_header_labels=mock.Mock()),
+    )
+
+    FilterController(SimpleNamespace(), app)._set_header_filter_query(StagingColumn.CONFIDENCE, "90%")
+
+    search_controller.set_query.assert_called_once_with('conf:"90-90"', immediate=True)

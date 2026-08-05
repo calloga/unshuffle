@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .filter_query import normalize_source_path_key
+
 
 def normalized_model_path(model, row: int, record) -> str:
     if hasattr(model, "normalized_source_path"):
         return model.normalized_source_path(row)
-    return str(record.source_path.resolve()).replace("\\", "/").lower()
+    return normalize_source_path_key(record.source_path)
 
 
 def _refresh_after_db_delete(model) -> None:
@@ -19,7 +21,7 @@ def _delete_db_path_prefix(model, exclude_path: Path) -> int | None:
     store = getattr(model, "store", None)
     if store is None:
         return None
-    prefix = exclude_path.resolve().as_posix().rstrip("/").lower()
+    prefix = normalize_source_path_key(exclude_path).rstrip("/")
     pattern = prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "/%"
     cursor = store.conn.execute(
         """
@@ -41,7 +43,7 @@ def _delete_db_paths(model, deleted_paths: list[Path]) -> int | None:
     store = getattr(model, "store", None)
     if store is None:
         return None
-    paths = [path.resolve().as_posix().lower() for path in deleted_paths]
+    paths = [normalize_source_path_key(path) for path in deleted_paths]
     if not paths:
         return 0
     placeholders = ", ".join("?" for _ in paths)
@@ -91,7 +93,7 @@ def remove_excluded_prefix(model, exclude_path: Path) -> int:
     db_removed = _delete_db_path_prefix(model, exclude_path)
     if db_removed is not None:
         return db_removed
-    prefix = exclude_path.as_posix().lower()
+    prefix = normalize_source_path_key(exclude_path).rstrip("/")
     return rebuild_model_after_filter(
         model,
         lambda row, rec: not (
@@ -105,7 +107,7 @@ def remove_deleted_paths(model, deleted_paths: list[Path]) -> int:
     db_removed = _delete_db_paths(model, deleted_paths)
     if db_removed is not None:
         return db_removed
-    to_remove = {str(path.resolve()).replace("\\", "/").lower() for path in deleted_paths}
+    to_remove = {normalize_source_path_key(path) for path in deleted_paths}
     return rebuild_model_after_filter(
         model,
         lambda row, rec: normalized_model_path(model, row, rec) not in to_remove,

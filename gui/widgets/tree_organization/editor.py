@@ -64,6 +64,7 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
         embedded: bool = False,
     ):
         super().__init__(parent)
+        self._app = parent
         self._embedded = embedded
         self.setObjectName("TreeOrganizationEditorRoot")
         self.setWindowTitle("Edit Tree View Organization")
@@ -193,7 +194,7 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
         apply_layout_margins(layout, (12, 12, 12, 12))
         apply_layout_spacing(layout, 10)
 
-        title = QLabel("Tree Organization")
+        title = QLabel("Library Structure")
         title.setObjectName("TreeEditorHeader")
         layout.addWidget(title)
 
@@ -309,7 +310,7 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
         apply_layout_spacing(layout, 10)
 
         title_row = QHBoxLayout()
-        title = QLabel("Tree Organization")
+        title = QLabel("Library Structure")
         title.setObjectName("TreeEditorHeader")
         title_row.addWidget(title, 1)
         self.btn_set_active_from_list = QPushButton("Set Active")
@@ -404,8 +405,11 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
     def _render_profile_list_contents(self) -> None:
         while self.profile_rows_layout.count():
             item = self.profile_rows_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
 
         self.profile_rows_layout.addWidget(
             self._profile_row(
@@ -581,7 +585,7 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
         return " ".join((name or "").strip().casefold().split())
 
     def _load_saved_filter_suggestions(self, parent) -> list[str]:
-        controller = getattr(parent, "settings_controller", None)
+        controller = getattr(self._app, "settings_controller", None)
         if controller is None:
             return []
         try:
@@ -591,7 +595,7 @@ class TreeOrganizationEditor(TreeOrganizationEditorLogicMixin, QDialog):
         return saved_filter_queries(filters)
 
     def _build_filter_suggestions(self) -> list[str]:
-        app = self.parent() if hasattr(self, "parent") else None
+        app = self._app
         store = getattr(app, "session_store", None)
         if store is not None and hasattr(store, "filter_suggestion_values"):
             return build_filter_suggestions_from_values(

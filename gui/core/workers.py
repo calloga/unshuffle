@@ -199,7 +199,12 @@ class ScanWorker(QThread):
                     ):
                         append_total += len(batch)
                         append_duplicates += sum(int(row.get("duplicate_rank") or 1) > 1 for row in batch)
-                        append_categories.update(str(row.get("category") or "Uncategorized") for row in batch)
+                        append_categories.update(
+                            "Duplicates"
+                            if int(row.get("duplicate_rank") or 1) > 1
+                            else str(row.get("category") or "Uncategorized")
+                            for row in batch
+                        )
                     persisted_stats = {
                         "total": append_total,
                         "duplicates": append_duplicates,
@@ -353,7 +358,16 @@ class CommitWorker(QThread):
     finished = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, engine, plan, move, dry_run, flat, no_px):
+    def __init__(
+        self,
+        engine,
+        plan,
+        move,
+        dry_run,
+        flat,
+        no_px,
+        skip_confirmed_duplicates=True,
+    ):
         super().__init__()
         self.engine = engine
         self.plan = plan
@@ -361,12 +375,20 @@ class CommitWorker(QThread):
         self.dry_run = dry_run
         self.flat = flat
         self.no_px = no_px
+        self.skip_confirmed_duplicates = bool(skip_confirmed_duplicates)
 
     @safe_gc_run
     def run(self):
         try:
             self.engine.progress_callback = lambda d: self.progress.emit(d)
-            res = self.engine.execute_plan(self.plan, self.move, self.dry_run, self.flat, self.no_px)
+            res = self.engine.execute_plan(
+                self.plan,
+                self.move,
+                self.dry_run,
+                self.flat,
+                self.no_px,
+                skip_confirmed_duplicates=self.skip_confirmed_duplicates,
+            )
             self.finished.emit(res)
         except Exception as e:
             logging.exception("CommitWorker encountered an error")
@@ -451,6 +473,90 @@ class TreeRebuildWorker(QThread):
             )
         except Exception as exc:
             logging.exception("TreeRebuildWorker encountered an error")
+            self.error.emit(str(exc))
+
+
+class CustomTreeProjectionWorker(QThread):
+    """Builds a custom-tree projection without blocking the GUI thread."""
+
+    finished = Signal(dict)
+    error = Signal(str)
+    progress = Signal(int, int)
+    canceled = Signal()
+
+    def __init__(
+        self,
+        request_id,
+        db,
+        session_id,
+        profile,
+        levels,
+        confidence_floor,
+        confidence_filter_enabled,
+    ):
+        super().__init__()
+        self.request_id = int(request_id)
+        self.db = db
+        self.session_id = str(session_id)
+        self.profile = profile
+        self.levels = list(levels)
+        self.confidence_floor = float(confidence_floor)
+        self.confidence_filter_enabled = bool(confidence_filter_enabled)
+
+    @safe_gc_run
+    def run(self):
+        try:
+            from .staging_session_store import StagingRowsUpdateCanceled, StagingSessionStore
+
+            signature = StagingSessionStore(self.db, self.session_id).ensure_custom_tree_projection(
+                self.profile,
+                self.levels,
+                confidence_floor=self.confidence_floor,
+                confidence_filter_enabled=self.confidence_filter_enabled,
+                progress_callback=lambda current, total: self.progress.emit(current, total),
+                interrupted_check=self.isInterruptionRequested,
+            )
+            self.finished.emit(
+                {
+                    "request_id": self.request_id,
+                    "profile_id": str(self.profile.id),
+                    "signature": signature,
+                }
+            )
+        except StagingRowsUpdateCanceled:
+            self.canceled.emit()
+        except Exception as exc:
+            logging.exception("CustomTreeProjectionWorker encountered an error")
+            self.error.emit(str(exc))
+
+
+class StagingRowsUpdateWorker(QThread):
+    """Writes prepared staging-row updates without blocking the GUI thread."""
+
+    progress = Signal(int, int)
+    error = Signal(str)
+    canceled = Signal()
+
+    def __init__(self, db, session_id, db_updates):
+        super().__init__()
+        self.db = db
+        self.session_id = str(session_id)
+        self.db_updates = list(db_updates or [])
+
+    @safe_gc_run
+    def run(self):
+        try:
+            from .staging_session_store import StagingRowsUpdateCanceled, StagingSessionStore
+
+            StagingSessionStore(self.db, self.session_id).update_rows(
+                self.db_updates,
+                progress_callback=lambda current, total: self.progress.emit(current, total),
+                interrupted_check=self.isInterruptionRequested,
+            )
+        except StagingRowsUpdateCanceled:
+            self.canceled.emit()
+        except Exception as exc:
+            logging.exception("StagingRowsUpdateWorker encountered an error")
             self.error.emit(str(exc))
 
 

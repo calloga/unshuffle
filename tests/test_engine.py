@@ -103,6 +103,42 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(result["duplicates"], 0)
         self.mock_db.add_records_bulk.assert_not_called()
 
+    def test_duplicate_shadow_builds_normally_when_skipping_is_disabled(self):
+        source = self.target_dir.parent / "shadow.wav"
+        source.write_bytes(b"duplicate content")
+        shadow = PlanRecord(
+            source,
+            "Pack",
+            "Kicks",
+            "Oneshots",
+            "0.9",
+            hash="full-hash",
+            is_duplicate_shadow=True,
+            duplicate_of_hash="full-hash",
+            duplicate_of_path=Path("original.wav"),
+        )
+        expected_destination = self.target_dir / "Oneshots" / "Kicks" / source.name
+        self.engine.skip_confirmed_duplicates = False
+
+        with patch("unshuffle.logic.execution.service.handle_duplicate_record") as duplicate_check:
+            with patch(
+                "unshuffle.logic.execution.service.place_record_file",
+                return_value=("copied", expected_destination),
+            ) as place_record:
+                result, destination = self.engine._process_single_record(
+                    shadow,
+                    move=False,
+                    dry_run=False,
+                    flat=False,
+                    no_prefix=False,
+                    csv_writer=None,
+                )
+
+        self.assertEqual(result, "copied")
+        self.assertEqual(destination, expected_destination)
+        duplicate_check.assert_not_called()
+        place_record.assert_called_once()
+
     def test_execute_plan_uses_available_local_db_when_global_db_is_missing(self):
         plan = [PlanRecord(Path("a.wav"), "P", "C", "T", "1.0")]
         local_db = MagicMock()

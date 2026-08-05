@@ -930,6 +930,88 @@ def test_copy_undo_retry_treats_missing_targets_as_already_undone(tmp_path):
     assert db.marked_undone == ["retry-copy"]
 
 
+def test_copy_undo_removes_abandoned_transfer_temp_from_failed_session_record(tmp_path):
+    target = tmp_path / "library"
+    category = target / "Loops" / "FX"
+    category.mkdir(parents=True)
+    copied_target = category / "copied.wav"
+    copied_target.write_bytes(b"built")
+    failed_target = category / "rise.wav"
+    abandoned_temp = category / ".rise.wav.abcdefgh.unshuffletmp"
+    abandoned_temp.write_bytes(b"partial transfer")
+    db = _UndoDB(
+        [
+            {
+                "source_path": str(tmp_path / "copied-source.wav"),
+                "target_path": str(copied_target),
+                "status": "copied",
+                "file_hash": get_file_hash(copied_target),
+                "step_status": "COMMITTED",
+                "original_action": "copy",
+            },
+            {
+                "source_path": str(tmp_path / "failed-source.wav"),
+                "target_path": str(failed_target),
+                "status": "error",
+                "step_status": "FAILED",
+                "original_action": "copy",
+            },
+        ],
+        target,
+        mode="copy",
+    )
+    engine = _runtime_for_undo(target, db)
+
+    result = engine.undo_session("copy-with-abandoned-temp")
+
+    assert result["undone"] == 1
+    assert result["skipped_non_committed"] == 1
+    assert not copied_target.exists()
+    assert not abandoned_temp.exists()
+    assert not category.exists()
+    assert not (target / "Loops").exists()
+    assert any("Removed abandoned transfer temp" in line for line in engine.logs)
+    assert db.marked_undone == ["copy-with-abandoned-temp"]
+
+
+def test_copy_undo_preserves_unrecognized_transfer_temp_names(tmp_path):
+    target = tmp_path / "library"
+    target.mkdir()
+    copied_target = target / "copied.wav"
+    copied_target.write_bytes(b"built")
+    failed_target = target / "rise.wav"
+    unrelated_temp = target / "rise.wav.unshuffletmp"
+    unrelated_temp.write_bytes(b"keep me")
+    db = _UndoDB(
+        [
+            {
+                "source_path": str(tmp_path / "copied-source.wav"),
+                "target_path": str(copied_target),
+                "status": "copied",
+                "file_hash": get_file_hash(copied_target),
+                "step_status": "COMMITTED",
+                "original_action": "copy",
+            },
+            {
+                "source_path": str(tmp_path / "failed-source.wav"),
+                "target_path": str(failed_target),
+                "status": "error",
+                "step_status": "FAILED",
+                "original_action": "copy",
+            },
+        ],
+        target,
+        mode="copy",
+    )
+    engine = _runtime_for_undo(target, db)
+
+    result = engine.undo_session("copy-with-unrelated-temp")
+
+    assert result["undone"] == 1
+    assert unrelated_temp.read_bytes() == b"keep me"
+    assert db.marked_undone == ["copy-with-unrelated-temp"]
+
+
 def test_successful_copy_undo_preserves_global_history_and_removes_disposable_target_sidecar(tmp_path):
     target = tmp_path / "library"
     target.mkdir()

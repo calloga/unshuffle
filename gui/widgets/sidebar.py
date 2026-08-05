@@ -48,11 +48,11 @@ from ..utils.constants import (
     SIDEBAR_WIDTH,
 )
 
-POSSIBLE_DUPLICATE_FILTER_NAME = "Possible duplicates"
-POSSIBLE_DUPLICATE_FILTER_QUERY = 'tag:"possibleduplicate"'
+POSSIBLE_DUPLICATE_FILTER_NAME = "Possible/Confirmed Duplicates"
+POSSIBLE_DUPLICATE_FILTER_QUERY = 'tag:"possibleduplicate" OR tag:"duplicate"'
 
-CORRUPT_SILENT_EMPTY_FILTER_NAME = "Corrupt / Silent / Empty / Duplicate"
-CORRUPT_SILENT_EMPTY_FILTER_QUERY = 'tag:"Silent" OR tag:"Empty" OR tag:"Corrupted" OR tag:"duplicate"'
+CORRUPT_SILENT_EMPTY_FILTER_NAME = "Corrupt / Silent / Empty"
+CORRUPT_SILENT_EMPTY_FILTER_QUERY = 'tag:"Silent" OR tag:"Empty" OR tag:"Corrupted"'
 
 class SignalFloorControl(QFrame):
     """

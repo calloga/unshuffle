@@ -49,6 +49,7 @@ class DefaultDestinationResolver:
         flat: bool,
         no_prefix: bool,
         prefix_map: dict,
+        common_pack_tokens: dict[str, frozenset[str]] | None = None,
     ) -> DestinationResolution:
         at = str(record.audio_type)
         cat = str(record.category)
@@ -63,7 +64,12 @@ class DefaultDestinationResolver:
             dest_folder = base_folder / sub if sub else base_folder
             prefix = ""
             if not no_prefix:
-                prefix = get_pack_prefix(pack, cat, at)
+                prefix = get_pack_prefix(
+                    pack,
+                    cat,
+                    at,
+                    (common_pack_tokens or {}).get(pack.casefold()),
+                )
                 if prefix:
                     prefix_map[prefix] = pack.replace("_", " / ")
             final_name = f"{prefix}_{record.source_path.name}" if prefix else record.source_path.name
@@ -101,8 +107,16 @@ class DestinationResolver:
         *,
         active_tree_profile: TreeOrganizationProfile | None = None,
         records: list | None = None,
+        common_pack_tokens: dict[str, frozenset[str]] | None = None,
     ) -> DestinationResolution:
-        default = self.default_resolver.resolve(record, target_dir, flat, no_prefix, prefix_map)
+        default = self.default_resolver.resolve(
+            record,
+            target_dir,
+            flat,
+            no_prefix,
+            prefix_map,
+            common_pack_tokens,
+        )
         if active_tree_profile is None:
             return default
         if str(getattr(record, "audio_type", "")) in {"Non-Audio Assets", "Utility"}:

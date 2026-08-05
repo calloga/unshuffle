@@ -117,6 +117,14 @@ class SoundPreviewPlayer(QObject):
         self.audio_output.setVolume(final_vol)
         self.volumeChanged.emit(volume_float)
 
+    def set_position(self, position_ms: int) -> None:
+        if self.current_path is None:
+            return
+        self.player.setPosition(max(0, min(int(position_ms or 0), int(self.player.duration() or 0))))
+
+    def toggle_muted(self) -> None:
+        self.audio_output.setMuted(not self.audio_output.isMuted())
+
     def set_normalization(self, enabled: bool):
         self.is_normalized = enabled
         self.normalizationChanged.emit(enabled)

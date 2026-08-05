@@ -40,6 +40,9 @@ class DraftingController(QObject):
         self._impact_request_id = 0
         self._impact_worker = None
         self._stale_impact_workers = set()
+        self._projection_request_id = 0
+        self._projection_worker = None
+        self._stale_projection_workers = set()
         self._saving_reorg_draft = False
 
     def _parent_widget(self) -> QWidget | None:
@@ -117,9 +120,12 @@ class DraftingController(QObject):
             self._draft_profile_active = False
             self._branch_paths.clear()
             self._partial_refresh = False
+            undo_stack = getattr(self.app, "undo_stack", None)
+            if undo_stack is not None:
+                undo_stack.clear()
             self.draftChanged.emit()
             self.app.footer.set_reorg_draft_state("", False)
-            self.app.footer.log("<b>Draft:</b> saved to canon.")
+            self.app.footer.log("<b>Draft:</b> saved")
         finally:
             ui_helpers.set_ui_busy(self.app, False)
             self._saving_reorg_draft = False
@@ -132,6 +138,105 @@ class DraftingController(QObject):
             self._stale_impact_workers.add(self._impact_worker)
         self._impact_worker = None
         self._impact_pending_notice_shown = False
+
+    def _start_draft_profile_projection(self) -> bool:
+        store = getattr(self.app, "session_store", None)
+        tree_model = getattr(getattr(self.app, "library_tab", None), "tree_model", None)
+        controller = getattr(self.app, "tree_organization_controller", None)
+        profile = getattr(controller, "active_profile", None)
+        if store is None or tree_model is None or profile is None:
+            return False
+
+        from .workers import CustomTreeProjectionWorker
+
+        self._projection_request_id += 1
+        request_id = self._projection_request_id
+        if self._projection_worker is not None:
+            self._projection_worker.requestInterruption()
+            self._stale_projection_workers.add(self._projection_worker)
+
+        worker = CustomTreeProjectionWorker(
+            request_id,
+            store.db,
+            store.session_id,
+            profile,
+            list(tree_model._active_tree_levels()),
+            float(getattr(tree_model, "confidence_floor", 0.0)),
+            bool(getattr(tree_model, "confidence_filter_enabled", True)),
+        )
+        self._projection_worker = worker
+        monitor = getattr(self.app, "operation_monitor", None)
+        token = (
+            monitor.start(
+                "Updating Library Layout",
+                cancellable=True,
+                on_cancel=worker.requestInterruption,
+                compact=True,
+            )
+            if monitor is not None else None
+        )
+
+        def _on_progress(current: int, total: int) -> None:
+            if monitor is not None and token is not None:
+                monitor.update(
+                    {
+                        "phase": "Preparing Library Layout",
+                        "current": current,
+                        "total": total,
+                    },
+                    token=token,
+                )
+
+        def _release() -> None:
+            self._stale_projection_workers.discard(worker)
+            if self._projection_worker is worker:
+                self._projection_worker = None
+
+        def _on_finished(payload) -> None:
+            _release()
+            if int(payload.get("request_id", -1)) != self._projection_request_id:
+                if monitor is not None and token is not None:
+                    monitor.finish(token=token)
+                return
+            active = getattr(controller, "active_profile", None)
+            if active is None or str(active.id) != str(payload.get("profile_id") or ""):
+                if monitor is not None and token is not None:
+                    monitor.finish(token=token)
+                return
+            if monitor is not None and token is not None:
+                monitor.finish("Library layout ready.", token=token)
+            self.app.view_controller.update_library_views(tree_delay_ms=0)
+
+        def _on_error(message: str) -> None:
+            _release()
+            if request_id != self._projection_request_id:
+                if monitor is not None and token is not None:
+                    monitor.finish(token=token)
+                return
+            if monitor is not None and token is not None:
+                monitor.fail(message, token=token)
+            if getattr(self.app, "footer", None):
+                self.app.footer.set_status(f"Library layout update failed: {message}")
+
+        def _on_canceled() -> None:
+            _release()
+            if request_id != self._projection_request_id:
+                if monitor is not None and token is not None:
+                    monitor.finish(token=token)
+                return
+            if monitor is not None and token is not None:
+                monitor.finish("Operation canceled.", token=token)
+            self.app.view_controller.update_library_views(tree_delay_ms=0)
+
+        worker.progress.connect(_on_progress)
+        worker.finished.connect(_on_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(_on_error)
+        worker.error.connect(worker.deleteLater)
+        worker.canceled.connect(_on_canceled)
+        worker.canceled.connect(worker.deleteLater)
+        worker.start()
+        return True
 
     def _refresh_after_saved_draft(self, learned_count: int = 0) -> None:
         if getattr(self.app, "search_controller", None):
@@ -171,18 +276,34 @@ class DraftingController(QObject):
                 return int(updated_count)
         return 0
 
-    def discard_reorg_draft(self, *, confirm: bool = True):
+    def discard_reorg_draft(
+        self,
+        *,
+        confirm: bool = True,
+        refresh_views: bool = True,
+    ) -> bool:
         from PySide6.QtWidgets import QMessageBox
         
         if not self.has_changes():
-            return
+            return True
             
         if confirm and QMessageBox.question(self._parent_widget(), "Discard Draft", "Discard all pending draft changes?") != QMessageBox.Yes:
-            return
+            return False
+
+        self._projection_request_id += 1
+        if self._projection_worker is not None:
+            self._projection_worker.requestInterruption()
+            self._stale_projection_workers.add(self._projection_worker)
+            self._projection_worker = None
             
         if self.app.model:
             revert_updates = self.reorg_manager.get_revert_list()
-            self.app.model._apply_bulk_values(revert_updates)
+            if not self._apply_model_bulk_values(
+                revert_updates,
+                operation_title="Discarding Layout Changes",
+                completion_text="Layout changes discarded.",
+            ):
+                return False
             for rec, _col, _old_val in revert_updates:
                 if hasattr(rec, SEMANTIC_OVERRIDE_ATTR):
                     delattr(rec, SEMANTIC_OVERRIDE_ATTR)
@@ -193,12 +314,17 @@ class DraftingController(QObject):
         self._reorg_impact_timer.stop()
         self._impact_pending_notice_shown = False
         self._branch_paths.clear()
+        undo_stack = getattr(self.app, "undo_stack", None)
+        if undo_stack is not None:
+            undo_stack.clear()
         self.draftChanged.emit()
         self._partial_refresh = False
         self.app.footer.set_reorg_draft_state("", False)
-        self.app.view_controller.update_library_views(tree_delay_ms=0)
+        if refresh_views:
+            self.app.view_controller.update_library_views(tree_delay_ms=0)
         self.app.footer.log("<b>Draft:</b> discarded.")
         self.app.footer.toggle_footer(False)
+        return True
 
     def apply_bulk_tags(self, records, add_tags, remove_tags):
         from unshuffle.core import normalize_tags
@@ -260,7 +386,7 @@ class DraftingController(QObject):
         if self.reorg_manager.conflicts:
             summary_parts.append(f"{self.reorg_manager.conflicts} collision{'s' if self.reorg_manager.conflicts != 1 else ''} flagged")
         if self._draft_profile_active:
-            summary_parts.append("tree layout changed")
+            summary_parts.append("library layout changed")
         summary = "  ·  ".join(summary_parts)
 
         detail_rows = []
@@ -324,7 +450,7 @@ class DraftingController(QObject):
         root.setContentsMargins(14, 14, 14, 12)
         root.setSpacing(10)
 
-        title = QLabel("Commit this draft reorganization to canon?")
+        title = QLabel("Save modifications?")
         title.setObjectName("Title")
         root.addWidget(title)
 
@@ -465,18 +591,27 @@ class DraftingController(QObject):
 
         undo_stack = getattr(self.app, "undo_stack", None)
         if normalized and not profile_changed and not move_profile_node_id and undo_stack is not None:
-            undo_stack.push(DraftEditCommand(
+            command = DraftEditCommand(
                 self,
                 undo_updates,
                 action_label,
                 learn=learn,
                 mark_semantic_override=mark_semantic_override,
-            ))
-            return True
+                operation_title="Updating Library Layout",
+            )
+            undo_stack.push(command)
+            return not command.isObsolete()
 
         if normalized:
             self.stage_updates(normalized, collision_check, learn=learn)
-            self.app.model._apply_bulk_values(normalized)
+            if not self._apply_model_bulk_values(
+                normalized,
+                operation_title="Updating Library Layout",
+                completion_text="Library layout updated.",
+            ):
+                self._reconcile_draft_originals(normalized)
+                self.draftChanged.emit()
+                return False
             self._reconcile_draft_originals(normalized)
             self.draftChanged.emit()
             if profile_changed or move_profile_node_id:
@@ -499,7 +634,8 @@ class DraftingController(QObject):
             if path: self._branch_paths.add(path)
             
         if self.app.view_controller.is_tree_visible():
-            self._draft_tree_refresh_timer.start(140)
+            if not profile_changed or not self._start_draft_profile_projection():
+                self._draft_tree_refresh_timer.start(140)
             
         if normalized:
             self.schedule_reorg_impact_analysis()
@@ -802,7 +938,8 @@ class DraftingController(QObject):
         labels = []
         if fields.get("audio_type"): labels.append(f"Type: {fields['audio_type']}")
         if fields.get("category"): labels.append(f"Category: {fields['category']}")
-        if fields.get("subcategory"): labels.append(f"Subcategory: {fields['subcategory']}")
+        if "subcategory" in fields:
+            labels.append(f"Subcategory: {fields['subcategory'] or 'Other'}")
         if fields.get("pack"): labels.append(f"Pack: {fields['pack']}")
 
         updates = []
@@ -812,7 +949,7 @@ class DraftingController(QObject):
                 row_updates.append((rec, StagingColumn.TYPE, fields["audio_type"]))
             if fields.get("category"):
                 row_updates.append((rec, StagingColumn.CATEGORY, fields["category"]))
-            if fields.get("subcategory"):
+            if "subcategory" in fields:
                 row_updates.append((rec, StagingColumn.SUBCATEGORY, fields["subcategory"]))
             if fields.get("pack"):
                 row_updates.append((rec, StagingColumn.PACK, fields["pack"]))
@@ -871,6 +1008,7 @@ class DraftingController(QObject):
         push_undo=True,
         learn=True,
         mark_semantic_override=True,
+        operation_title: str | None = None,
     ):
         if not self.app.model or not updates:
             return []
@@ -899,7 +1037,14 @@ class DraftingController(QObject):
         apply_updates = [(rec, col, new_val) for rec, col, _old_val, new_val in normalized]
 
         self.stage_updates(apply_updates, learn=learn)
-        self.app.model._apply_bulk_values(apply_updates)
+        if not self._apply_model_bulk_values(
+            apply_updates,
+            operation_title=operation_title,
+            completion_text="Library layout updated." if operation_title else None,
+        ):
+            self._reconcile_draft_originals(apply_updates)
+            self.draftChanged.emit()
+            return []
         self._reconcile_draft_originals(apply_updates)
         self.draftChanged.emit()
         if mark_semantic_override:
@@ -921,6 +1066,122 @@ class DraftingController(QObject):
         else:
             self.app.view_controller.update_library_views(tree_delay_ms=tree_delay_ms)
         return apply_updates
+
+    def _apply_model_bulk_values(
+        self,
+        updates,
+        *,
+        operation_title: str | None = None,
+        completion_text: str | None = None,
+    ) -> bool:
+        model = self.app.model
+        unique_records = {
+            int(getattr(rec, "staging_row_id", id(rec)))
+            for rec, _col, _value in updates
+        }
+        monitor = getattr(self.app, "operation_monitor", None)
+        token = None
+        worker_holder = {"worker": None}
+        cancel_requested = {"value": False}
+
+        def request_cancel() -> None:
+            cancel_requested["value"] = True
+            worker = worker_holder.get("worker")
+            if worker is not None:
+                worker.requestInterruption()
+
+        if monitor is not None and (operation_title or len(unique_records) >= 500):
+            token = monitor.start(
+                operation_title or "Reclassifying Samples",
+                cancellable=True,
+                on_cancel=request_cancel,
+                compact=True,
+            )
+            from PySide6.QtCore import QCoreApplication, QEventLoop
+
+            monitor.update(
+                {
+                    "phase": operation_title or "Reclassifying Samples",
+                    "current": 0,
+                    "total": max(1, len(unique_records)),
+                },
+                token=token,
+            )
+            QCoreApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+
+        def progress(current: int, total: int) -> None:
+            if token is None:
+                return
+            monitor.update(
+                {
+                    "phase": operation_title or "Reclassifying Samples",
+                    "current": current,
+                    "total": total,
+                },
+                token=token,
+            )
+
+        prepared = None
+        canceled = False
+        try:
+            if (
+                token is not None
+                and hasattr(model, "store")
+                and hasattr(model, "_prepare_bulk_values")
+                and hasattr(model, "_finalize_prepared_bulk_values")
+            ):
+                from PySide6.QtCore import QEventLoop
+                from .workers import StagingRowsUpdateWorker
+
+                prepared = model._prepare_bulk_values(updates)
+                if prepared is not None:
+                    if cancel_requested["value"]:
+                        model._rollback_prepared_bulk_values(prepared)
+                        canceled = True
+                        return False
+                    worker = StagingRowsUpdateWorker(
+                        model.store.db,
+                        model.store.session_id,
+                        prepared.get("db_updates") or [],
+                    )
+                    worker_holder["worker"] = worker
+                    loop = QEventLoop()
+                    errors: list[str] = []
+                    canceled_state: list[bool] = []
+                    worker.progress.connect(progress)
+                    worker.error.connect(errors.append)
+                    worker.canceled.connect(lambda: canceled_state.append(True))
+                    worker.finished.connect(loop.quit)
+                    worker.start()
+                    loop.exec()
+                    worker.wait()
+                    worker_holder["worker"] = None
+                    worker.deleteLater()
+                    if errors:
+                        raise RuntimeError(errors[-1])
+                    if canceled_state:
+                        model._rollback_prepared_bulk_values(prepared)
+                        canceled = True
+                        return False
+                    model._finalize_prepared_bulk_values(prepared)
+            elif hasattr(model, "store"):
+                model._apply_bulk_values(updates, progress_callback=progress)
+            else:
+                model._apply_bulk_values(updates)
+            return True
+        except Exception as exc:
+            if prepared is not None and hasattr(model, "_rollback_prepared_bulk_values"):
+                model._rollback_prepared_bulk_values(prepared)
+            if token is not None:
+                monitor.fail(str(exc), token=token)
+                token = None
+            raise
+        finally:
+            if token is not None:
+                monitor.finish(
+                    "Operation canceled." if canceled else (completion_text or "Reclassification complete."),
+                    token=token,
+                )
 
     def apply_table_edit(self, rec, col, value) -> bool:
         return bool(self._apply_draft_updates([(rec, col, value)], persist=False))
@@ -1006,12 +1267,23 @@ class DraftingController(QObject):
 
 
 class DraftEditCommand(QUndoCommand):
-    def __init__(self, controller: DraftingController, updates, text: str, *, learn=True, mark_semantic_override=True):
+    def __init__(
+        self,
+        controller: DraftingController,
+        updates,
+        text: str,
+        *,
+        learn=True,
+        mark_semantic_override=True,
+        operation_title: str | None = None,
+    ):
         super().__init__(text or "Draft Edit")
         self.controller = controller
         self.updates = list(updates or [])
         self.learn = learn
         self.mark_semantic_override = mark_semantic_override
+        self.operation_title = operation_title
+        self._applied_once = False
 
     def undo(self) -> None:
         self.controller._apply_draft_updates(
@@ -1020,13 +1292,19 @@ class DraftEditCommand(QUndoCommand):
             push_undo=False,
             learn=self.learn,
             mark_semantic_override=self.mark_semantic_override,
+            operation_title=self.operation_title,
         )
 
     def redo(self) -> None:
-        self.controller._apply_draft_updates(
+        applied = self.controller._apply_draft_updates(
             [(rec, col, new_val) for rec, col, _old_val, new_val in self.updates],
             undo_text=self.text(),
             push_undo=False,
             learn=self.learn,
             mark_semantic_override=self.mark_semantic_override,
+            operation_title=self.operation_title,
         )
+        if applied:
+            self._applied_once = True
+        elif not self._applied_once:
+            self.setObsolete(True)

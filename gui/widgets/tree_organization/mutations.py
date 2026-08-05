@@ -168,7 +168,7 @@ class TreeOrganizationMutationMixin:
 
     def _delete_profile_by_id(self, profile_id: str) -> None:
         parent = self if isinstance(self, QWidget) else None
-        if QMessageBox.question(parent, "Delete Profile", "Delete this tree organization profile?") == QMessageBox.Yes:
+        if QMessageBox.question(parent, "Delete Layout", "Delete this library layout?") == QMessageBox.Yes:
             self.profileDeleted.emit(profile_id)
             if not self._embedded:
                 self.accept()

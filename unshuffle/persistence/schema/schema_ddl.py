@@ -335,15 +335,19 @@ def create_search_objects(conn: sqlite3.Connection) -> None:
         """
         CREATE TRIGGER IF NOT EXISTS custom_tree_memberships_staging_ai
         AFTER INSERT ON staging_records BEGIN
-            DELETE FROM custom_tree_memberships WHERE session_id = new.session_id;
+            DELETE FROM custom_tree_memberships
+            WHERE session_id = new.session_id AND row_id = new.row_id;
         END;
         CREATE TRIGGER IF NOT EXISTS custom_tree_memberships_staging_au
         AFTER UPDATE ON staging_records BEGIN
-            DELETE FROM custom_tree_memberships WHERE session_id = new.session_id;
+            DELETE FROM custom_tree_memberships
+            WHERE (session_id = old.session_id AND row_id = old.row_id)
+               OR (session_id = new.session_id AND row_id = new.row_id);
         END;
         CREATE TRIGGER IF NOT EXISTS custom_tree_memberships_staging_ad
         AFTER DELETE ON staging_records BEGIN
-            DELETE FROM custom_tree_memberships WHERE session_id = old.session_id;
+            DELETE FROM custom_tree_memberships
+            WHERE session_id = old.session_id AND row_id = old.row_id;
         END;
         """
     )
@@ -375,6 +379,10 @@ def create_indexes(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_custom_tree_memberships_row "
         "ON custom_tree_memberships(session_id, profile_id, projection_signature, row_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_custom_tree_memberships_session_row "
+        "ON custom_tree_memberships(session_id, row_id)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_pack_order ON staging_records(session_id, pack COLLATE NOCASE, sample_name COLLATE NOCASE, row_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_records_session_category_order ON staging_records(session_id, category COLLATE NOCASE, sample_name COLLATE NOCASE, row_id)")

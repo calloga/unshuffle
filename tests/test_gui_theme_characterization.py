@@ -22,6 +22,18 @@ from gui.styles import (
 
 
 class ThemeNormalizationTests(unittest.TestCase):
+    def test_light_theme_menu_bar_matches_page_navigation_background(self):
+        from gui.styles import OCEAN, PEARL
+        from gui.styles.qss import build_main_style
+
+        for colors in (OCEAN, PEARL):
+            with self.subTest(theme=colors.name):
+                stylesheet = build_main_style(colors)
+                self.assertIn(
+                    f"QMenuBar {{ background-color: {colors.bg_dark};",
+                    stylesheet,
+                )
+
     def test_supported_theme_keys_round_trip(self):
         self.assertEqual(normalize_theme_key(OCEAN_THEME_KEY), OCEAN_THEME_KEY)
         self.assertEqual(normalize_theme_key(ASH_THEME_KEY), ASH_THEME_KEY)
@@ -36,6 +48,28 @@ class ThemeNormalizationTests(unittest.TestCase):
 
 
 class ThemeManagerTests(unittest.TestCase):
+    def test_menu_button_style_can_inherit_a_point_sized_font(self):
+        from gui.utils.styles import workspace_sidebar_button_style
+
+        inherited = workspace_sidebar_button_style(include_font_size=False)
+        explicit = workspace_sidebar_button_style()
+
+        self.assertNotIn("font-size:", inherited)
+        self.assertIn("font-size:", explicit)
+
+    def test_scaled_font_preserves_pixel_sized_fonts_without_invalid_point_size(self):
+        from PySide6.QtGui import QFont
+
+        manager = ThemeManager()
+        manager.set_zoom(125)
+        base = QFont()
+        base.setPixelSize(12)
+
+        scaled = manager.scaled_font(base)
+
+        self.assertEqual(scaled.pixelSize(), 15)
+        self.assertEqual(scaled.pointSize(), -1)
+
     def test_theme_binding_refreshes_hidden_reusable_dialog_children(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication, QWidget
@@ -300,6 +334,20 @@ class SettingsControllerThemePersistenceTests(unittest.TestCase):
         finally:
             settings.clear()
 
+    def test_non_audio_asset_visibility_defaults_off_and_round_trips(self):
+        org = "UmUTests"
+        app_name = f"Unshuffle-{uuid.uuid4().hex}"
+        settings = QSettings(org, app_name)
+        settings.clear()
+        try:
+            controller = SettingsController(settings, QObject())
+
+            self.assertFalse(controller.get_show_non_audio_assets())
+            controller.set_show_non_audio_assets(True)
+            self.assertTrue(controller.get_show_non_audio_assets())
+        finally:
+            settings.clear()
+
 
 class ViewThemeMenuTests(unittest.TestCase):
     def test_view_menu_lists_all_supported_theme_choices(self):
@@ -325,7 +373,7 @@ class ViewThemeMenuTests(unittest.TestCase):
         finally:
             bar.deleteLater()
 
-    def test_visible_theme_switch_uses_scoped_stylesheets_for_speed(self):
+    def test_visible_theme_switch_updates_application_style_for_late_widgets(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication, QDialog
 
@@ -355,9 +403,7 @@ class ViewThemeMenuTests(unittest.TestCase):
 
             window._apply_theme_stylesheet("QWidget { color: red; }", fake_app)
 
-            self.assertEqual(fake_app.global_styles, [])
-            self.assertIn("color: red", window.styleSheet())
-            self.assertIn("color: red", detached.styleSheet())
+            self.assertEqual(fake_app.global_styles, ["QWidget { color: red; }"])
             self.assertEqual(hidden.styleSheet(), "")
         finally:
             detached.deleteLater()

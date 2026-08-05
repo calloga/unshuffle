@@ -935,6 +935,38 @@ class LibraryTreeModel(QStandardItemModel):
         fields = dict(index.data(FIELDS_ROLE) or {})
         return self._session_store.records_for_fields(fields, self._session_query)
 
+    def total_count_for_index(self, index) -> int:
+        """Return the branch size before the active search/filter query is applied."""
+        if not index.isValid():
+            return 0
+        if index.data(NODE_TYPE_ROLE) == "file":
+            return 1
+        if self._session_store is None:
+            return int(index.data(COUNT_ROLE) or len(index.data(RECORDS_ROLE) or []))
+        route_key = str(index.data(ROUTE_KEY_ROLE) or "")
+        if route_key and self.custom_tree_profile is not None and self._custom_projection_signature:
+            return self._session_store.custom_tree_record_count(
+                self.custom_tree_profile.id,
+                self._custom_projection_signature,
+                route_key,
+                None,
+            )
+        return self._session_store.count_for_fields(dict(index.data(FIELDS_ROLE) or {}), None)
+
+    def has_active_session_filters(self) -> bool:
+        query = self._session_query
+        if query is None:
+            return False
+        return bool(
+            query.matched_ids is not None
+            or query.audio_types is not None
+            or query.path_prefixes
+            or query.confidence_min > 0.0
+            or query.confidence_max < 1.0
+            or query.column_filters
+            or query.similarity_rows is not None
+        )
+
     def canFetchMore(self, parent) -> bool:
         if parent.isValid():
             item = self.itemFromIndex(parent)

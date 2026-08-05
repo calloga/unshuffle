@@ -324,7 +324,7 @@ class SystemPage(QWidget):
             return button
 
         add_section_title("Structure")
-        self.btn_nav_tree_organization = add_nav_button(self._sidebar_action("Tree Organization", self._open_tree_organization))
+        self.btn_nav_tree_organization = add_nav_button(self._sidebar_action("Library Structure", self._open_tree_organization))
 
         add_section_title("Word Classification Tuning")
         self.btn_nav_discovery = add_nav_button(self._sidebar_action("Discovery", lambda: self._set_section("discovery")))
@@ -727,16 +727,21 @@ class SystemPage(QWidget):
             self.edit_lookup_alias.setText(alias)
             self.edit_lookup_alias.setFocus()
 
-    def set_tree_organization_panel(self, panel: QWidget) -> None:
+    def set_tree_organization_panel(self, panel: QWidget, *, activate: bool = True) -> None:
         if self.tree_organization_panel is panel:
-            self._set_section("tree_organization")
+            if activate:
+                self._set_section("tree_organization")
             return
         if self.tree_organization_panel is not None:
             self.stack.removeWidget(self.tree_organization_panel)
             self.tree_organization_panel.deleteLater()
         self.tree_organization_panel = panel
         self.stack.addWidget(panel)
-        self._set_section("tree_organization")
+        if activate:
+            self._set_section("tree_organization")
+
+    def stage_tree_organization_panel(self, panel: QWidget) -> None:
+        self.set_tree_organization_panel(panel, activate=False)
 
     def set_mode(self, can_write: bool) -> None:
         self._can_write = can_write

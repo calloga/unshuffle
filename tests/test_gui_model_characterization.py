@@ -718,6 +718,24 @@ class ProxySortTests(unittest.TestCase):
 
 
 class DelegateCharacterizationTests(unittest.TestCase):
+    def test_tag_delegate_shares_width_between_long_tags(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtGui import QFont, QFontMetrics
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.delegates.tag_pill_delegate import TagPillDelegate
+
+        _app = QApplication.instance() or QApplication([])
+        delegate = TagPillDelegate()
+        layout, _height = delegate._calculate_layout(
+            ["possibleduplicate", "confirmedduplicate"],
+            150,
+            QFontMetrics(QFont()),
+        )
+
+        self.assertEqual([tag for tag, _rect, _elided in layout], ["possibleduplicate", "confirmedduplicate"])
+        self.assertTrue(all(elided for _tag, _rect, elided in layout))
+        self.assertLessEqual(layout[-1][1].right(), 150 - delegate.margin)
+
     def test_tag_delegate_uses_shared_parser_and_preserves_comma_separator(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication

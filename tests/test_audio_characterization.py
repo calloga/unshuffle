@@ -8,11 +8,27 @@ from unshuffle.audio import SimilarityEngine
 from unshuffle.core.features import FEATURE_VECTOR_SIZE, calculate_similarity_distance, normalize_distance_vector
 from unshuffle.core.vector_math import cosine_distance
 from unshuffle.core import LibNode, NodeType
-from unshuffle.logic.classification import classify_node, detect_audio_type, reset_scoring_engine
+from unshuffle.logic.classification import classify_node, detect_audio_type, get_subcategory, reset_scoring_engine
 from gui.widgets.coherence_analyzer import _distance_between_payloads, _distance_payload_for_vector
 
 
 class AudioTypeTests(unittest.TestCase):
+    def test_subcategory_uses_taxonomy_order_when_multiple_tokens_match(self):
+        runtime = {
+            "sub_taxonomy_map": {
+                "Melodics": {
+                    "organ": "Keyboards",
+                    "pluck": "Electronic",
+                }
+            },
+            "default_sub_map": {},
+        }
+
+        self.assertEqual(
+            "Keyboards",
+            get_subcategory("Melodics", {"pluck", "organ"}, runtime=runtime),
+        )
+
     def test_camel_case_loop_detection_still_works(self):
         node = LibNode(
             path=Path("C:/audio/KickLoop01.wav"),

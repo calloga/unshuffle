@@ -17,6 +17,13 @@ from gui.models.staging_table import StagingTableModel
 from unshuffle.core import PlanRecord
 
 
+class SourcePathNormalizationTests(unittest.TestCase):
+    def test_windows_absolute_path_is_not_reinterpreted_by_host_platform(self):
+        from gui.core.filter_query import normalize_source_path_key
+
+        self.assertEqual(normalize_source_path_key(r"D:\Samples\Pack"), "d:/samples/pack")
+
+
 class SearchControllerFooterCountTests(unittest.TestCase):
     def test_search_finished_uses_visible_proxy_rows_for_footer_count(self):
         proxy_model = mock.Mock()
@@ -293,6 +300,57 @@ class AudioControllerSafetyTests(unittest.TestCase):
 
         controller.toggle_audio_bar.assert_not_called()
 
+    def test_preview_bar_enables_transport_only_for_selected_audio(self):
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.preview_control_bar import PreviewControlBar
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        _app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "very long selected sample.wav"
+            audio_path.write_bytes(b"sound")
+            bar = PreviewControlBar()
+
+            self.assertFalse(bar.btn_play_pause.isEnabled())
+            self.assertFalse(bar.seek_slider.isEnabled())
+            self.assertEqual(bar.lbl_filename.text(), "")
+            self.assertTrue(bar.lbl_filename.isHidden())
+            self.assertTrue(bar.seek_slider.isHidden())
+            self.assertEqual(bar.seek_slider.minimumWidth(), 0)
+            self.assertFalse(bar.transport_spacer.isHidden())
+            self.assertEqual(bar._layout.stretch(bar._layout.indexOf(bar.transport_spacer)), 1)
+
+            bar.set_selected_path(audio_path)
+
+            self.assertTrue(bar.btn_play_pause.isEnabled())
+            self.assertEqual(bar.lbl_filename.text(), audio_path.name)
+            self.assertEqual(bar.lbl_filename.toolTip(), str(audio_path))
+            self.assertFalse(bar.lbl_filename.isHidden())
+            self.assertFalse(bar.seek_slider.isHidden())
+            self.assertFalse(bar.transport_spacer.isHidden())
+            self.assertEqual(bar._layout.stretch(bar._layout.indexOf(bar.seek_slider)), 1)
+
+            bar.set_selected_path(None)
+            self.assertFalse(bar.btn_play_pause.isEnabled())
+            self.assertFalse(bar.seek_slider.isEnabled())
+            self.assertFalse(bar.transport_spacer.isHidden())
+
+    def test_preview_bar_seek_style_has_theme_contrast(self):
+        from gui.styles.tokens_semantic import ASH, OCEAN, PEARL
+        from gui.utils.styles import preview_bar_style, sync_color_palette
+
+        try:
+            for theme in (OCEAN, PEARL):
+                sync_color_palette(theme)
+                style = preview_bar_style()
+                self.assertIn("QSlider#PreviewSeekSlider::groove:horizontal", style)
+                self.assertIn(f"background: {theme.primary};", style)
+                self.assertIn(f"background: {theme.bg_scrollbar_handle};", style)
+                self.assertNotEqual(theme.primary, theme.bg_list)
+                self.assertNotEqual(theme.bg_scrollbar_handle, theme.bg_list)
+        finally:
+            sync_color_palette(ASH)
+
     def test_preview_bar_dragout_exports_current_player_path(self):
         from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication
@@ -409,6 +467,52 @@ class IconRenderingTests(unittest.TestCase):
 
 
 class SearchControllerConfidenceFilterTests(unittest.TestCase):
+    def test_all_audio_types_does_not_override_non_audio_preference(self):
+        proxy_model = mock.Mock()
+
+        class _Parent(QObject):
+            def __init__(self):
+                super().__init__()
+                self.sync_type_filter_state = mock.Mock()
+                self.view_controller = SimpleNamespace(
+                    update_library_views=mock.Mock(),
+                    refresh_docked_map=mock.Mock(),
+                )
+                self.save_library_page_state = mock.Mock()
+                self._restoring_library_page_state = False
+
+        parent = _Parent()
+        controller = SearchController(engine=None, model=None, proxy_model=proxy_model, parent=parent)
+
+        controller.handle_type_filter(False, False, True)
+
+        proxy_model.set_audio_types.assert_called_once_with(None)
+        proxy_model.set_show_non_audio_assets.assert_not_called()
+
+    def test_header_field_filter_replaces_same_field_and_preserves_other_terms(self):
+        from gui.core.filter_query import field_filter_values, replace_field_filter
+
+        query = 'source:"D:/Samples" AND pack:"Old Pack"'
+        updated = replace_field_filter(query, "pack", "New Pack")
+
+        self.assertEqual(updated, 'source:"D:/Samples" AND pack:"New Pack"')
+        self.assertEqual(field_filter_values(updated, "pack"), ["New Pack"])
+        self.assertEqual(replace_field_filter(updated, "pack", None), 'source:"D:/Samples"')
+
+    def test_header_field_filter_distributes_over_or_groups(self):
+        from gui.core.filter_query import replace_field_filter
+
+        updated = replace_field_filter(
+            'tag:"possibleduplicate" OR tag:"duplicate"',
+            "pack",
+            "Pack A",
+        )
+
+        self.assertEqual(
+            updated,
+            'tag:"possibleduplicate" AND pack:"Pack A" OR tag:"duplicate" AND pack:"Pack A"',
+        )
+
     def test_and_filter_is_rendered_as_word_for_readability(self):
         controller = SearchController(engine=None, model=None, proxy_model=mock.Mock(), parent=None)
         controller._current_query = 'category:"Kicks"'
@@ -417,6 +521,18 @@ class SearchControllerConfidenceFilterTests(unittest.TestCase):
         controller.apply_filter('tag:"warm"', True, mode="and")
 
         controller.set_query.assert_called_once_with('category:"Kicks" AND tag:"warm"')
+
+    def test_and_filter_distributes_across_saved_filter_or_groups(self):
+        controller = SearchController(engine=None, model=None, proxy_model=mock.Mock(), parent=None)
+        controller._current_query = 'source:"d:/samples"'
+        controller.set_query = mock.Mock()
+
+        controller.apply_filter('tag:"possibleduplicate" OR tag:"duplicate"', True, mode="and")
+
+        controller.set_query.assert_called_once_with(
+            'source:"d:/samples" AND tag:"possibleduplicate" OR '
+            'source:"d:/samples" AND tag:"duplicate"'
+        )
 
     def test_removing_filter_preserves_readable_and_separator(self):
         from gui.core.filter_query import remove_filter_query
@@ -562,6 +678,44 @@ class SearchControllerConfidenceFilterTests(unittest.TestCase):
         proxy_model.set_matched_ids.assert_called_once_with(set())
         model.clear_similarity_scores.assert_not_called()
         parent.view_controller.update_footer_count.assert_not_called()
+
+    def test_invalidated_search_worker_cannot_update_retired_model(self):
+        class _FakeWorker(QObject):
+            finished = Signal(dict)
+            error = Signal(str)
+            instances = []
+
+            def __init__(self, request_id, engine, query_text):
+                super().__init__()
+                self.request_id = request_id
+                self.query_text = query_text
+                self.instances.append(self)
+
+            def start(self):
+                return None
+
+        model = mock.Mock()
+        proxy_model = mock.Mock()
+        controller = SearchController(
+            engine=SimpleNamespace(db=mock.Mock()),
+            model=model,
+            proxy_model=proxy_model,
+            parent=None,
+        )
+        controller._current_query = 'category:"Kicks"'
+
+        with mock.patch("gui.core.workers.SearchWorker", _FakeWorker):
+            controller.execute_search()
+
+        controller.invalidate_pending_searches()
+        _FakeWorker.instances[-1].finished.emit({
+            "request_id": 1,
+            "query_text": 'category:"Kicks"',
+            "matched_ids": [1, 2],
+        })
+
+        proxy_model.set_matched_ids.assert_not_called()
+        model.clear_similarity_scores.assert_not_called()
 
 
 class SearchControllerSemanticSuggestionTests(unittest.TestCase):

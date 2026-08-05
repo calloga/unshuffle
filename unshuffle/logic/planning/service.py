@@ -42,7 +42,7 @@ from ...persistence import (
     save_json_meta,
 )
 
-DEFAULT_EXTRACTOR_WORKERS = 4
+DEFAULT_EXTRACTOR_WORKERS = 8
 MACOS_EXTRACTOR_WORKERS = 2
 DEFAULT_EXTRACTOR_BATCH_SIZE = 512
 CACHE_UPDATE_BATCH_SIZE = 256
@@ -270,6 +270,7 @@ def _analyze_db_audio(
         eligible = [
             row for row in batch
             if str(row.get("extension") or "").lower() in supported
+            and not str(row.get("sample_name") or "").startswith("._")
             and (not row.get("effective_hash") or row.get("effective_hash") not in skip_expensive_hashes)
         ]
         hashes = [str(row["effective_hash"]) for row in eligible if row.get("effective_hash")]

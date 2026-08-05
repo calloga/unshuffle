@@ -48,6 +48,15 @@ def apply_runtime_model(window, model) -> None:
         window.proxy_model.setSourceModel(model)
         if getattr(window, "library_tab", None) is not None:
             window.library_tab.set_proxy_model(window.proxy_model)
+    proxy_model = getattr(window, "proxy_model", None)
+    settings_controller = getattr(window, "settings_controller", None)
+    if proxy_model is not None and settings_controller is not None:
+        if hasattr(proxy_model, "set_show_non_audio_assets") and hasattr(
+            settings_controller, "get_show_non_audio_assets"
+        ):
+            proxy_model.set_show_non_audio_assets(settings_controller.get_show_non_audio_assets())
+        if hasattr(proxy_model, "set_show_duplicates") and hasattr(settings_controller, "get_show_duplicates"):
+            proxy_model.set_show_duplicates(settings_controller.get_show_duplicates())
     window.search_controller.model = model
     window.acoustic_controller.model = model
     if getattr(window, "tagging_controller", None):

@@ -11,6 +11,7 @@ class MultiFilterProxyModel(QSortFilterProxyModel):
         self.matched_ids: set[int] | None = None
         self.audio_types: set[str] | None = None
         self.show_non_audio_assets: bool = False
+        self.show_duplicates: bool = True
         self.path_filters: set[str] = set()
         self._norm_path_filters: list[str] = []
         self.similarity_bias: float = 0
@@ -62,6 +63,13 @@ class MultiFilterProxyModel(QSortFilterProxyModel):
         if self.show_non_audio_assets == show:
             return
         self.show_non_audio_assets = show
+        self._refresh_filter()
+
+    def set_show_duplicates(self, show: bool):
+        show = bool(show)
+        if self.show_duplicates == show:
+            return
+        self.show_duplicates = show
         self._refresh_filter()
 
     def set_path_filter(self, root_path: str, is_active: bool):
@@ -157,6 +165,11 @@ class MultiFilterProxyModel(QSortFilterProxyModel):
             if has_record:
                 rec = record()
                 if rec and str(getattr(rec, "audio_type", "")) == "Non-Audio Assets":
+                    return False
+        if not self.show_duplicates:
+            if has_record:
+                rec = record()
+                if rec and bool(getattr(rec, "is_duplicate_shadow", False)):
                     return False
         if self._norm_path_filters:
             if has_record:

@@ -63,6 +63,33 @@ class PersistenceTests(unittest.TestCase):
             history_queries.load_executed_sessions("C:/Library", limit=1)
         self.assertEqual(len(entered), 2)
 
+    def test_pending_scan_sessions_include_every_source_root(self):
+        class _FakeDB:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def get_recent_sessions(self, limit=10, only_executed=False):
+                return [{
+                    "session_id": "pending-session",
+                    "file_count": 0,
+                    "source_path": "D:/Samples",
+                }]
+
+            def get_session_sources(self, session_id):
+                self.assert_session_id = session_id
+                return ["D:/Samples", "E:/Drum Kits"]
+
+        fake_db = _FakeDB()
+        history_queries.invalidate_history_cache()
+        with mock.patch("gui.utils.history.get_db", return_value=fake_db):
+            sessions = history_queries.load_pending_scan_sessions("C:/Library", limit=10)
+
+        self.assertEqual(fake_db.assert_session_id, "pending-session")
+        self.assertEqual(sessions[0]["source_paths"], ["D:/Samples", "E:/Drum Kits"])
+
     def test_history_session_invalidation_clears_executed_session_list_cache(self):
         calls = []
 
@@ -316,7 +343,7 @@ class PersistenceTests(unittest.TestCase):
             history_actions.confirm_undo(app, sess)
 
         warning.assert_called_once()
-        app.worker_manager.start_undo.assert_not_called()
+        app.workflow_controller.start_undo.assert_not_called()
 
     def test_confirm_undo_blocks_missing_session_id(self):
         from gui.main.actions import history as history_actions
@@ -334,9 +361,9 @@ class PersistenceTests(unittest.TestCase):
             history_actions.confirm_undo(app, sess)
 
         warning.assert_called_once()
-        app.worker_manager.start_undo.assert_not_called()
+        app.workflow_controller.start_undo.assert_not_called()
 
-    def test_confirm_undo_uses_readable_html_paragraphs(self):
+    def test_confirm_undo_move_uses_concise_mode_specific_dialog(self):
         from gui.main.actions import history as history_actions
 
         app = mock.Mock()
@@ -350,19 +377,54 @@ class PersistenceTests(unittest.TestCase):
             "timestamp": "2026-06-04 23:10:02",
         }
 
-        with (
-            mock.patch.object(history_actions.QMessageBox, "warning", return_value=history_actions.QMessageBox.No) as warning,
-            mock.patch("gui.main.actions.history.invalidate_history_cache") as invalidate_cache,
-        ):
+        dialog = mock.Mock()
+        undo_button = object()
+        cancel_button = object()
+        dialog.addButton.side_effect = [undo_button, cancel_button]
+        dialog.clickedButton.return_value = cancel_button
+        with mock.patch.object(history_actions, "QMessageBox", return_value=dialog) as message_box, \
+            mock.patch("gui.main.actions.history.invalidate_history_cache") as invalidate_cache:
             history_actions.confirm_undo(app, sess)
 
-        message = warning.call_args.args[2]
-        self.assertIn("<p>Are you sure you want to REVERT this migration?</p>", message)
-        self.assertIn("<p><b>Session:</b> s1<br>", message)
-        self.assertIn("C:/Source &amp; Originals", message)
-        self.assertIn("<p>All moved/copied files will be returned to their original locations.</p>", message)
+        message_box.assert_called_once_with(app)
+        dialog.setWindowTitle.assert_called_once_with("Undo Move")
+        dialog.setText.assert_called_once_with("Move 12 files back to the source?")
+        informative = dialog.setInformativeText.call_args.args[0]
+        self.assertIn("From:\nC:/Library", informative)
+        self.assertIn("Back to:\nC:/Source & Originals", informative)
+        self.assertNotIn("s1", informative)
         invalidate_cache.assert_not_called()
-        app.worker_manager.start_undo.assert_not_called()
+        app.workflow_controller.start_undo.assert_not_called()
+
+    def test_confirm_undo_copy_explains_originals_are_unchanged(self):
+        from gui.main.actions import history as history_actions
+
+        app = mock.Mock()
+        app.settings.value.return_value = "C:/Library"
+        sess = {
+            "session_id": "s1",
+            "mode": "copy",
+            "source_path": "C:/Source",
+            "target_root": "C:/Library",
+            "file_count": 17916,
+        }
+        dialog = mock.Mock()
+        undo_button = object()
+        dialog.addButton.side_effect = [undo_button, object()]
+        dialog.clickedButton.return_value = undo_button
+
+        with mock.patch.object(history_actions, "QMessageBox", return_value=dialog), \
+            mock.patch("gui.main.actions.history.invalidate_history_cache") as invalidate_cache:
+            history_actions.confirm_undo(app, sess)
+
+        dialog.setWindowTitle.assert_called_once_with("Undo Copy")
+        dialog.setText.assert_called_once_with("Delete 17,916 copied files from the target?")
+        self.assertIn(
+            "Original files in C:/Source will not be changed.",
+            dialog.setInformativeText.call_args.args[0],
+        )
+        invalidate_cache.assert_called_once_with("C:/Library", "s1")
+        app.workflow_controller.start_undo.assert_called_once_with("s1")
 
     def test_save_json_meta_round_trips(self):
         root = Path(__file__).resolve().parent.parent
@@ -866,7 +928,7 @@ class PersistenceTests(unittest.TestCase):
         with mock.patch("os.cpu_count", return_value=64), \
              mock.patch("unshuffle.core.concurrency.sys.platform", "linux"), \
              mock.patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(_extractor_worker_count(20), 4)
+            self.assertEqual(_extractor_worker_count(20), 8)
             self.assertEqual(_extractor_worker_count(3), 3)
 
         with mock.patch.dict("os.environ", {"UNSHUFFLE_EXTRACTOR_WORKERS": "2"}, clear=True):
@@ -891,7 +953,7 @@ class PersistenceTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"UNSHUFFLE_EXTRACTOR_WORKERS": "invalid"}, clear=True), \
              mock.patch("unshuffle.core.concurrency.sys.platform", "linux"), \
              mock.patch("os.cpu_count", return_value=64):
-            self.assertEqual(_extractor_worker_count(20), 4)
+            self.assertEqual(_extractor_worker_count(20), 8)
 
     def test_run_plan_extracts_duplicate_hash_once_per_scan(self):
         with tempfile.TemporaryDirectory() as tmp:

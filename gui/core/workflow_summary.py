@@ -28,7 +28,10 @@ def scan_summary_text(stats: dict) -> str:
 def scan_category_counts(records: Iterable) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for record in records or []:
-        category = str(getattr(record, "category", "") or "Uncategorized").strip() or "Uncategorized"
+        if getattr(record, "is_duplicate_shadow", False) is True:
+            category = "Duplicates"
+        else:
+            category = str(getattr(record, "category", "") or "Uncategorized").strip() or "Uncategorized"
         counts[category] += 1
     return dict(counts)
 

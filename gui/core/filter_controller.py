@@ -1,7 +1,6 @@
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QInputDialog, QMenu
-from ..utils.constants import HEADER_FILTERABLE_COLUMNS, StagingColumn
+from ..utils.constants import COLUMN_CONFIG, HEADER_FILTERABLE_COLUMNS, StagingColumn
 from ..utils.styles import menu_style
 from ..utils.style_helpers import apply_style
 
@@ -77,37 +76,25 @@ class FilterController:
         if col not in HEADER_FILTERABLE_COLUMNS:
             return
         model = getattr(self.parent, "model", None)
-        proxy_model = getattr(self.parent, "proxy_model", None)
-        if not model or not proxy_model:
+        if not model or not getattr(self.parent, "proxy_model", None):
             return
-
-        if hasattr(model, "get_unique_values"):
-            unique_vals = model.get_unique_values(col)
-        else:
-            unique_vals = sorted(
-                {
-                    str(value)
-                    for row in range(model.rowCount())
-                    for value in [model.index(row, col).data(Qt.DisplayRole)]
-                    if value
-                }
-            )
 
         menu = QMenu(self.parent)
         apply_style(menu, menu_style())
 
-        all_act = QAction("All", self.parent)
-        all_act.triggered.connect(lambda checked=False: self.clear_header_filter(col))
-        menu.addAction(all_act)
-        menu.addSeparator()
+        config = COLUMN_CONFIG[StagingColumn(col)]
+        current_query = str(getattr(self.parent.search_controller, "current_query", "") or "")
+        from gui.core.filter_query import field_filter_values
 
-        active_values = set(proxy_model.column_filters.get(col, set()))
-        for value in unique_vals:
-            act = QAction(value, self.parent)
-            act.setCheckable(True)
-            act.setChecked(value in active_values)
-            act.triggered.connect(lambda checked, selected=value: self.toggle_column_filter(col, selected, checked))
-            menu.addAction(act)
+        active_values = field_filter_values(current_query, config["prefix"])
+        choose_act = QAction(f"Filter {config['label']} by value...", self.parent)
+        choose_act.triggered.connect(lambda checked=False: self.prompt_header_filter(col))
+        menu.addAction(choose_act)
+
+        clear_act = QAction(f"Clear {config['label']} filter", self.parent)
+        clear_act.setEnabled(bool(active_values))
+        clear_act.triggered.connect(lambda checked=False: self.clear_header_filter(col))
+        menu.addAction(clear_act)
 
         placement = "category" if col == StagingColumn.CATEGORY else "subcategory" if col == StagingColumn.SUBCATEGORY else ""
         custom_options = [
@@ -120,7 +107,6 @@ class FilterController:
 
             menu.addSeparator()
             custom_menu = menu.addMenu("Custom Tree")
-            current_query = str(getattr(self.parent.search_controller, "current_query", "") or "")
             for option in custom_options:
                 act = QAction(option.label, self.parent)
                 act.setCheckable(True)
@@ -137,17 +123,63 @@ class FilterController:
         header = self.parent.library_tab.view_table.horizontalHeader()
         menu.exec(header.mapToGlobal(pos))
 
-    def toggle_column_filter(self, col, value, checked):
-        current = set(self.parent.proxy_model.column_filters.get(col, set()))
-        if checked:
-            current.add(value)
-        else:
-            current.discard(value)
-        self.parent.proxy_model.set_column_filters(col, current or None)
-        self.parent.view_controller.update_library_views(tree_delay_ms=0)
+    def prompt_header_filter(self, col):
+        model = getattr(self.parent, "model", None)
+        if model is None or not hasattr(model, "get_unique_values"):
+            return
+        config = COLUMN_CONFIG[StagingColumn(col)]
+        values = model.get_unique_values(col)
+        if StagingColumn(col) == StagingColumn.CONFIDENCE:
+            percentages = set()
+            for value in values:
+                try:
+                    number = float(str(value).strip().rstrip("%"))
+                except ValueError:
+                    continue
+                if number <= 1.0:
+                    number *= 100.0
+                percentages.add(max(0, min(100, round(number))))
+            values = [f"{value}%" for value in sorted(percentages)]
+        if not values:
+            return
+        from gui.core.filter_query import field_filter_values
+
+        current_values = field_filter_values(
+            str(getattr(self.parent.search_controller, "current_query", "") or ""),
+            config["prefix"],
+        )
+        current_display = current_values[0] if current_values else ""
+        if StagingColumn(col) == StagingColumn.CONFIDENCE and "-" in current_display:
+            low, high = current_display.split("-", 1)
+            current_display = f"{low}%" if low == high else ""
+        current_index = values.index(current_display) if current_display in values else 0
+        selected, ok = QInputDialog.getItem(
+            self.parent,
+            f"Filter {config['label']}",
+            "Search or select a value:",
+            values,
+            current_index,
+            True,
+        )
+        if ok and str(selected or "").strip():
+            self._set_header_filter_query(col, str(selected).strip())
+
+    def _set_header_filter_query(self, col, value: str | None) -> None:
+        from gui.core.filter_query import replace_field_filter
+
+        config = COLUMN_CONFIG[StagingColumn(col)]
+        if value and StagingColumn(col) == StagingColumn.CONFIDENCE:
+            percentage = str(value).strip().rstrip("%")
+            value = f"{percentage}-{percentage}"
+        current_query = str(getattr(self.parent.search_controller, "current_query", "") or "")
+        self.parent.search_controller.set_query(
+            replace_field_filter(current_query, config["prefix"], value),
+            immediate=True,
+        )
         self.parent.library_tab.update_header_labels()
 
+    def toggle_column_filter(self, col, value, checked):
+        self._set_header_filter_query(col, value if checked else None)
+
     def clear_header_filter(self, col):
-        self.parent.proxy_model.set_column_filters(col, None)
-        self.parent.view_controller.update_library_views(tree_delay_ms=0)
-        self.parent.library_tab.update_header_labels()
+        self._set_header_filter_query(col, None)

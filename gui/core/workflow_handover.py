@@ -10,6 +10,26 @@ from .workflow_summary import format_bytes, remaining_source_footprint
 BUILD_HANDOVER_STATE_KEY = "build_handover_state_json"
 
 
+def _workbench_record_count(controller, state: dict | None = None) -> int:
+    state = state or {}
+    if "workbench_record_count" in state:
+        return max(0, int(state.get("workbench_record_count") or 0))
+
+    model = getattr(getattr(controller, "app", None), "model", None)
+    row_count = getattr(model, "rowCount", None)
+    if callable(row_count):
+        try:
+            return max(0, int(row_count()))
+        except (RuntimeError, TypeError, ValueError):
+            logging.debug("Could not read the workbench model row count.", exc_info=True)
+
+    try:
+        return max(0, len(getattr(model, "records", []) or []))
+    except (RuntimeError, TypeError, ValueError):
+        logging.debug("Could not read the legacy workbench record count.", exc_info=True)
+        return max(0, int(state.get("moved_or_copied_count", 0) or 0))
+
+
 def clear_build_handover_state(controller, *, preserve_persisted: bool = False) -> None:
     app = getattr(controller, "app", None)
     if app is None:
@@ -40,7 +60,7 @@ def _handover_status_and_count(controller, state: dict) -> tuple[str, str]:
         )
         return f"Move complete. {copied} file{'s' if copied != 1 else ''} moved. {leftover}", "0 files ready"
 
-    record_count = len(getattr(getattr(getattr(controller, "app", None), "model", None), "records", []) or [])
+    record_count = _workbench_record_count(controller, state)
     return f"Copy complete. {copied} file{'s' if copied != 1 else ''} copied.", f"{record_count} files ready"
 
 
@@ -170,6 +190,7 @@ def enter_build_handover_state(controller, res: dict, summary: str) -> None:
         "remaining_source_file_count": remaining_count,
         "remaining_source_bytes": remaining_bytes,
         "session_id": str(res.get("session_id") or getattr(controller._engine, "session_id", "") or ""),
+        "workbench_record_count": _workbench_record_count(controller),
         "summary": summary,
     }
 

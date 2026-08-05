@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+import logging
+
+
+def _store_has_any_tags(store, tags: set[str]) -> bool:
+    try:
+        return bool(store.has_any_tags(tags))
+    except RuntimeError as exc:
+        if "closed" not in str(exc).casefold():
+            raise
+        logging.getLogger("unshuffle").debug(
+            "Tag filter state skipped because the session store is closed."
+        )
+        return False
+
 
 def reset_library_search(app, *, defer_background_work: bool) -> None:
     app.library_tab.edit_search.blockSignals(True)
@@ -27,7 +41,7 @@ def normalized_scan_stats(stats, records, category_counts_fn) -> dict:
 def records_include_corrupt_silent_or_empty(records) -> bool:
     for rec in records or []:
         rec_tags = {str(tag).strip().lower() for tag in (getattr(rec, "tags", []) or [])}
-        if rec_tags.intersection({"silent", "empty", "corrupted", "duplicate"}):
+        if rec_tags.intersection({"silent", "empty", "corrupted"}):
             return True
     return False
 
@@ -35,7 +49,7 @@ def records_include_corrupt_silent_or_empty(records) -> bool:
 def update_corrupt_filter_state(app) -> None:
     store = getattr(app, "session_store", None)
     if store is not None and hasattr(store, "has_any_tags"):
-        enabled = store.has_any_tags({"silent", "empty", "corrupted", "duplicate"})
+        enabled = _store_has_any_tags(store, {"silent", "empty", "corrupted"})
     else:
         records = getattr(getattr(app, "model", None), "records", None)
         enabled = records_include_corrupt_silent_or_empty(records)
@@ -45,13 +59,13 @@ def update_corrupt_filter_state(app) -> None:
 def update_possible_duplicate_filter_state(app) -> None:
     store = getattr(app, "session_store", None)
     if store is not None and hasattr(store, "has_any_tags"):
-        enabled = store.has_any_tags({"possibleduplicate"})
+        enabled = _store_has_any_tags(store, {"possibleduplicate", "duplicate"})
     else:
         records = getattr(getattr(app, "model", None), "records", None) or []
         enabled = any(
-            "possibleduplicate" in {
+            {"possibleduplicate", "duplicate"}.intersection({
                 str(tag).strip().lower() for tag in (getattr(rec, "tags", []) or [])
-            }
+            })
             for rec in records
         )
     library_tab = getattr(app, "library_tab", None)

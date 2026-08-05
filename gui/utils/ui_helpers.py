@@ -103,7 +103,7 @@ def setup_global_actions(app):
 
     app.act_new = QAction("New Staging Session...", app)
     app.act_new.setShortcut("Ctrl+N")
-    app.act_new.triggered.connect(lambda: app.library_tab._on_new_clicked())
+    app.act_new.triggered.connect(lambda: request_new_session(app))
     app.addAction(app.act_new)
 
     app.act_add = QAction("Expand Current Session...", app)
@@ -111,7 +111,7 @@ def setup_global_actions(app):
     app.act_add.triggered.connect(lambda: app.library_tab._on_add_clicked())
     app.addAction(app.act_add)
     
-    app.act_refresh = QAction("Refresh All Staged Folders", app)
+    app.act_refresh = QAction("Rescan Library", app)
     app.act_refresh.setShortcut("Ctrl+R")
     app.act_refresh.triggered.connect(lambda: handle_refresh_all(app))
     app.addAction(app.act_refresh)
@@ -131,6 +131,7 @@ def setup_global_actions(app):
     app.footer.openBuildTargetRequested.connect(app.workflow_controller.open_build_handover_target)
     app.footer.openBuildSourceRequested.connect(app.workflow_controller.open_build_handover_source)
     app.footer.undoBuildRequested.connect(app.workflow_controller.undo_build_handover)
+    app.footer.updateRequested.connect(app.update_controller.open_available_update)
     
     app.custom_menu_bar.syncRequested.connect(lambda: app.workflow_controller.start_refresh([]))
     app.custom_menu_bar.toggleViewRequested.connect(app.view_controller.cycle_view_mode)
@@ -140,6 +141,7 @@ def setup_global_actions(app):
     app.custom_menu_bar.tableColumnVisibilityRequested.connect(app.library_tab.set_column_visible)
     app.custom_menu_bar.treeOrganizationEditRequested.connect(app.tree_organization_controller.open_editor)
     app.custom_menu_bar.showNonAudioAssetsRequested.connect(lambda checked: _set_show_non_audio_assets(app, checked))
+    app.custom_menu_bar.showDuplicatesRequested.connect(lambda checked: _set_show_duplicates(app, checked))
     app.custom_menu_bar.toggleDockedRequested.connect(app.view_controller.toggle_docked)
     app.custom_menu_bar.undoRequested.connect(app.undo_stack.undo)
     app.custom_menu_bar.redoRequested.connect(app.undo_stack.redo)
@@ -157,6 +159,10 @@ def setup_global_actions(app):
     app.custom_menu_bar.aboutRequested.connect(app.show_about)
     app.custom_menu_bar.highPerformanceScanRequested.connect(app.settings_controller.set_high_performance_scan)
     app.custom_menu_bar.act_high_performance_scan.setChecked(app.settings_controller.get_high_performance_scan())
+    app.custom_menu_bar.act_show_non_audio.setChecked(app.settings_controller.get_show_non_audio_assets())
+    _set_show_non_audio_assets(app, app.settings_controller.get_show_non_audio_assets())
+    app.custom_menu_bar.act_show_duplicates.setChecked(app.settings_controller.get_show_duplicates())
+    _set_show_duplicates(app, app.settings_controller.get_show_duplicates())
     app.system_page.runCoherenceRequested.connect(lambda: app.coherence_controller.start_coherence_audit(force=True, mode="manual"))
     app.system_page.continuousRefinementRequested.connect(app.coherence_controller.start_continuous_refinement)
     app.system_page.autoCheckCoherenceChanged.connect(app.settings_controller.set_auto_check_coherence_on_start)
@@ -165,6 +171,7 @@ def setup_global_actions(app):
     app.custom_menu_bar.libraryAboutToShow.connect(lambda: actions.refresh_library_menu(app))
     app.custom_menu_bar.buildAboutToShow.connect(lambda: actions.refresh_build_menu(app))
     app.custom_menu_bar.selectionAboutToShow.connect(lambda: actions.refresh_selection_menu(app))
+    app.custom_menu_bar.systemAboutToShow.connect(lambda: actions.refresh_system_menu(app))
     app.custom_menu_bar.historyAboutToShow.connect(lambda: actions.refresh_history_menu(app))
 
 def connect_orchestrator_signals(app):
@@ -173,6 +180,7 @@ def connect_orchestrator_signals(app):
     """
     from ..main import actions
     app.library_tab.scanRequested.connect(app.workflow_controller.start_scan)
+    app.library_tab.newSessionRequested.connect(lambda: request_new_session(app))
     app.library_tab.undoRequested.connect(app.undo_stack.undo)
     app.library_tab.redoRequested.connect(app.undo_stack.redo)
     app.library_tab.searchChanged.connect(app.search_controller.set_query)
@@ -182,6 +190,9 @@ def connect_orchestrator_signals(app):
     app.library_tab.viewSwitchRequested.connect(app.view_controller.cycle_view_mode)
     app.library_tab.categoryFilterRequested.connect(app.search_controller.handle_category_filter)
     app.library_tab.playRequested.connect(lambda t: app.audio_controller.handle_play_request(t, app.model, app.proxy_model))
+    app.library_tab.previewSelectionChanged.connect(
+        lambda t: app.audio_controller.handle_selection(t, app.model, app.proxy_model)
+    )
     app.library_tab.similarityRequested.connect(app.acoustic_controller.handle_similarity_request_compact)
     app.library_tab.headerMenuRequested.connect(app.filter_controller.show_header_menu)
     app.library_tab.removeFolderRequested.connect(lambda path: actions.remove_folder_clicked_via_pill(app, path))
@@ -274,9 +285,8 @@ def update_undo_redo_states(app):
     undo_stack = getattr(app, "undo_stack", None)
     if undo_stack is None or not shiboken6.isValid(undo_stack):
         return
-    has_draft = getattr(app, "drafting_controller", None) is not None and app.drafting_controller.has_changes()
-    can_undo = app.undo_stack.canUndo() and not has_draft
-    can_redo = app.undo_stack.canRedo() and not has_draft
+    can_undo = app.undo_stack.canUndo()
+    can_redo = app.undo_stack.canRedo()
 
     if hasattr(app, "library_tab") and app.library_tab is not None:
         if hasattr(app.library_tab, "btn_undo") and app.library_tab.btn_undo is not None:
@@ -390,6 +400,12 @@ def handle_refresh_all(app):
     from ..main import actions
     actions.handle_refresh_all(app)
 
+
+def request_new_session(app):
+    from ..main.actions.session import request_new_session as request
+
+    return request(app)
+
 def import_csv(app):
     drafting = getattr(app, "drafting_controller", None)
     if drafting is not None and not drafting.confirm_clear_pending_draft("import a CSV"):
@@ -441,6 +457,14 @@ def _set_theme(app, theme_key: str) -> None:
 
 
 def _set_show_non_audio_assets(app, checked: bool) -> None:
-    if getattr(app, "proxy_model", None) is not None:
+    app.settings_controller.set_show_non_audio_assets(bool(checked))
+    if getattr(app, "proxy_model", None) is not None and hasattr(app.proxy_model, "set_show_non_audio_assets"):
         app.proxy_model.set_show_non_audio_assets(checked)
+    app.view_controller.update_library_views(tree_delay_ms=0)
+
+
+def _set_show_duplicates(app, checked: bool) -> None:
+    app.settings_controller.set_show_duplicates(bool(checked))
+    if getattr(app, "proxy_model", None) is not None and hasattr(app.proxy_model, "set_show_duplicates"):
+        app.proxy_model.set_show_duplicates(bool(checked))
     app.view_controller.update_library_views(tree_delay_ms=0)

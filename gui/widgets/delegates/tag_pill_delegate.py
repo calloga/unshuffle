@@ -46,24 +46,52 @@ class TagPillDelegate(QStyledItemDelegate):
         margin_v = scaled_px(4)
         margin_h = self.margin
         x_start = margin_h
-        curr_x = x_start
         curr_y = margin_v
-        max_col_width = max(50, width - 12)
-        inner_max_width = max_col_width - margin_h
-        for tag in tags:
-            text_width = font_metrics.horizontalAdvance(tag)
-            pill_width = text_width + (self.padding_h * 2)
-            if curr_x > x_start and curr_x + pill_width > max_col_width:
-                break
-            final_pill_width = min(pill_width, inner_max_width)
+        available_width = max(0, width - (margin_h * 2))
+        minimum_pill_width = max(
+            scaled_px(30),
+            font_metrics.horizontalAdvance("...") + (self.padding_h * 2),
+        )
+        visible_count = min(
+            len(tags),
+            max(1, (available_width + self.spacing_h) // (minimum_pill_width + self.spacing_h)),
+        ) if available_width else 0
+        visible_tags = list(tags[:visible_count])
+        natural_widths = [font_metrics.horizontalAdvance(tag) + (self.padding_h * 2) for tag in visible_tags]
+        width_budget = max(0, available_width - self.spacing_h * max(0, visible_count - 1))
+        allocated_widths = self._allocate_pill_widths(natural_widths, width_budget)
+
+        curr_x = x_start
+        for tag, natural_width, final_pill_width in zip(visible_tags, natural_widths, allocated_widths):
             rect = QRect(curr_x, curr_y, final_pill_width, self.pill_height)
-            layout.append((tag, rect, pill_width > inner_max_width))
+            layout.append((tag, rect, final_pill_width < natural_width))
             curr_x += final_pill_width + self.spacing_h
         total_content_height = curr_y + self.pill_height + margin_v
         if cell_height and cell_height > total_content_height:
             offset_y = (cell_height - total_content_height) // 2
             return [(tag, rect.translated(0, offset_y), elided) for tag, rect, elided in layout], total_content_height
         return layout, total_content_height
+
+    @staticmethod
+    def _allocate_pill_widths(natural_widths: list[int], budget: int) -> list[int]:
+        """Share width fairly while leaving naturally short pills compact."""
+        if not natural_widths:
+            return []
+        remaining = max(0, int(budget))
+        allocated = [0] * len(natural_widths)
+        unresolved = set(range(len(natural_widths)))
+        while unresolved:
+            share = remaining // len(unresolved)
+            compact = [index for index in unresolved if natural_widths[index] <= share]
+            if not compact:
+                for offset, index in enumerate(sorted(unresolved)):
+                    allocated[index] = share + (1 if offset < remaining % len(unresolved) else 0)
+                break
+            for index in compact:
+                allocated[index] = natural_widths[index]
+                remaining -= allocated[index]
+                unresolved.remove(index)
+        return allocated
 
     def _paint_row_separator(self, painter: QPainter, rect: QRect) -> None:
         line = make_qcolor(ColorPalette.BORDER_LIGHT)

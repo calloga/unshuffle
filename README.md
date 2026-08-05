@@ -111,7 +111,7 @@ Locking:
 
 ## Documentation Map
 
-- User manual: maintained in the portfolio docs so readers always see the latest published information.
+- [User manual](www.calloga.com/#umu/unshuffles)
 - [Contributing Guide](CONTRIBUTING.md)
 - [Security Policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)

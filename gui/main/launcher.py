@@ -12,6 +12,17 @@ import shiboken6
 
 _GLOBAL_LOCK = None
 
+
+def release_instance_lock() -> None:
+    global _GLOBAL_LOCK
+    if _GLOBAL_LOCK is None:
+        return
+    try:
+        _GLOBAL_LOCK.unlock()
+    except Exception:
+        logging.debug("Could not release the application lock before relaunch.", exc_info=True)
+    _GLOBAL_LOCK = None
+
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     __package__ = "gui.main"

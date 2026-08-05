@@ -9,6 +9,7 @@ from ...utils import ui_helpers
 from ...utils.history import load_pending_scan_sessions
 from ...utils.state import finalize_model_mutation
 from ...core.workflow_records import promote_duplicate_shadows_after_removal
+from .navigation import is_current_workspace
 from .session import load_staging_session
 
 
@@ -48,11 +49,28 @@ def _confirm_clear_pending_draft(app, action_text: str) -> bool:
     return drafting is None or drafting.confirm_clear_pending_draft(action_text)
 
 
+def _recent_session_source_summary(session: dict) -> tuple[str, str]:
+    source_paths = [str(path).strip() for path in session.get("source_paths") or () if str(path).strip()]
+    if not source_paths:
+        fallback = str(session.get("source_path") or "").strip()
+        source_paths = [fallback] if fallback else []
+
+    names = [Path(path).name or path for path in source_paths]
+    if not names:
+        summary = "Unknown sources"
+    elif len(names) <= 3:
+        summary = " + ".join(names)
+    else:
+        summary = f"{' + '.join(names[:2])} + {len(names) - 2} more"
+    return summary, "\n".join(source_paths)
+
+
 def refresh_library_menu(app):
     app.custom_menu_bar.menu_library.clear()
 
-    app.custom_menu_bar.menu_library.addAction(app.custom_menu_bar.act_open_library)
-    app.custom_menu_bar.menu_library.addSeparator()
+    if not is_current_workspace(app, "library"):
+        app.custom_menu_bar.menu_library.addAction(app.custom_menu_bar.act_open_library)
+        app.custom_menu_bar.menu_library.addSeparator()
 
     if getattr(app, "act_sync", None) is None:
         app.act_sync = QAction("Load Target Drive Index", app)
@@ -95,9 +113,11 @@ def refresh_library_menu(app):
             else:
                 for sess in pending:
                     ts = sess.get("timestamp", "").split("T")[0]
-                    src = sess.get("source_path", "Unknown")
-                    label = f"{ts}: {Path(src).name}"
+                    source_summary, source_tooltip = _recent_session_source_summary(sess)
+                    label = f"{ts}: {source_summary}"
                     act = QAction(label, app)
+                    if source_tooltip:
+                        act.setToolTip(source_tooltip)
                     act.triggered.connect(lambda chk=False, s=sess: load_staging_session(app, s))
                     menu_load.addAction(act)
         except Exception:
@@ -214,17 +234,20 @@ def do_remove_folder(app, root: Path):
         if session_store is not None and hasattr(app.model, "refresh_index"):
             removed_count = session_store.delete_source_root(root)
             promoted_count = session_store.promote_duplicate_shadows_after_root_removal(root)
+            session_store.conn.commit()
+            if hasattr(app.model, "refresh_duplicate_shadow_ids"):
+                app.model.refresh_duplicate_shadow_ids()
             app.model.refresh_index()
             if hasattr(app.library_tab, "set_sources"):
                 app.library_tab.set_sources(app.engine.session_source_roots)
             _clear_removed_source_filter(app, root)
             from gui.core import workflow_scan_finalization
-            workflow_scan_finalization.update_corrupt_filter_state(app)
-            workflow_scan_finalization.update_possible_duplicate_filter_state(app)
             app.footer.log(
                 f"<b>Removed:</b> {root.name} ({removed_count} staged files removed; {promoted_count} duplicate shadow(s) promoted)."
             )
             finalize_model_mutation(app, resort=True, refresh_search=True)
+            workflow_scan_finalization.update_corrupt_filter_state(app)
+            workflow_scan_finalization.update_possible_duplicate_filter_state(app)
             return
 
         if app.model:

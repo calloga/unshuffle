@@ -126,6 +126,7 @@ class ModernApp(QMainWindow):
         self.update_controller.updateCheckFailed.connect(self.update_controller.show_update_check_failed_message)
         if not defer_startup_restore:
             QTimer.singleShot(100, self.workflow_controller.restore_session)
+            self._startup_update_check_scheduled = True
             QTimer.singleShot(2500, self.check_for_updates)
 
     def frontload_startup(self, status_callback=None, done_callback=None) -> None:
@@ -167,7 +168,8 @@ class ModernApp(QMainWindow):
 
         self.audio_bar = PreviewControlBar()
         self.footer = ModernFooter(audio_bar=self.audio_bar)
-        main_layout.addWidget(self.footer)
+        self.library_tab.attach_transport_bar(self.footer)
+        self._attach_footer_alerts()
 
         self.custom_menu_bar = ModernMenuBar(self)
         self.custom_menu_bar.setNativeMenuBar(False)
@@ -215,11 +217,32 @@ class ModernApp(QMainWindow):
         layout.setColumnStretch(0, 1)
         layout.setColumnStretch(1, 0)
         layout.setColumnStretch(2, 1)
-        layout.addWidget(self.btn_previous_page, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        self.btn_previous_page.hide()
+        self.btn_next_page.hide()
+        self.page_alerts = QWidget(bar)
+        self.page_alerts_layout = QHBoxLayout(self.page_alerts)
+        apply_layout_margins(self.page_alerts_layout, (0, 0, 0, 0))
+        apply_layout_spacing(self.page_alerts_layout, 6)
+        self.page_alerts_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         layout.addWidget(self.page_carousel, 0, 1, Qt.AlignCenter)
-        layout.addWidget(self.btn_next_page, 0, 2, Qt.AlignRight | Qt.AlignVCenter)
+        layout.addWidget(self.page_alerts, 0, 2, Qt.AlignRight | Qt.AlignVCenter)
         self._style_page_nav_bar()
         return bar
+
+    def _attach_footer_alerts(self) -> None:
+        if not getattr(self, "page_alerts_layout", None):
+            return
+        for button in (
+            self.footer.btn_review_coherence,
+            self.footer.btn_build,
+            self.footer.btn_view_summary,
+            self.footer.btn_open_build_target,
+            self.footer.btn_open_build_source,
+            self.footer.btn_undo_build,
+            self.footer.btn_update_available,
+        ):
+            button.setParent(self.page_alerts)
+            self.page_alerts_layout.addWidget(button)
 
     def _style_page_nav_bar(self) -> None:
         if not getattr(self, "page_nav_bar", None):
@@ -309,6 +332,7 @@ class ModernApp(QMainWindow):
         if mode not in {"table", "tree", "map"}:
             return
         modes = self.library_tab.available_view_modes()
+        was_available = mode in modes
         if available:
             modes.add(mode)
         elif len(modes) > 1:
@@ -322,6 +346,38 @@ class ModernApp(QMainWindow):
         self.custom_menu_bar.set_library_view_available(mode, available)
         for view_mode in ("table", "tree", "map"):
             self.custom_menu_bar.set_library_view_available(view_mode, self.library_tab.is_view_available(view_mode))
+        if available and not was_available and getattr(self, "model", None) is not None:
+            self._frontload_reenabled_library_view(mode)
+
+    def _frontload_reenabled_library_view(self, mode: str) -> None:
+        title = f"Preparing {mode.title()} View"
+        token = self.operation_monitor.start(title, compact=True)
+        self.operation_monitor.update({"percent": 0}, token=token)
+
+        def _prepare(*_args) -> None:
+            if mode == "map" and self.view_controller._coherence_is_running():
+                self.operation_monitor.update({"message": "Waiting for library coherence..."}, token=token)
+                controller = getattr(self, "coherence_controller", None)
+                if controller is not None and hasattr(controller, "coherenceFinished"):
+                    def _resume(*_finished_args) -> None:
+                        try:
+                            controller.coherenceFinished.disconnect(_resume)
+                        except (RuntimeError, TypeError):
+                            pass
+                        QTimer.singleShot(0, _prepare)
+
+                    controller.coherenceFinished.connect(_resume)
+                    return
+            try:
+                self.view_controller.frontload_library_view(mode)
+            except Exception as exc:
+                logging.exception("Failed to frontload re-enabled %s view.", mode)
+                self.operation_monitor.fail(str(exc), token=token)
+                return
+            self.operation_monitor.update({"percent": 100}, token=token)
+            QTimer.singleShot(100, lambda: self.operation_monitor.finish(token=token))
+
+        QTimer.singleShot(0, _prepare)
 
     def set_startup_launcher_visible(self, enabled: bool) -> None:
         self.settings_controller.set_show_startup_launcher(enabled)
@@ -461,7 +517,6 @@ class ModernApp(QMainWindow):
         window_lifecycle.resize_for_show(self)
 
     def closeEvent(self, event):
-        self._is_closing = True
         if self.drafting_controller.has_changes():
             reply = QMessageBox.question(
                 self,
@@ -471,14 +526,43 @@ class ModernApp(QMainWindow):
                 QMessageBox.No,
             )
             if reply != QMessageBox.Yes:
-                self._is_closing = False
                 event.ignore()
                 return
 
+            self._is_closing = True
+            try:
+                discarded = self.drafting_controller.discard_reorg_draft(
+                    confirm=False,
+                    refresh_views=False,
+                )
+            except Exception as exc:
+                self._is_closing = False
+                logging.exception("Could not discard pending changes before shutdown")
+                QMessageBox.critical(
+                    self,
+                    "Could Not Close",
+                    f"Pending changes could not be discarded:\n\n{exc}",
+                )
+                event.ignore()
+                return
+            if discarded is False or self.drafting_controller.has_changes():
+                self._is_closing = False
+                QMessageBox.warning(
+                    self,
+                    "Could Not Close",
+                    "Pending changes were not discarded. The application will remain open.",
+                )
+                event.ignore()
+                return
+
+        self._is_closing = True
         window_lifecycle.save_settings_for_close(self)
         window_lifecycle.close_engine_for_shutdown(self)
         super().closeEvent(event)
-        window_lifecycle.maybe_quit_after_close()
+        if getattr(self, "_restart_with_startup_launcher", False):
+            window_lifecycle.relaunch_startup_launcher_after_close()
+        else:
+            window_lifecycle.maybe_quit_after_close()
 
 
 class _NativeWindowThemeFilter(QObject):

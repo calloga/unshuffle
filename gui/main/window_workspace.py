@@ -132,6 +132,7 @@ def open_build_workspace(window, *, build_page_cls, message_box) -> None:
                 move=opts.get("move", True),
                 flat=opts.get("flat", False),
                 no_px=opts.get("no_px", False),
+                skip_confirmed_duplicates=opts.get("skip_confirmed_duplicates", True),
             )
 
     page.accepted.connect(lambda: _finish_build(True))

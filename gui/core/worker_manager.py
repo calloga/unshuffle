@@ -68,14 +68,30 @@ class WorkerManager(QObject):
             return False
         return True
 
-    def start_commit(self, records, move=False, dry_run=False, flat=False, no_px=False):
+    def start_commit(
+        self,
+        records,
+        move=False,
+        dry_run=False,
+        flat=False,
+        no_px=False,
+        skip_confirmed_duplicates=True,
+    ):
         if self.is_busy() or not self.engine: return False
         self.engine.interrupted = False
         self.worker_type = "commit"
         self._cancel_requested_type = None
         self.busyStateChanged.emit(True)
         try:
-            self.worker = CommitWorker(self.engine, records, move, dry_run, flat, no_px)
+            self.worker = CommitWorker(
+                self.engine,
+                records,
+                move,
+                dry_run,
+                flat,
+                no_px,
+                skip_confirmed_duplicates,
+            )
             self._connect_and_start("commit")
         except Exception as exc:
             logging.exception("Failed to start commit worker")
@@ -109,7 +125,7 @@ class WorkerManager(QObject):
                 return True
             self.engine.interrupted = True
             self._cancel_requested_type = self.worker_type
-            logging.info("Worker cancellation requested.")
+            logging.info("Worker cancellation requested for %s.", self.worker_type or "unknown operation")
             self.cancelling.emit()
             return True
         return False
@@ -136,11 +152,15 @@ class WorkerManager(QObject):
         if worker is not self.worker:
             return
         res = self._annotate_cancelled_result(worker_type, res)
-        self.busyStateChanged.emit(False)
         self.worker = None
         self.worker_type = None
         self._cancel_requested_type = None
         self.finished.emit(worker_type, res)
+        # Completion handlers may rebind runtime state or immediately start a
+        # replacement operation. Do not re-enable the UI against disposed
+        # worker resources, or mark a newly started worker idle.
+        if self.worker is None:
+            self.busyStateChanged.emit(False)
 
     def _on_error(self, worker, err_msg):
         if worker is not self.worker:

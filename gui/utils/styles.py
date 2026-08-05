@@ -457,7 +457,18 @@ def transparent_panel_style() -> str:
 
 
 def preview_bar_style() -> str:
-    return f"QFrame {{ background: {ColorPalette.BG_LIST}; border: none; }}"
+    return (
+        f"QFrame {{ background: {ColorPalette.BG_LIST}; border: none; }}"
+        f"QSlider#PreviewSeekSlider::groove:horizontal {{ background: {ColorPalette.BORDER_LIGHT}; "
+        f"height: {scaled_px(4)}px; border: none; border-radius: {scaled_px(2)}px; }}"
+        f"QSlider#PreviewSeekSlider::sub-page:horizontal {{ background: {ColorPalette.PRIMARY}; "
+        f"border: none; border-radius: {scaled_px(2)}px; }}"
+        f"QSlider#PreviewSeekSlider::add-page:horizontal {{ background: {ColorPalette.BG_SCROLLBAR_HANDLE}; "
+        f"border: none; border-radius: {scaled_px(2)}px; }}"
+        f"QSlider#PreviewSeekSlider::handle:horizontal {{ background: {ColorPalette.PRIMARY_BRIGHT}; "
+        f"border: 1px solid {ColorPalette.BG_LIST}; width: {scaled_px(10)}px; "
+        f"margin: -{scaled_px(4)}px 0; border-radius: {scaled_px(5)}px; }}"
+    )
 
 
 def table_separator_color() -> str:
@@ -670,11 +681,12 @@ def workspace_primary_button_style() -> str:
     return button_style("primary", size="normal")
 
 
-def workspace_sidebar_button_style() -> str:
+def workspace_sidebar_button_style(*, include_font_size: bool = True) -> str:
+    font_size_rule = f"font-size: {scaled_px(13)}px; " if include_font_size else ""
     return (
         f"QPushButton {{ background: transparent; color: {ColorPalette.TEXT_LIGHT}; border: none; "
         f"border-radius: {scaled_px(4)}px; padding: 0 {scaled_px(10)}px; min-height: {scaled_px(36)}px; "
-        f"text-align: left; font-size: {scaled_px(13)}px; font-weight: normal; }}"
+        f"text-align: left; {font_size_rule}font-weight: normal; }}"
         f"QPushButton:hover {{ background: {ColorPalette.TABLE_HOVER}; }}"
         f"QPushButton[active=\"true\"] {{ background: {ColorPalette.SELECTION}; color: {ColorPalette.TEXT_MAIN}; }}"
         f"QPushButton:disabled {{ background: transparent; color: {ColorPalette.TEXT_DIM}; }}"

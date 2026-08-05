@@ -6,7 +6,46 @@ import shiboken6
 def current_records(window):
     if not window.model:
         return []
-    return getattr(window.model, "records", [])
+    records = getattr(window.model, "records", [])
+    store = getattr(records, "store", None)
+    if store is None:
+        return records
+
+    engine = getattr(window, "engine", None)
+    engine_db = getattr(engine, "db", None)
+    try:
+        store.conn.execute("SELECT 1").fetchone()
+        store_is_live = True
+    except RuntimeError:
+        store_is_live = False
+
+    if store_is_live and (engine_db is None or store.db is engine_db):
+        return records
+
+    from gui.core.staging_session_store import DbRecordSequence, StagingSessionStore
+    from unshuffle.persistence import UnshuffleDB
+
+    if engine_db is not None:
+        try:
+            engine_db.conn.execute("SELECT 1").fetchone()
+        except RuntimeError:
+            engine_db = None
+    if engine_db is None:
+        engine_db = UnshuffleDB(store.db.db_path)
+        if engine is not None:
+            update_state = getattr(engine, "update_state", None)
+            if callable(update_state):
+                update_state(db=engine_db)
+            else:
+                engine.db = engine_db
+
+    live_store = StagingSessionStore(engine_db, store.session_id)
+    window.model.store = live_store
+    window.model.records = DbRecordSequence(live_store, window.model)
+    window.session_store = live_store
+    if hasattr(window.model, "refresh_index"):
+        window.model.refresh_index()
+    return window.model.records
 
 
 def set_search_status(window, text: str) -> None:

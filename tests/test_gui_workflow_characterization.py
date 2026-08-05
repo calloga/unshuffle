@@ -12,7 +12,7 @@ from typing import cast
 from PySide6.QtCore import QAbstractItemModel, QCoreApplication, QEvent, QObject, Qt, Signal
 
 from gui.core import main_window_scan_flow
-from gui.utils.ui_helpers import on_undo_stack_changed
+from gui.utils.ui_helpers import on_undo_stack_changed, update_undo_redo_states
 from tests.utils.qt_utils import close_qt_window
 from unshuffle.runtime.engine import RuntimeUnshuffler as Unshuffler
 from unshuffle.core import PlanRecord
@@ -1123,6 +1123,118 @@ class MainWindowDebounceTests(unittest.TestCase):
         close_event.assert_called_once_with(event)
         single_shot.assert_called()
         quit_app.assert_called_once_with()
+
+    def test_main_window_close_relaunches_startup_launcher_when_requested(self):
+        from gui.main import window as window_module
+
+        main_window = window_module.ModernApp.__new__(window_module.ModernApp)
+        main_window._is_closing = False
+        main_window._restart_with_startup_launcher = True
+        main_window.drafting_controller = mock.Mock()
+        main_window.drafting_controller.has_changes.return_value = False
+        main_window.settings_controller = mock.Mock()
+        main_window.engine = None
+        event = mock.Mock()
+
+        with mock.patch.object(window_module.QMainWindow, "closeEvent") as close_event, \
+            mock.patch("gui.main.window_lifecycle.relaunch_startup_launcher_after_close") as relaunch, \
+            mock.patch("gui.main.window_lifecycle.maybe_quit_after_close") as quit_after_close:
+            window_module.ModernApp.closeEvent(main_window, event)
+
+        close_event.assert_called_once_with(event)
+        relaunch.assert_called_once_with()
+        quit_after_close.assert_not_called()
+
+    def test_new_session_confirms_and_closes_into_startup_launcher(self):
+        from PySide6.QtWidgets import QMessageBox
+        from gui.main.actions.session import request_new_session
+
+        settings = SimpleNamespace(sync=mock.Mock())
+        app = SimpleNamespace(
+            settings_controller=SimpleNamespace(
+                settings=settings,
+                set_show_startup_launcher=mock.Mock(),
+            ),
+            close=mock.Mock(return_value=True),
+        )
+
+        with mock.patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+            accepted = request_new_session(app)
+
+        self.assertTrue(accepted)
+        app.settings_controller.set_show_startup_launcher.assert_called_once_with(True)
+        settings.sync.assert_called_once_with()
+        self.assertTrue(app._restart_with_startup_launcher)
+        app.close.assert_called_once_with()
+
+    def test_startup_launcher_relaunch_releases_lock_and_starts_fresh_process(self):
+        from gui.main import window_lifecycle
+
+        app = mock.Mock()
+        with mock.patch("gui.main.launcher.release_instance_lock") as release_lock, \
+            mock.patch.object(window_lifecycle.QProcess, "startDetached", return_value=(True, 123)) as start, \
+            mock.patch.object(window_lifecycle.QApplication, "instance", return_value=app), \
+            mock.patch.object(window_lifecycle.QTimer, "singleShot", side_effect=lambda _delay, fn: fn()), \
+            mock.patch.object(window_lifecycle.sys, "frozen", False, create=True):
+            window_lifecycle.relaunch_startup_launcher_after_close()
+
+        release_lock.assert_called_once_with()
+        self.assertEqual(start.call_args.args[0], window_lifecycle.sys.executable)
+        self.assertEqual(start.call_args.args[1], ["-m", "gui"])
+        app.quit.assert_called_once_with()
+
+    def test_main_window_close_discards_pending_draft_before_shutdown(self):
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from gui.main import window as window_module
+
+        app = QApplication.instance() or QApplication([])
+        main_window = window_module.ModernApp.__new__(window_module.ModernApp)
+        main_window._is_closing = False
+        main_window.drafting_controller = mock.Mock()
+        main_window.drafting_controller.has_changes.side_effect = [True, False]
+        main_window.drafting_controller.discard_reorg_draft.return_value = True
+        main_window.settings_controller = mock.Mock()
+        main_window.engine = None
+        event = mock.Mock()
+
+        with mock.patch.object(window_module.QMessageBox, "question", return_value=QMessageBox.Yes), \
+            mock.patch.object(window_module.QMainWindow, "closeEvent") as close_event, \
+            mock.patch("gui.main.window.QTimer.singleShot", side_effect=lambda _delay, func: func()), \
+            mock.patch.object(app, "quit"):
+            window_module.ModernApp.closeEvent(main_window, event)
+
+        main_window.drafting_controller.discard_reorg_draft.assert_called_once_with(
+            confirm=False,
+            refresh_views=False,
+        )
+        event.ignore.assert_not_called()
+        close_event.assert_called_once_with(event)
+
+    def test_undo_redo_controls_remain_available_for_pending_draft_commands(self):
+        from PySide6.QtGui import QUndoCommand, QUndoStack
+        from PySide6.QtWidgets import QApplication
+
+        _app = QApplication.instance() or QApplication([])
+        undo_stack = QUndoStack()
+        undo_stack.push(QUndoCommand("Draft edit"))
+        library_tab = SimpleNamespace(
+            btn_undo=mock.Mock(),
+            btn_redo=mock.Mock(),
+        )
+        app = SimpleNamespace(
+            undo_stack=undo_stack,
+            drafting_controller=SimpleNamespace(has_changes=lambda: True),
+            library_tab=library_tab,
+            act_undo=mock.Mock(),
+            act_redo=mock.Mock(),
+            custom_menu_bar=SimpleNamespace(act_undo=mock.Mock(), act_redo=mock.Mock()),
+        )
+
+        update_undo_redo_states(app)
+
+        library_tab.btn_undo.setEnabled.assert_called_with(True)
+        library_tab.btn_redo.setEnabled.assert_called_with(False)
+        app.act_undo.setEnabled.assert_called_with(True)
 
     def test_promoting_anchor_confirms_and_explains_removed_candidate(self):
         from gui.core.system_controller import SystemController
@@ -2267,6 +2379,158 @@ class MainWindowDebounceTests(unittest.TestCase):
         self.assertEqual(window.stack.setCurrentWidget.call_count, 2)
         close_qt_window(first_page, app)
 
+    def test_build_menu_omits_draft_actions_without_active_draft(self):
+        from PySide6.QtCore import QObject
+        from PySide6.QtWidgets import QApplication, QMenu
+        from gui.main.actions.build import refresh_build_menu
+
+        app_instance = QApplication.instance() or QApplication([])
+
+        class FakeApp(QObject):
+            def __init__(self):
+                super().__init__()
+                self.custom_menu_bar = SimpleNamespace(menu_build=QMenu())
+                self.drafting_controller = SimpleNamespace(
+                    has_changes=lambda: False,
+                    save_reorg_draft=mock.Mock(),
+                    discard_reorg_draft=mock.Mock(),
+                )
+                self.worker_manager = SimpleNamespace(is_busy=lambda: False)
+
+            def open_build_workspace(self):
+                pass
+
+        fake_app = FakeApp()
+        refresh_build_menu(fake_app)
+
+        self.assertEqual([action.text() for action in fake_app.custom_menu_bar.menu_build.actions()], ["Build"])
+        fake_app.custom_menu_bar.menu_build.deleteLater()
+        app_instance.processEvents()
+
+    def test_workspace_menus_omit_navigation_to_the_current_workspace(self):
+        from PySide6.QtCore import QObject
+        from PySide6.QtWidgets import QApplication
+        from gui.main.actions.build import refresh_build_menu
+        from gui.main.actions.history import refresh_history_menu
+        from gui.main.actions.system import refresh_system_menu
+        from gui.widgets.menu_bar import ModernMenuBar
+
+        app_instance = QApplication.instance() or QApplication([])
+
+        class FakeSettings:
+            def value(self, _key, default=""):
+                return default
+
+        class FakeApp(QObject):
+            def __init__(self):
+                super().__init__()
+                self.current_workspace = "build"
+                self.custom_menu_bar = ModernMenuBar()
+                self.drafting_controller = SimpleNamespace(
+                    has_changes=lambda: False,
+                    save_reorg_draft=mock.Mock(),
+                    discard_reorg_draft=mock.Mock(),
+                )
+                self.worker_manager = SimpleNamespace(is_busy=lambda: False)
+                self.settings = FakeSettings()
+
+            def _current_page_key(self):
+                return self.current_workspace, None
+
+            def open_build_workspace(self):
+                pass
+
+        fake_app = FakeApp()
+        refresh_build_menu(fake_app)
+        self.assertNotIn("Build", [action.text() for action in fake_app.custom_menu_bar.menu_build.actions()])
+
+        fake_app.current_workspace = "system"
+        refresh_system_menu(fake_app)
+        self.assertNotIn("System", [action.text() for action in fake_app.custom_menu_bar.menu_system.actions()])
+
+        fake_app.current_workspace = "history"
+        refresh_history_menu(fake_app)
+        self.assertNotIn("History", [action.text() for action in fake_app.custom_menu_bar.menu_history.actions()])
+
+        fake_app.custom_menu_bar.deleteLater()
+        app_instance.processEvents()
+
+    def test_current_records_rebinds_a_closed_db_backed_store(self):
+        from gui.core.staging_session_store import StagingSessionStore
+        from gui.main import window_search
+        from gui.models.db_staging_table import DbBackedStagingTableModel
+        from unshuffle.persistence import UnshuffleDB
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "staging.db"
+            stale_db = UnshuffleDB(db_path)
+            stale_db.register_session("session", Path("D:/Samples"), Path(temp_dir), "pending")
+            stale_db.add_staging_records_bulk(
+                "session",
+                [
+                    (
+                        0, "D:/Samples/Pack/kick.wav", "kick.wav", "Pack", "Kicks", "", "Oneshots",
+                        "", "0.9", 0.5, "hash", "fast", "[]", "{}", None, None, None, None, None, None, 0,
+                    )
+                ],
+            )
+            model = DbBackedStagingTableModel(StagingSessionStore(stale_db, "session"))
+            stale_db.close()
+            live_db = UnshuffleDB(db_path)
+            window = SimpleNamespace(
+                model=model,
+                engine=SimpleNamespace(db=live_db),
+                session_store=model.store,
+            )
+            try:
+                records = window_search.current_records(window)
+
+                self.assertEqual(len(records), 1)
+                self.assertIs(model.store.db, live_db)
+                self.assertIs(window.session_store, model.store)
+            finally:
+                live_db.close()
+
+    def test_current_records_reopens_database_through_workflow_bridge(self):
+        from gui.core.staging_session_store import StagingSessionStore
+        from gui.main import window_search
+        from gui.models.db_staging_table import DbBackedStagingTableModel
+        from unshuffle.bridge.workflow_bridge import WorkflowBridge
+        from unshuffle.persistence import UnshuffleDB
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "staging.db"
+            stale_db = UnshuffleDB(db_path)
+            stale_db.register_session("session", Path("D:/Samples"), Path(temp_dir), "pending")
+            stale_db.add_staging_records_bulk(
+                "session",
+                [
+                    (
+                        0, "D:/Samples/Pack/kick.wav", "kick.wav", "Pack", "Kicks", "", "Oneshots",
+                        "", "0.9", 0.5, "hash", "fast", "[]", "{}", None, None, None, None, None, None, 0,
+                    )
+                ],
+            )
+            model = DbBackedStagingTableModel(StagingSessionStore(stale_db, "session"))
+            stale_db.close()
+            runtime = SimpleNamespace(db=stale_db)
+            window = SimpleNamespace(
+                model=model,
+                engine=WorkflowBridge(runtime),
+                session_store=model.store,
+            )
+            reopened_db = None
+            try:
+                records = window_search.current_records(window)
+                reopened_db = runtime.db
+
+                self.assertEqual(len(records), 1)
+                self.assertIs(model.store.db, reopened_db)
+                self.assertIs(window.session_store, model.store)
+            finally:
+                if reopened_db is not None and reopened_db is not stale_db:
+                    reopened_db.close()
+
     def test_current_page_is_not_persisted_before_settings_restore(self):
         from gui.main import window as window_module
 
@@ -2587,15 +2851,20 @@ class SettingsControllerSavedFilterScopeTests(unittest.TestCase):
                 self.worker_manager = SimpleNamespace(is_busy=lambda: False)
                 self.act_new = QAction("New Staging Session...", self)
                 self.act_add = QAction("Expand Current Session...", self)
-                self.act_refresh = QAction("Refresh All Staged Folders", self)
+                self.act_refresh = QAction("Rescan Library", self)
                 self.engine = object()
                 self.model = object()
                 self.coherence_controller = coherence_controller
                 self.open_coherence_map = mock.Mock()
 
+            def _current_page_key(self):
+                return "library", None
+
         app = _App()
 
         refresh_library_menu(app)
+
+        self.assertNotIn("Library", [action.text() for action in menu_bar.menu_library.actions()])
 
         coherence_menu = app.menu_coherence
         self.assertEqual(coherence_menu.title(), "Library Health")
@@ -2610,6 +2879,26 @@ class SettingsControllerSavedFilterScopeTests(unittest.TestCase):
         coherence_controller.start_coherence_audit.assert_not_called()
         coherence_controller.start_continuous_refinement.assert_not_called()
         self.assertEqual(settings_controller.values, [False])
+
+    def test_recent_session_summary_names_multiple_source_roots(self):
+        from gui.main.actions.library import _recent_session_source_summary
+
+        summary, tooltip = _recent_session_source_summary({
+            "source_paths": ["D:/Samples", "E:/Drum Kits", "F:/Dua Lipa Kit"],
+        })
+
+        self.assertEqual(summary, "Samples + Drum Kits + Dua Lipa Kit")
+        self.assertEqual(tooltip, "D:/Samples\nE:/Drum Kits\nF:/Dua Lipa Kit")
+
+    def test_recent_session_summary_compacts_many_roots(self):
+        from gui.main.actions.library import _recent_session_source_summary
+
+        summary, tooltip = _recent_session_source_summary({
+            "source_paths": ["D:/One", "E:/Two", "F:/Three", "G:/Four"],
+        })
+
+        self.assertEqual(summary, "One + Two + 2 more")
+        self.assertIn("G:/Four", tooltip)
 
     def test_saved_filters_are_scoped_to_active_session(self):
         from PySide6.QtCore import QSettings
@@ -3272,8 +3561,25 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
 
         update_possible_duplicate_filter_state(app)
 
-        app.session_store.has_any_tags.assert_called_once_with({"possibleduplicate"})
+        app.session_store.has_any_tags.assert_called_once_with({"possibleduplicate", "duplicate"})
         library_tab.set_possible_duplicate_filter_enabled.assert_called_once_with(True)
+
+    def test_possible_duplicate_filter_state_tolerates_closed_session_store(self):
+        from gui.core.workflow_scan_finalization import update_possible_duplicate_filter_state
+
+        library_tab = SimpleNamespace(set_possible_duplicate_filter_enabled=mock.Mock())
+        app = SimpleNamespace(
+            session_store=SimpleNamespace(
+                has_any_tags=mock.Mock(side_effect=RuntimeError("database handle is closed"))
+            ),
+            library_tab=library_tab,
+            filter_controller=SimpleNamespace(refresh_dock_filters=mock.Mock()),
+        )
+
+        update_possible_duplicate_filter_state(app)
+
+        library_tab.set_possible_duplicate_filter_enabled.assert_called_once_with(False)
+        app.filter_controller.refresh_dock_filters.assert_called_once_with()
 
     def test_new_scan_clears_active_custom_tree(self):
         from gui.core.workflow_controller import WorkflowController
@@ -3291,6 +3597,7 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
 
         controller.start_scan([Path("D:/Fresh")], append=False)
 
+        controller.app.tagging_controller.clear_state.assert_called_once_with(refresh_filter_state=False)
         controller.app.tree_organization_controller.disable_profile.assert_called_once_with(refresh=False)
 
     def test_preserved_undo_confirmation_restarts_with_confirmation_flag(self):
@@ -3519,6 +3826,20 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         )
 
         self.assertEqual(segments, [("Kicks", 8), ("Snares", 4)])
+
+    def test_scan_category_counts_show_duplicate_shadows_as_an_exclusive_bucket(self):
+        from types import SimpleNamespace
+        from gui.core.workflow_controller import scan_category_counts
+
+        counts = scan_category_counts(
+            [
+                SimpleNamespace(category="Kicks", is_duplicate_shadow=False),
+                SimpleNamespace(category="Kicks", is_duplicate_shadow=True),
+                SimpleNamespace(category="Snares", is_duplicate_shadow=False),
+            ]
+        )
+
+        self.assertEqual(counts, {"Kicks": 1, "Duplicates": 1, "Snares": 1})
 
     def test_finalize_scan_data_clears_sticky_scan_status(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -4127,6 +4448,38 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         self.assertTrue(started)
         parent.coherence_controller.clear_state.assert_called_once_with()
 
+    def test_new_scan_invalidates_search_before_closing_previous_engine(self):
+        from gui.core.workflow_controller import WorkflowController
+
+        calls = []
+        old_engine = mock.Mock()
+        old_engine.close.side_effect = lambda: calls.append("close")
+        new_engine = mock.Mock()
+        new_engine.db.get_committed_hashes.return_value = set()
+
+        class _Parent(QObject):
+            def __init__(self):
+                super().__init__()
+                self.settings = mock.Mock()
+                self.tagging_controller = mock.Mock()
+                self.coherence_controller = mock.Mock()
+                self.tree_organization_controller = None
+                self.search_controller = mock.Mock()
+                self.search_controller.clear_query_state.side_effect = lambda **_kwargs: calls.append("search")
+                self.undo_stack = mock.Mock()
+                self.model = None
+
+        worker_manager = mock.Mock()
+        worker_manager.start_scan.return_value = True
+        parent = _Parent()
+        controller = WorkflowController(old_engine, worker_manager, parent.undo_stack, parent)
+
+        with mock.patch("gui.core.workflow_controller.create_workflow_bridge", return_value=new_engine):
+            assert controller.start_scan(["D:/Samples"], require_clear_draft=False)
+
+        assert calls[:2] == ["search", "close"]
+        parent.search_controller.clear_query_state.assert_called_once_with(sync_ui=True)
+
     def test_start_scan_clears_stale_corrupt_silent_empty_filter_state(self):
         from gui.core.workflow_controller import WorkflowController
 
@@ -4156,12 +4509,13 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         parent.library_tab.set_corrupt_silent_empty_filter_enabled.assert_called_once_with(False)
         parent.filter_controller.refresh_dock_filters.assert_called_once_with()
 
-    def test_corrupt_silent_empty_filter_includes_duplicate_records(self):
+    def test_corrupt_silent_empty_filter_excludes_duplicate_records(self):
         from gui.core.workflow_scan_finalization import records_include_corrupt_silent_or_empty
-        from gui.widgets.sidebar import CORRUPT_SILENT_EMPTY_FILTER_QUERY
+        from gui.widgets.sidebar import CORRUPT_SILENT_EMPTY_FILTER_QUERY, POSSIBLE_DUPLICATE_FILTER_QUERY
 
-        self.assertTrue(records_include_corrupt_silent_or_empty([SimpleNamespace(tags=["duplicate"])]))
-        self.assertIn('tag:"duplicate"', CORRUPT_SILENT_EMPTY_FILTER_QUERY)
+        self.assertFalse(records_include_corrupt_silent_or_empty([SimpleNamespace(tags=["duplicate"])]))
+        self.assertNotIn('tag:"duplicate"', CORRUPT_SILENT_EMPTY_FILTER_QUERY)
+        self.assertIn('tag:"duplicate"', POSSIBLE_DUPLICATE_FILTER_QUERY)
 
     def test_start_scan_opens_in_app_operation_monitor(self):
         from gui.core.workflow_controller import WorkflowController
@@ -4193,6 +4547,31 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
             cancellable=True,
             on_cancel=worker_manager.request_cancel,
         )
+
+    def test_start_undo_opens_cancellable_operation_monitor(self):
+        from gui.core.workflow_controller import WorkflowController
+
+        class _Parent(QObject):
+            def __init__(self):
+                super().__init__()
+                self.settings = mock.Mock()
+                self.footer = mock.Mock()
+                self.operation_monitor = mock.Mock()
+
+        worker_manager = mock.Mock()
+        worker_manager.start_undo.return_value = True
+        parent = _Parent()
+        controller = WorkflowController(None, worker_manager, mock.Mock(), parent)
+
+        started = controller.start_undo("session-1")
+
+        self.assertTrue(started)
+        parent.operation_monitor.start.assert_called_once_with(
+            "Undoing Build",
+            cancellable=True,
+            on_cancel=worker_manager.request_cancel,
+        )
+        worker_manager.start_undo.assert_called_once_with("session-1", confirm_preserved=False)
 
     def test_worker_progress_routes_to_active_operation_monitor_before_footer_progress(self):
         from gui.utils.ui_helpers import handle_progress
@@ -4256,6 +4635,30 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
 
         self.assertEqual(finished, [("scan", (["new"], False))])
         self.assertIsNone(manager.worker)
+
+    def test_worker_manager_finishes_before_idling_and_preserves_replacement_busy_state(self):
+        from gui.core.worker_manager import WorkerManager
+
+        manager = WorkerManager()
+        completed_worker = object()
+        replacement_worker = object()
+        events = []
+        manager.worker = completed_worker
+        manager.worker_type = "undo"
+        manager.busyStateChanged.connect(lambda busy: events.append(("busy", busy)))
+
+        def _replace_worker(_worker_type, _result):
+            events.append(("finished", _worker_type))
+            manager.worker = replacement_worker
+            manager.worker_type = "scan"
+
+        manager.finished.connect(_replace_worker)
+
+        manager._on_finished(completed_worker, "undo", {"undone": 1})
+
+        self.assertEqual(events, [("finished", "undo")])
+        self.assertIs(manager.worker, replacement_worker)
+        self.assertEqual(manager.worker_type, "scan")
 
     def test_worker_manager_clears_busy_state_when_worker_start_fails(self):
         from gui.core import worker_manager as worker_manager_module
@@ -5172,6 +5575,24 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         finally:
             close_qt_window(page, app)
 
+    def test_coherence_analyzer_success_does_not_show_loaded_result_count(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets import coherence_analyzer as analyzer_module
+        from gui.widgets.coherence_analyzer import CoherenceAnalyzerPage
+
+        app = QApplication.instance() or QApplication([])
+        page = CoherenceAnalyzerPage(show_header=False, show_filters=False)
+        page.status.setText("Preparing map...")
+        host = SimpleNamespace(engine=SimpleNamespace(session_id="session"), model=object(), settings=None)
+        try:
+            with mock.patch.object(analyzer_module, "coherence_points_from_app", return_value=([], [])):
+                page.refresh_from_app(host)
+
+            self.assertEqual(page.status.text(), "")
+        finally:
+            close_qt_window(page, app)
+
     def test_coherence_projection_falls_back_when_spatial_index_fails(self):
         from gui.widgets.coherence_view_model import AnalyzerPoint
         from gui.widgets import coherence_projection
@@ -5605,6 +6026,18 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
                 refresh_map.assert_not_called()
                 prewarm_tree.assert_not_called()
 
+                window.model = mock.Mock()
+                with mock.patch.object(window.view_controller, "frontload_library_view") as frontload_view, \
+                     mock.patch.object(window.operation_monitor, "start", return_value=41) as start_monitor, \
+                     mock.patch.object(window.operation_monitor, "update"), \
+                     mock.patch.object(window.operation_monitor, "finish"):
+                    window.set_library_view_available("tree", True)
+                    app.processEvents()
+
+                start_monitor.assert_called_once_with("Preparing Tree View", compact=True)
+                frontload_view.assert_called_once_with("tree")
+
+                window.set_library_view_available("tree", False)
                 window.set_library_view_available("table", False)
                 self.assertTrue(window.library_tab.is_view_available("table"))
                 self.assertTrue(window.custom_menu_bar.library_view_actions["table"].isChecked())

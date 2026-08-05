@@ -25,6 +25,7 @@ from ..utils.styles import (
 from ..utils.layout_helpers import apply_layout_margins, apply_layout_spacing
 from ..widgets.delegates.compare_tree_delegate import CompareTreeDelegate
 from unshuffle.core import get_pack_prefix
+from unshuffle.core.prefixes import common_filename_tokens_by_pack
 
 
 MAX_COMPARE_FILES_PER_FOLDER = 120
@@ -69,6 +70,10 @@ class BuildPage(QWidget):
         self.settings = settings
         source_records = records or []
         self.total_record_count = len(source_records)
+        common_tokens = getattr(source_records, "common_filename_tokens_by_pack", None)
+        self._pack_common_filename_tokens = (
+            common_tokens() if callable(common_tokens) else common_filename_tokens_by_pack(source_records)
+        )
         if isinstance(source_records, (list, tuple)):
             self.records = list(source_records)
         else:
@@ -164,15 +169,23 @@ class BuildPage(QWidget):
         self.check_move = QCheckBox("Move files (instead of copy)")
         self.check_flat = QCheckBox("Flat structure (ignore category folders)")
         self.check_no_px = QCheckBox("No Prefix (strip pack information from filenames)")
+        self.check_skip_duplicates = QCheckBox("Skip Confirmed Duplicates")
         self.check_move.setChecked(self.settings.value("exec_move", False, type=bool))
         self.check_flat.setChecked(self.settings.value("exec_flat", False, type=bool))
         self.check_no_px.setChecked(self.settings.value("exec_no_px", False, type=bool))
+        self.check_skip_duplicates.setChecked(
+            self.settings.value("exec_skip_confirmed_duplicates", True, type=bool)
+        )
+        self.check_skip_duplicates.setToolTip(
+            "Exclude confirmed duplicate source files from this build."
+        )
         self.check_move.toggled.connect(self._refresh_summary_footers)
         self.check_flat.toggled.connect(self._on_flat_toggled)
         self.check_no_px.toggled.connect(lambda: self._refresh_compare_views(refresh_before=False))
         checks_row.addWidget(self.check_move)
         checks_row.addWidget(self.check_flat)
         checks_row.addWidget(self.check_no_px)
+        checks_row.addWidget(self.check_skip_duplicates)
         
         checks_row.addStretch()
         
@@ -293,6 +306,10 @@ class BuildPage(QWidget):
             return
         self.settings.setValue("last_target", target)
         self.settings.setValue("exec_move", self.check_move.isChecked())
+        self.settings.setValue(
+            "exec_skip_confirmed_duplicates",
+            self.check_skip_duplicates.isChecked(),
+        )
         if self._active_tree_profile is None:
             self.settings.setValue("exec_flat", self.check_flat.isChecked())
             self.settings.setValue("exec_no_px", self.check_no_px.isChecked())
@@ -304,6 +321,7 @@ class BuildPage(QWidget):
             "move": self.check_move.isChecked(),
             "flat": self.check_flat.isChecked(),
             "no_px": self.check_no_px.isChecked(),
+            "skip_confirmed_duplicates": self.check_skip_duplicates.isChecked(),
         }
 
     def _build_before_panel(self):
@@ -541,6 +559,7 @@ class BuildPage(QWidget):
             {},
             active_tree_profile=self._active_tree_profile,
             records=records or self.records,
+            common_pack_tokens=self._pack_common_filename_tokens,
         )
         return resolution.relative_path
 
@@ -582,7 +601,12 @@ class BuildPage(QWidget):
             return source_name
         pack = str(getattr(rec, "pack", "") or "")
         category = str(getattr(rec, "category", "") or "")
-        prefix = get_pack_prefix(pack, category, audio_type)
+        prefix = get_pack_prefix(
+            pack,
+            category,
+            audio_type,
+            self._pack_common_filename_tokens.get(pack.casefold()),
+        )
         return f"{prefix}_{source_name}" if prefix else source_name
 
     def _resolve_preserved_destination_root(self, preserved_root: Path) -> Path:
@@ -619,7 +643,12 @@ class BuildPage(QWidget):
         pack = str(getattr(rec, "pack", "") or "")
         category = str(getattr(rec, "category", "") or "")
         audio_type = str(getattr(rec, "audio_type", "") or "")
-        prefix = get_pack_prefix(pack, category, audio_type)
+        prefix = get_pack_prefix(
+            pack,
+            category,
+            audio_type,
+            self._pack_common_filename_tokens.get(pack.casefold()),
+        )
         return f"{prefix}_{rec.source_path.name}" if prefix else rec.source_path.name
 
     @staticmethod

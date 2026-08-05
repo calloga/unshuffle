@@ -111,7 +111,7 @@ class TestModels(unittest.TestCase):
 
         self.assertTrue(shadow["is_shadow"])
         self.assertEqual(shadow["duplicate_of_hash"], "hash-canonical")
-        self.assertEqual(shadow["duplicate_of_path"], "Source\\canonical.wav")
+        self.assertEqual(shadow["duplicate_of_path"], str(Path("Source/canonical.wav")))
 
         loaded = plan_record_from_staging_row(
             {

@@ -57,6 +57,49 @@ class WorkflowController(QObject):
         self.undo_stack = undo_stack
         self.app = parent
         self._pending_finalize_options = {}
+        self._detached_build_db = None
+        self.worker_manager.error.connect(lambda _message: self._close_detached_build_db())
+
+    def _close_detached_build_db(self) -> None:
+        database = self._detached_build_db
+        self._detached_build_db = None
+        if database is not None:
+            try:
+                database.close()
+            except Exception:
+                logging.debug("Could not close detached build database.", exc_info=True)
+
+    def _build_record_source(self, records, *, include_duplicate_shadows: bool = False):
+        """Return a build stream backed by a live DB handle.
+
+        A restored model may outlive the engine that originally owned its database.
+        Build workers run later, so they need an independent handle rather than that
+        engine-owned connection.
+        """
+        store = getattr(records, "store", None)
+        if store is None:
+            if include_duplicate_shadows:
+                return records
+            return buildable_records(records)
+
+        from unshuffle.persistence import UnshuffleDB
+        from .staging_session_store import BuildableDbRecordSequence, StagingSessionStore
+
+        database = getattr(store, "db", None)
+        db_path = getattr(database, "db_path", None)
+        if db_path is None:
+            if include_duplicate_shadows:
+                return records
+            return buildable_records(records)
+
+        self._close_detached_build_db()
+        detached_db = UnshuffleDB(Path(db_path))
+        detached_store = StagingSessionStore(detached_db, str(store.session_id))
+        self._detached_build_db = detached_db
+        return BuildableDbRecordSequence(
+            detached_store,
+            include_duplicate_shadows=include_duplicate_shadows,
+        )
 
     def _emit_restore_finished(self, restored: bool) -> None:
         if not _qt_object_alive(self):
@@ -134,6 +177,29 @@ class WorkflowController(QObject):
     def _parent_widget(self) -> QWidget | None:
         return self.app if isinstance(self.app, QWidget) else None
 
+    def _ensure_live_session_model(self) -> bool:
+        """Rebind a DB-backed model whose owning engine closed its database."""
+        app = self.app
+        model = getattr(app, "model", None)
+        store = getattr(model, "store", None)
+        if store is None:
+            return True
+        try:
+            store.conn.execute("SELECT 1").fetchone()
+            return True
+        except RuntimeError:
+            pass
+
+        current_records = getattr(app, "current_records", None)
+        if not callable(current_records):
+            return False
+        try:
+            current_records()
+            return True
+        except Exception:
+            logging.exception("Failed to rebind the active session after its database was closed.")
+            return False
+
     def start_scan(
         self,
         sources: list[str] | list[Path],
@@ -158,7 +224,7 @@ class WorkflowController(QObject):
             return False
         self.clear_build_handover_state()
         if getattr(self.app, "tagging_controller", None):
-            self.app.tagging_controller.clear_state()
+            self.app.tagging_controller.clear_state(refresh_filter_state=False)
         workflow_scan_finalization.clear_corrupt_filter_state(self.app)
         if getattr(self.app, "coherence_controller", None):
             self.app.coherence_controller.clear_state()
@@ -166,6 +232,10 @@ class WorkflowController(QObject):
         if not append or not self._engine:
             if not append and getattr(self.app, "tree_organization_controller", None):
                 self.app.tree_organization_controller.disable_profile(refresh=False)
+            if not append:
+                self._ensure_live_session_model()
+            if not append and getattr(self.app, "search_controller", None):
+                self.app.search_controller.clear_query_state(sync_ui=True)
             if self._engine:
                 try:
                     self._engine.close()
@@ -311,7 +381,16 @@ class WorkflowController(QObject):
         if stats:
             show_scan_summary_dialog(self._parent_widget(), stats)
 
-    def start_commit(self, records, target_dir, move=True, flat=False, no_px=False, display_context: dict | None = None):
+    def start_commit(
+        self,
+        records,
+        target_dir,
+        move=True,
+        flat=False,
+        no_px=False,
+        skip_confirmed_duplicates=True,
+        display_context: dict | None = None,
+    ):
         if not self._engine:
             return
 
@@ -340,6 +419,12 @@ class WorkflowController(QObject):
             return
         self.clear_build_handover_state()
 
+        skip_confirmed_duplicates = bool(skip_confirmed_duplicates)
+        records = self._build_record_source(
+            records,
+            include_duplicate_shadows=not skip_confirmed_duplicates,
+        )
+
         if str(self._engine.target_dir) != str(resolved_target):
             self._engine.target_dir = resolved_target
             self._engine._init_db_and_hashes()
@@ -349,13 +434,15 @@ class WorkflowController(QObject):
             "move": bool(move),
             "flat": bool(flat),
             "no_px": bool(no_px),
+            "skip_confirmed_duplicates": skip_confirmed_duplicates,
         }
         if display_context:
             self._last_build_options.update(display_context)
-        records = buildable_records(records)
         stats = getattr(self, "_last_scan_stats", {}) or {}
         self._pending_build_skipped_duplicates = {
-            "shadow_duplicates": int(stats.get("total_dupe_count") or 0),
+            "shadow_duplicates": (
+                int(stats.get("total_dupe_count") or 0) if skip_confirmed_duplicates else 0
+            ),
             "skipped_session_duplicates": int(stats.get("session_dupe_count") or 0),
             "skipped_library_duplicates": int(stats.get("lib_dupe_count") or 0),
         }
@@ -364,8 +451,16 @@ class WorkflowController(QObject):
         if preview_player is not None and hasattr(preview_player, "release"):
             preview_player.release()
         self._start_operation_monitor("Building Library", cancellable=True)
-        started = self.worker_manager.start_commit(records, move, False, flat, no_px)
+        started = self.worker_manager.start_commit(
+            records,
+            move,
+            False,
+            flat,
+            no_px,
+            skip_confirmed_duplicates,
+        )
         if not started:
+            self._close_detached_build_db()
             self._fail_operation_monitor("Could not start build.")
         return started
 
@@ -565,6 +660,8 @@ class WorkflowController(QObject):
                 if hasattr(self.app.footer, "show_scan_summary_button"):
                     self.app.footer.show_scan_summary_button()
             self._finish_operation_monitor("Scan complete.")
+            if hasattr(self.app, "check_for_updates"):
+                QTimer.singleShot(1000, self.app.check_for_updates)
             if callable(on_ready):
                 on_ready()
 
@@ -688,6 +785,7 @@ class WorkflowController(QObject):
 
     def handle_commit_finished(self, res):
         from PySide6.QtWidgets import QMessageBox
+        self._close_detached_build_db()
         if isinstance(res, dict):
             skipped = getattr(self, "_pending_build_skipped_duplicates", None) or {}
             workflow_build_completion.merge_pending_skipped_duplicates(res, skipped)
@@ -746,6 +844,9 @@ class WorkflowController(QObject):
                         move=bool(opts.get("move", True)),
                         flat=bool(opts.get("flat", False)),
                         no_px=bool(opts.get("no_px", False)),
+                        skip_confirmed_duplicates=bool(
+                            opts.get("skip_confirmed_duplicates", True)
+                        ),
                         display_context=retry_context,
                     )
             else:
@@ -762,6 +863,11 @@ class WorkflowController(QObject):
         session_id = str(res.get("session_id") or getattr(self._engine, "session_id", "") or "")
         committed_count = int(res.get("copied", 0) or 0) + int(res.get("duplicates", 0) or 0)
         if committed_count > 0 and session_id:
+            logging.info(
+                "Canceled build committed %d item(s); starting automatic rollback for session %s.",
+                committed_count,
+                session_id,
+            )
             self._cancelled_build_rollback = {
                 "session_id": session_id,
                 "summary": "\n".join(summary_lines),
@@ -844,6 +950,8 @@ class WorkflowController(QObject):
             return res
 
         error = res.get("error") if isinstance(res, dict) else None
+        if not error:
+            self._ensure_live_session_model()
         self._finish_operation_monitor("Undo needs attention." if error else "Undo complete.")
         rollback = getattr(self, "_cancelled_build_rollback", None)
         rollback_matches = workflow_undo_completion.rollback_matches_result(rollback, res)

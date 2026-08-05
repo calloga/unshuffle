@@ -1,7 +1,6 @@
 from PySide6.QtCore import QTimer
 import logging
 import os
-from html import escape
 from pathlib import Path
 
 from PySide6.QtGui import QAction
@@ -14,6 +13,7 @@ from ...utils.history import (
     resolve_history_target,
     reset_learning_weights,
 )
+from .navigation import is_current_workspace
 
 
 def _normalized_path(path: str) -> str:
@@ -33,8 +33,9 @@ def _history_target(app) -> str:
 def refresh_history_menu(app):
     app.custom_menu_bar.menu_history.clear()
 
-    app.custom_menu_bar.menu_history.addAction(app.custom_menu_bar.act_open_history)
-    app.custom_menu_bar.menu_history.addSeparator()
+    if not is_current_workspace(app, "history"):
+        app.custom_menu_bar.menu_history.addAction(app.custom_menu_bar.act_open_history)
+        app.custom_menu_bar.menu_history.addSeparator()
 
     tgt = _history_target(app)
     if not tgt:
@@ -81,11 +82,10 @@ def confirm_undo(app, sess):
     if str(sess.get("history_state") or "").lower() == "undone":
         QMessageBox.information(app, "Undo Unavailable", "This migration has already been undone.")
         return
-    mode = sess.get("mode", "move").upper()
-    src = sess.get("source_path", "Unknown")
-    tgt = sess.get("target_root", "Unknown")
-    count = sess.get("file_count", 0)
-    ts = sess.get("timestamp", "")
+    mode = str(sess.get("mode") or "move").strip().lower()
+    src = str(sess.get("source_path") or "Unknown")
+    tgt = str(sess.get("target_root") or "Unknown")
+    count = int(sess.get("file_count") or 0)
     selected_target = _history_target(app)
     if _normalized_path(str(tgt)) != _normalized_path(str(selected_target)):
         QMessageBox.warning(
@@ -95,21 +95,30 @@ def confirm_undo(app, sess):
         )
         return
 
-    warn_msg = (
-        "<h3>Confirm Session Revert</h3>"
-        f"<p><b>Action:</b> {escape(str(mode))}<br>"
-        f"<b>Date:</b> {escape(str(ts))}<br>"
-        f"<b>Files:</b> {escape(str(count))}</p>"
-        "<p>Are you sure you want to REVERT this migration?</p>"
-        f"<p><b>Session:</b> {escape(str(sid))}<br>"
-        f"<b>Mode:</b> {escape(str(mode))}<br>"
-        f"<b>Source:</b> {escape(str(src))}<br>"
-        f"<b>Target:</b> {escape(str(tgt))}</p>"
-        "<p>All moved/copied files will be returned to their original locations.</p>"
-    )
-    if QMessageBox.warning(app, "Confirm Undo", warn_msg, QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+    is_copy = mode == "copy"
+    action_label = "Undo Copy" if is_copy else "Undo Move"
+    dialog = QMessageBox(app)
+    dialog.setIcon(QMessageBox.Warning)
+    dialog.setWindowTitle(action_label)
+    if is_copy:
+        dialog.setText(f"Delete {count:,} copied file{'s' if count != 1 else ''} from the target?")
+        dialog.setInformativeText(
+            f"Target:\n{tgt}\n\n"
+            f"Original files in {src} will not be changed."
+        )
+    else:
+        dialog.setText(f"Move {count:,} file{'s' if count != 1 else ''} back to the source?")
+        dialog.setInformativeText(
+            f"From:\n{tgt}\n\n"
+            f"Back to:\n{src}"
+        )
+    undo_button = dialog.addButton(action_label, QMessageBox.AcceptRole)
+    cancel_button = dialog.addButton("Cancel", QMessageBox.RejectRole)
+    dialog.setDefaultButton(cancel_button)
+    dialog.exec()
+    if dialog.clickedButton() is undo_button:
         invalidate_history_cache(_history_target(app), sid)
-        app.worker_manager.start_undo(sid)
+        app.workflow_controller.start_undo(sid)
 
 
 def reset_learning(app):

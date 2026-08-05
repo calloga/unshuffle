@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer, Qt
@@ -221,6 +222,7 @@ class OperationMonitorDialog(QDialog):
         self._progress_animation.start()
 
     def _on_cancel(self) -> None:
+        logging.info("Operation monitor Cancel clicked for %s.", self.windowTitle() or "operation")
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.setText("Stopping")
         if self._cancel_handler is not None:

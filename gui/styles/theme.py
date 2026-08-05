@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QFontInfo
 from PySide6.QtWidgets import QApplication
 
 from .qss import build_main_style
@@ -99,6 +99,14 @@ class ThemeManager:
         out = QFont(base_font)
         if out.pointSizeF() > 0:
             out.setPointSizeF(out.pointSizeF() * factor)
-        elif out.pointSize() > 0:
-            out.setPointSize(round(out.pointSize() * factor))
+            return out
+        if out.pixelSize() > 0:
+            out.setPixelSize(max(1, round(out.pixelSize() * factor)))
+            return out
+
+        resolved = QFontInfo(out)
+        if resolved.pointSizeF() > 0:
+            out.setPointSizeF(resolved.pointSizeF() * factor)
+        elif resolved.pixelSize() > 0:
+            out.setPixelSize(max(1, round(resolved.pixelSize() * factor)))
         return out

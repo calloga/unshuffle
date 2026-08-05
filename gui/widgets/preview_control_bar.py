@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QLabel, QSlider, QWidget, QApplication
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSlider, QApplication, QSizePolicy, QWidget
 from PySide6.QtCore import Qt, QSize, Signal, QPoint, QMimeData, QUrl
 from PySide6.QtGui import QIcon, QPixmap, QDrag
 from pathlib import Path
@@ -36,6 +36,7 @@ class DragOutIconButton(AnimatedIconButton):
         super().__init__(DRAGOUT_ICON, QSize(18, 18), parent)
         self.player = player
         self._press_pos: QPoint | None = None
+        self.selected_path: Path | None = None
         self.setToolTip("Drag current sample out")
 
     def mousePressEvent(self, event):
@@ -61,7 +62,7 @@ class DragOutIconButton(AnimatedIconButton):
         super().mouseReleaseEvent(event)
 
     def start_export_drag(self) -> bool:
-        path = getattr(self.player, "current_path", None)
+        path = self.selected_path or getattr(self.player, "current_path", None)
         if not path:
             return False
         source_path = Path(path)
@@ -93,6 +94,8 @@ class PreviewControlBar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         apply_fixed_height(self, scaled_px(self.TARGET_HEIGHT))
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         apply_style(self, preview_bar_style())
         
         layout = QHBoxLayout(self)
@@ -102,10 +105,28 @@ class PreviewControlBar(QFrame):
 
         from gui.core.audio_player import SoundPreviewPlayer
         self.player = SoundPreviewPlayer.instance()
+        self._selected_path: Path | None = None
+        self._seeking = False
+
+        self.lbl_filename = ElidingLabel("")
+        self.lbl_filename.setMinimumWidth(0)
+        self.lbl_filename.setMaximumWidth(scaled_px(220))
+        self.lbl_filename.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+
+        self.seek_slider = QSlider(Qt.Horizontal)
+        self.seek_slider.setObjectName("PreviewSeekSlider")
+        self.seek_slider.setRange(0, 0)
+        self.seek_slider.setEnabled(False)
+        self.seek_slider.setMinimumWidth(0)
+        self.seek_slider.setMaximumWidth(scaled_px(440))
+        self.seek_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.seek_slider.sliderPressed.connect(self._begin_seek)
+        self.seek_slider.sliderReleased.connect(self._finish_seek)
+        self.seek_slider.sliderMoved.connect(self._preview_seek)
 
         self.btn_play_pause = AnimatedIconButton(PLAY_ICON, QSize(18, 18))
         self.btn_play_pause.setToolTip("Play/Pause (Space)")
-        self.btn_play_pause.clicked.connect(lambda checked=False: self.player.toggle_play_pause())
+        self.btn_play_pause.clicked.connect(lambda checked=False: self._toggle_selected())
 
         self.btn_stop = AnimatedIconButton(STOP_ICON, QSize(16, 16))
         self.btn_stop.setToolTip("Stop (Esc)")
@@ -115,12 +136,18 @@ class PreviewControlBar(QFrame):
 
         self.btn_mute = AnimatedIconButton(VOLUME_ICON, QSize(18, 18))
         self.btn_mute.setToolTip("Mute/Unmute")
+        self.btn_mute.clicked.connect(lambda checked=False: self.player.toggle_muted())
 
+        layout.addWidget(self.lbl_filename, 0, Qt.AlignVCenter)
+        layout.addWidget(self.seek_slider, 1, Qt.AlignVCenter)
+        self.transport_spacer = QWidget()
+        self.transport_spacer.setMinimumWidth(0)
+        self.transport_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(self.transport_spacer, 1)
+        self._layout = layout
         layout.addWidget(self.btn_play_pause, 0, Qt.AlignVCenter)
         layout.addWidget(self.btn_stop, 0, Qt.AlignVCenter)
         layout.addWidget(self.btn_dragout, 0, Qt.AlignVCenter)
-        layout.addStretch()
-        
         from . import ModernKnob
         self.vol_slider = ModernKnob()
         self.vol_slider.setSymmetric(False)
@@ -136,6 +163,44 @@ class PreviewControlBar(QFrame):
         self.player.positionChanged.connect(self._update_time)
         self.player.durationChanged.connect(self._update_duration)
         self.player.volumeChanged.connect(lambda v: self.vol_slider.setValue(int(v * 100)))
+        self.player.finished.connect(lambda: self.seek_slider.setValue(self.seek_slider.maximum()))
+        self.set_selected_path(None)
+
+    def set_selected_path(self, path) -> None:
+        selected = Path(path) if path else None
+        self._selected_path = selected
+        self.btn_dragout.selected_path = selected
+        available = selected is not None and selected.exists()
+        self.lbl_filename.setText(selected.name if available else "")
+        self.lbl_filename.setToolTip(str(selected) if available else "")
+        self.lbl_filename.setVisible(available)
+        self.seek_slider.setVisible(available)
+        self.transport_spacer.setVisible(True)
+        for button in (self.btn_play_pause, self.btn_stop, self.btn_dragout, self.btn_mute):
+            button.setEnabled(available)
+        self.seek_slider.setEnabled(available and self.player.current_path == selected)
+        if not available:
+            self.seek_slider.setRange(0, 0)
+            self.seek_slider.setValue(0)
+
+    def _toggle_selected(self) -> None:
+        if self._selected_path is None:
+            return
+        if self.player.current_path != self._selected_path:
+            self.player.play(self._selected_path)
+            return
+        self.player.toggle_play_pause()
+
+    def _begin_seek(self) -> None:
+        self._seeking = True
+
+    def _preview_seek(self, position: int) -> None:
+        if self._seeking:
+            self.player.set_position(position)
+
+    def _finish_seek(self) -> None:
+        self.player.set_position(self.seek_slider.value())
+        self._seeking = False
 
     def _update_play_pause_icon(self, state):
         """Swap icons depending on playback state."""
@@ -150,12 +215,13 @@ class PreviewControlBar(QFrame):
             self.btn_play_pause.setIcon(QIcon(str(PLAY_ICON)))
 
     def _update_time(self, pos):
-        """Update playback position tracking (no UI label)."""
-        pass
+        if not self._seeking:
+            self.seek_slider.setValue(max(0, int(pos or 0)))
 
     def _update_duration(self, dur):
-        """Update duration tracking (no UI label)."""
-        pass
+        duration = max(0, int(dur or 0))
+        self.seek_slider.setRange(0, duration)
+        self.seek_slider.setEnabled(bool(duration and self._selected_path))
 
     def _format_ms(self, ms: int) -> str:
         """Format milliseconds as M:SS."""

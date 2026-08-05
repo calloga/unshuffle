@@ -1,7 +1,7 @@
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .search_engine import SearchEngine
-from ..utils.constants import TREE_SKIP_FIELD_PREFIXES
+from ..utils.constants import SEARCH_PREFIX_MAP, TREE_SKIP_FIELD_PREFIXES
 
 
 CONFIDENCE_PREFIXES = {"conf", "confidence"}
@@ -9,6 +9,24 @@ CONFIDENCE_PREFIXES = {"conf", "confidence"}
 
 def format_query_groups(groups: list[list[str]]) -> str:
     return " OR ".join(" AND ".join(terms) for terms in groups if terms)
+
+
+def combine_filter_queries(current: str, query: str, mode: str) -> str:
+    current_groups = SearchEngine.parse_query_groups(current)
+    query_groups = SearchEngine.parse_query_groups(query)
+    if not current_groups:
+        return format_query_groups(query_groups)
+    if not query_groups:
+        return format_query_groups(current_groups)
+    if mode == "or":
+        return format_query_groups([*current_groups, *query_groups])
+    if mode == "and":
+        return format_query_groups([
+            [*current_group, *query_group]
+            for current_group in current_groups
+            for query_group in query_groups
+        ])
+    return format_query_groups(query_groups)
 
 
 def query_contains_token(current: str, query: str) -> bool:
@@ -42,6 +60,46 @@ def remove_filter_query(current: str, query: str) -> str:
         if terms:
             rebuilt_groups.append(terms)
     return format_query_groups(rebuilt_groups)
+
+
+def field_filter_values(query: str, prefix: str) -> list[str]:
+    canonical_prefix = SEARCH_PREFIX_MAP.get(str(prefix or "").strip().lower(), str(prefix or "").strip().lower())
+    values = []
+    for group in SearchEngine.parse_query_groups(query):
+        for term in group:
+            field = SearchEngine._split_field_term(term)
+            if not field:
+                continue
+            term_prefix, value = field
+            if SEARCH_PREFIX_MAP.get(term_prefix, term_prefix) != canonical_prefix:
+                continue
+            normalized = value.strip().strip('"')
+            if normalized and normalized not in values:
+                values.append(normalized)
+    return values
+
+
+def replace_field_filter(query: str, prefix: str, value: str | None) -> str:
+    canonical_prefix = SEARCH_PREFIX_MAP.get(str(prefix or "").strip().lower(), str(prefix or "").strip().lower())
+    rebuilt_groups: list[list[str]] = []
+    for group in SearchEngine.parse_query_groups(query):
+        terms = []
+        for term in group:
+            field = SearchEngine._split_field_term(term)
+            if field and SEARCH_PREFIX_MAP.get(field[0], field[0]) == canonical_prefix:
+                continue
+            terms.append(term)
+        if terms:
+            rebuilt_groups.append(terms)
+
+    selected = str(value or "").strip()
+    if not selected:
+        return format_query_groups(rebuilt_groups)
+
+    token = f'{prefix}:"{selected}"'
+    if not rebuilt_groups:
+        return token
+    return format_query_groups([[*group, token] for group in rebuilt_groups])
 
 
 def active_saved_filter_queries_for_search(query_text: str, saved_filters: list[dict]) -> set[str]:
@@ -163,4 +221,8 @@ def source_filter_query(path: Path) -> str:
 
 
 def normalize_source_path_key(path: Path | str) -> str:
-    return Path(path).resolve().as_posix().lower()
+    raw = str(path)
+    windows_path = PureWindowsPath(raw)
+    if windows_path.is_absolute():
+        return windows_path.as_posix().lower()
+    return Path(raw).resolve().as_posix().lower()

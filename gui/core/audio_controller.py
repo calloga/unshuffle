@@ -42,6 +42,22 @@ class AudioController(QObject):
             resolved = resolved.source_path
         self.play_path(resolved)
 
+    def handle_selection(self, target, model, proxy_model) -> None:
+        resolved = self._resolve_play_record(target, model, proxy_model)
+        path = None
+        if hasattr(resolved, "source_path"):
+            if str(getattr(resolved, "audio_type", "") or "") not in {"Non-Audio Assets", "Utility"}:
+                path = Path(resolved.source_path)
+        elif isinstance(resolved, Path):
+            path = resolved
+        set_selected_path = getattr(self.audio_bar, "set_selected_path", None)
+        if path is None or path.suffix.lower() not in AUDIO_EXTS:
+            if callable(set_selected_path):
+                set_selected_path(None)
+            return
+        if callable(set_selected_path):
+            set_selected_path(path)
+
     def __init__(self, audio_bar, parent=None):
         super().__init__(parent)
         self.audio_bar = audio_bar 
@@ -74,6 +90,9 @@ class AudioController(QObject):
         if file_path.suffix.lower() not in AUDIO_EXTS:
             self.statusRequested.emit("Preview unavailable for non-audio assets.")
             return
+        set_selected_path = getattr(self.audio_bar, "set_selected_path", None)
+        if callable(set_selected_path):
+            set_selected_path(file_path)
         self._collapse_timer.stop()
         if self.player.is_playing() and self.player.current_path == file_path:
             self.player.stop()
