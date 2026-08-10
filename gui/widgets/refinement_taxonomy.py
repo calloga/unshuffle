@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QRect
 from PySide6.QtGui import QColor, QPainter
 
-from gui.styles import CATEGORY_IDENTITY_MAP
+from gui.styles import category_identity_role
 from unshuffle.core.constants import SUB_TAXONOMY_MAP
 from gui.utils.styles import (
     ColorPalette,
@@ -14,7 +14,7 @@ from gui.utils.styles import (
 
 
 def _lane_for_category(category: str) -> int | None:
-    role = CATEGORY_IDENTITY_MAP.get(category, "identity.neutral")
+    role = category_identity_role(category)
     if role == "identity.neutral":
         return None
     try:

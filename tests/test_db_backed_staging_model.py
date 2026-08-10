@@ -10,6 +10,7 @@ from PySide6.QtGui import QStandardItem
 
 from gui.core import workflow_model_cleanup
 from gui.core.staging_session_store import StagingQuery, StagingRowsUpdateCanceled, StagingSessionStore
+from gui.core.tree_filter_options import EffectiveTaxonomyContext, custom_tree_filter_options
 from gui.core.acoustic_session_state import AcousticSessionState
 from gui.models.db_staging_table import DbBackedStagingTableModel
 from gui.models.library_tree import (
@@ -1010,6 +1011,46 @@ def test_db_backed_tree_applies_nested_custom_profile(tmp_path):
         db.close()
 
 
+def test_db_backed_tree_prefers_nested_custom_bucket_over_broad_root_bucket(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    _app = QApplication.instance() or QApplication([])
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        possible_duplicate = list(_row(0, category="Bass", audio_type="Loops"))
+        possible_duplicate[7] = "possibleduplicate"
+        db.add_staging_records_bulk("session", [tuple(possible_duplicate)])
+        profile = TreeOrganizationProfile(
+            "profile",
+            "Custom",
+            "root",
+            [
+                TreeOrganizationNode("root", None, "Root", None, "system", 0, True),
+                TreeOrganizationNode("loops", "root", "Loops", 'type:"Loops"', "system", 1, True),
+                TreeOrganizationNode(
+                    "loop_dupes", "loops", "Loop Dupes", 'tag:"possibleduplicate"', "custom", 1, True
+                ),
+                TreeOrganizationNode(
+                    "all_dupes", "root", "All Dupes", 'tag:"possibleduplicate"', "custom", 2, True
+                ),
+            ],
+            "now",
+            "now",
+        )
+        tree = LibraryTreeModel()
+        tree.set_custom_tree_profile(profile)
+        tree.rebuild_from_store(StagingSessionStore(db, "session"))
+
+        root = tree.invisibleRootItem()
+        assert root.child(0, 0).data(RAW_NAME_ROLE) == "Loops"
+        loops = root.child(0, 0)
+        tree.populate_index(tree.indexFromItem(loops))
+        assert loops.child(0, 0).data(RAW_NAME_ROLE) == "Loop Dupes"
+    finally:
+        db.close()
+
+
 def test_custom_tree_projection_table_is_available_without_rescan(tmp_path):
     db = UnshuffleDB(tmp_path / "test.db")
     try:
@@ -1018,6 +1059,121 @@ def test_custom_tree_projection_table_is_available_without_rescan(tmp_path):
             for row in db.conn.execute("PRAGMA table_info(custom_tree_memberships)")
         }
         assert {"session_id", "profile_id", "projection_signature", "route_key", "row_id"} <= columns
+    finally:
+        db.close()
+
+
+def test_effective_custom_category_is_exclusive_in_table_options_and_search(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        duplicate = list(_row(0, category="Bass", audio_type="Loops"))
+        duplicate[7] = "possibleduplicate"
+        ordinary = list(_row(1, category="Bass", audio_type="Loops"))
+        ordinary[1] = "D:/Samples/Pack/ordinary.wav"
+        ordinary[2] = "ordinary.wav"
+        db.add_staging_records_bulk("session", [tuple(duplicate), tuple(ordinary)])
+        profile = TreeOrganizationProfile(
+            "profile",
+            "Custom",
+            "root",
+            [
+                TreeOrganizationNode("root", None, "Root", None, "system", 0, True),
+                TreeOrganizationNode("loops", "root", "Loops", 'type:"Loops"', "system", 1, True),
+                TreeOrganizationNode(
+                    "dupes", "loops", "Dupes", 'tag:"possibleduplicate"', "custom", 1, True
+                ),
+            ],
+            "now",
+            "now",
+        )
+        store = StagingSessionStore(db, "session")
+        levels = [("audio_type", "type"), ("category", "category"), ("subcategory", "subcategory")]
+        signature = store.ensure_custom_tree_projection(profile, levels)
+        options = custom_tree_filter_options(profile, store.custom_tree_node_counts(profile.id, signature))
+        context = EffectiveTaxonomyContext(profile.id, signature, tuple(options))
+        model = DbBackedStagingTableModel(store)
+        model.set_effective_taxonomy_context(context)
+        duplicate_row = model._row_positions[0]
+        ordinary_row = model._row_positions[1]
+
+        assert model.data(model.index(duplicate_row, StagingColumn.CATEGORY), Qt.DisplayRole) == "Dupes - Bass"
+        assert model.data(model.index(duplicate_row, StagingColumn.CATEGORY), Qt.EditRole) == "Bass"
+        assert model.data(model.index(ordinary_row, StagingColumn.CATEGORY), Qt.DisplayRole) == "Bass"
+
+        category_options = model.taxonomy_options_for_index(
+            model.index(duplicate_row, StagingColumn.CATEGORY),
+            StagingColumn.CATEGORY,
+        )
+        assert ("Dupes - Bass", "Bass") in category_options
+        assert ("Bass", "Bass") not in category_options
+
+        assert store.effective_taxonomy_match_ids("category", "Dupes-Bass", context) == {0}
+        assert store.effective_taxonomy_match_ids("category", "Dupes", context) == set()
+        assert store.effective_taxonomy_match_ids("category", "Bass", context) == {1}
+
+        counts = store.effective_taxonomy_group_counts(context)
+        by_category = {row["category"]: row["count"] for row in counts}
+        assert by_category == {"Dupes - Bass": 1, "Bass": 1}
+
+        model.sort(StagingColumn.CATEGORY, Qt.AscendingOrder)
+        assert [
+            model.data(model.index(row, StagingColumn.CATEGORY), Qt.DisplayRole)
+            for row in range(model.rowCount())
+        ] == ["Bass", "Dupes - Bass"]
+
+        model.set_column_filters(StagingColumn.CATEGORY, {"Dupes - Bass"})
+        assert model.rowCount() == 1
+        assert model.data(model.index(0, StagingColumn.CATEGORY), Qt.DisplayRole) == "Dupes - Bass"
+        model.set_column_filters(StagingColumn.CATEGORY, {"Bass"})
+        assert model.rowCount() == 1
+        assert model.data(model.index(0, StagingColumn.CATEGORY), Qt.DisplayRole) == "Bass"
+    finally:
+        db.close()
+
+
+def test_effective_custom_subcategory_reconciles_other_exclusively(tmp_path):
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        picked = list(_row(0, category="Bass", audio_type="Oneshots"))
+        picked[7] = "picked"
+        db.add_staging_records_bulk("session", [tuple(picked)])
+        profile = TreeOrganizationProfile(
+            "profile",
+            "Custom",
+            "root",
+            [
+                TreeOrganizationNode("root", None, "Root", None, "system", 0, True),
+                TreeOrganizationNode("oneshots", "root", "Oneshots", 'type:"Oneshots"', "system", 1, True),
+                TreeOrganizationNode("bass", "oneshots", "Bass", 'category:"Bass"', "system", 1, True),
+                TreeOrganizationNode("picked", "bass", "Picked", 'tag:"picked"', "custom", 1, True),
+            ],
+            "now",
+            "now",
+        )
+        store = StagingSessionStore(db, "session")
+        levels = [("audio_type", "type"), ("category", "category"), ("subcategory", "subcategory")]
+        signature = store.ensure_custom_tree_projection(profile, levels)
+        context = EffectiveTaxonomyContext(
+            profile.id,
+            signature,
+            tuple(custom_tree_filter_options(profile, store.custom_tree_node_counts(profile.id, signature))),
+        )
+        model = DbBackedStagingTableModel(store)
+        model.set_effective_taxonomy_context(context)
+        row = model._row_positions[0]
+
+        assert model.data(model.index(row, StagingColumn.SUBCATEGORY), Qt.DisplayRole) == "Picked - Other"
+        assert model.data(model.index(row, StagingColumn.SUBCATEGORY), Qt.EditRole) in {None, ""}
+        options = model.taxonomy_options_for_index(
+            model.index(row, StagingColumn.SUBCATEGORY),
+            StagingColumn.SUBCATEGORY,
+        )
+        assert ("Picked - Other", "") in options
+        assert ("Other", "") not in options
+        assert store.effective_taxonomy_match_ids("subcategory", "Picked-Other", context) == {0}
+        assert store.effective_taxonomy_match_ids("subcategory", "Other", context) == set()
     finally:
         db.close()
 

@@ -296,6 +296,9 @@ class SimilarityEngine:
         options = {
             "capture_output": True,
             "text": True,
+            # The extractor's JSON protocol is always UTF-8. Relying on the
+            # process locale corrupts non-ASCII paths in frozen Windows apps.
+            "encoding": "utf-8",
         }
         if os.name == "nt":
             startupinfo = subprocess.STARTUPINFO()
@@ -567,6 +570,10 @@ class SimilarityEngine:
             )
             return self._fallback_individual_payloads(pending, results)
 
+        pending_by_path = {
+            os.path.normcase(os.path.normpath(str(file_path))): file_path
+            for file_path in pending
+        }
         seen: set[Path] = set()
         retry_paths: set[Path] = set()
         try:
@@ -577,9 +584,9 @@ class SimilarityEngine:
                 path_text = row.get("path")
                 if not isinstance(path_text, str):
                     raise ValueError("batch row missing path")
-                file_path = Path(path_text)
-                if file_path not in pending:
-                    file_path = next((candidate for candidate in pending if str(candidate) == path_text), file_path)
+                file_path = pending_by_path.get(os.path.normcase(os.path.normpath(path_text)))
+                if file_path is None:
+                    raise ValueError(f"batch row path was not requested: {path_text!r}")
                 seen.add(file_path)
                 if row.get("ok"):
                     payload_data = row.get("payload")

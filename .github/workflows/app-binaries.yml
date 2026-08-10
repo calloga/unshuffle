@@ -109,7 +109,7 @@ jobs:
       - name: Build Windows installer
         if: matrix.platform == 'windows'
         shell: pwsh
-        run: ./scripts/build_windows_installer.ps1 -AppVersion "1.0.2"
+        run: ./scripts/build_windows_installer.ps1 -AppVersion "1.1.0"
 
       - name: Build macOS installer package
         if: matrix.platform == 'macos'
@@ -117,14 +117,14 @@ jobs:
 
       - name: Build Linux deb package
         if: matrix.platform == 'linux'
-        run: python scripts/build_linux_deb.py --version "1.0.2"
+        run: python scripts/build_linux_deb.py --version "1.1.0"
 
       - name: Build Linux AppImage
         if: matrix.platform == 'linux'
         run: |
           wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O bin/linux/appimagetool-x86_64.AppImage
           chmod +x bin/linux/appimagetool-x86_64.AppImage
-          python scripts/build_linux_appimage.py --version "1.0.2"
+          python scripts/build_linux_appimage.py --version "1.1.0"
 
       - name: Upload installable artifact
         uses: actions/upload-artifact@v4

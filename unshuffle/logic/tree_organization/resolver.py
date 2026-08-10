@@ -70,9 +70,22 @@ class TreeOrganizationResolver:
             if fallback_count > 1:
                 issues.append(ProfileValidationIssue("Only one enabled fallback node is allowed per parent.", (parent_id,)))
             segment_owners: dict[str, TreeOrganizationNode] = {}
+            filter_owners: dict[tuple[tuple[str, ...], ...], TreeOrganizationNode] = {}
             for node in siblings:
                 if not node.enabled:
                     continue
+                if node.node_type == "custom" and node.filter_query:
+                    signature = self._normalized_filter_signature(node.filter_query)
+                    existing_filter = filter_owners.get(signature)
+                    if existing_filter is not None:
+                        issues.append(
+                            ProfileValidationIssue(
+                                f'"{existing_filter.name}" and "{node.name}" use the same sibling filter.',
+                                (existing_filter.id, node.id),
+                            )
+                        )
+                    else:
+                        filter_owners[signature] = node
                 segment = compiled.safe_segments.get(node.id, "")
                 if not segment:
                     continue
@@ -231,9 +244,12 @@ class TreeOrganizationResolver:
         inherited_fields: dict[str, str] | None = None,
         compiled: _CompiledProfile | None = None,
     ) -> bool:
+        inherited_fields = inherited_fields or {}
+        if node.node_type == "custom" and self._matches_manual_destination(record, node, inherited_fields):
+            return True
         if not node.filter_query:
             return True
-        inherited = set((inherited_fields or {}).keys())
+        inherited = set(inherited_fields.keys())
         groups = compiled.query_groups.get(node.id, ()) if compiled is not None else tuple(parse_query_groups(node.filter_query))
         if not groups:
             return True
@@ -242,6 +258,16 @@ class TreeOrganizationResolver:
             if all(self.evaluator._matches_term(record, term) for term in active_terms):
                 return True
         return False
+
+    @staticmethod
+    def _matches_manual_destination(record, node: TreeOrganizationNode, inherited_fields: dict[str, str]) -> bool:
+        if "category" in inherited_fields and "subcategory" not in inherited_fields:
+            value = getattr(record, "subcategory", "")
+        elif "audio_type" in inherited_fields and "category" not in inherited_fields:
+            value = getattr(record, "category", "")
+        else:
+            return False
+        return str(value or "").strip().casefold() == str(node.name or "").strip().casefold()
 
     def _merged_semantic_fields(
         self,
@@ -299,6 +325,29 @@ class TreeOrganizationResolver:
         if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
             return value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
         return value
+
+    @classmethod
+    def _normalized_filter_signature(cls, query: str) -> tuple[tuple[str, ...], ...]:
+        aliases = {
+            "cat": "category",
+            "sub": "subcategory",
+            "subcat": "subcategory",
+            "packname": "pack",
+            "tags": "tag",
+        }
+        groups = []
+        for group in parse_query_groups(query or ""):
+            terms = []
+            for term in group:
+                split = split_field_term(term)
+                if split:
+                    prefix, value = split
+                    prefix = aliases.get(prefix.casefold(), prefix.casefold())
+                    terms.append(f"{prefix}:{cls._strip_quotes(value).strip().casefold()}")
+                else:
+                    terms.append(term.strip().casefold())
+            groups.append(tuple(sorted(terms)))
+        return tuple(sorted(groups))
 
     @staticmethod
     def _children_by_parent(nodes: list[TreeOrganizationNode]) -> dict[str, list[TreeOrganizationNode]]:

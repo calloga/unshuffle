@@ -10,6 +10,7 @@ SEARCH_PREFIX_MAP = {
     "cat": "category",
     "category": "category",
     "sub": "subcategory",
+    "subcat": "subcategory",
     "subcategory": "subcategory",
     "pack": "pack",
     "packname": "pack",

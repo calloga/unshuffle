@@ -48,7 +48,7 @@ TREE_SKIP_FIELD_PREFIXES = {
 # This should be the single source of truth for the SearchEngine
 SEARCH_PREFIX_MAP = {
     "cat": "category", "category": "category",
-    "sub": "subcategory", "subcategory": "subcategory",
+    "sub": "subcategory", "subcat": "subcategory", "subcategory": "subcategory",
     "pack": "pack", "packname": "pack",
     "name": "sample_name", "file": "sample_name", "filename": "sample_name",
     "tag": "tags", "tags": "tags",
@@ -183,8 +183,8 @@ SECTION_INNER_SPACING = 8
 
 # Vibe anchor bar geometry
 VIBE_ANCHOR_BAR_HEIGHT = 85
-VIBE_ANCHOR_LAYOUT_MARGINS = (10, 5, 10, 8)
-VIBE_ANCHOR_LAYOUT_SPACING = 4
+VIBE_ANCHOR_LAYOUT_MARGINS = (10, 2, 10, 12)
+VIBE_ANCHOR_LAYOUT_SPACING = 2
 VIBE_ANCHOR_CLOSE_ICON_SIZE = 18
 VIBE_ANCHOR_SIM_ICON_SIZE = 16
 VIBE_ANCHOR_KNOB_SIZE = 45

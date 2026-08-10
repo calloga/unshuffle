@@ -13,7 +13,7 @@ def test_cli_version_reports_v1_release(capsys):
             cli.main()
 
     assert exc_info.value.code == 0
-    assert "1.0.2" in capsys.readouterr().out
+    assert "1.1.0" in capsys.readouterr().out
 
 
 def _base_args(**overrides):

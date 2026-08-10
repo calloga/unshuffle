@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import json
 import time
+from copy import copy
 from pathlib import Path
 from typing import Any, Callable, cast
 
@@ -16,11 +17,16 @@ from gui.core.staging_session_store import (
     StagingQuery,
     StagingSessionStore,
 )
+from gui.core.tree_filter_options import (
+    EffectiveTaxonomyContext,
+    effective_taxonomy_label,
+)
 from gui.models.staging_table import StagingTableModel
 from gui.utils.constants import DRAFT_IS_PRESERVED_FIELD, DRAFT_PRESERVED_ROOT_FIELD, STAGING_HEADERS, StagingColumn
 from gui.utils.styles import ColorPalette, make_qcolor
 from unshuffle.core import PlanRecord, plan_record_from_staging_row, parse_tags
 from unshuffle.core.constants import SUB_TAXONOMY_MAP
+from unshuffle.logic.tree_organization.filter_evaluator import FilterEvaluator
 
 
 class DbBackedStagingTableModel(QAbstractTableModel):
@@ -56,6 +62,9 @@ class DbBackedStagingTableModel(QAbstractTableModel):
         self._record_cache = LruRecordCache(self.MAX_HYDRATED_ROWS)
         self._duplicate_shadow_ids = self.store.duplicate_shadow_row_ids()
         self._unique_values_cache: dict[int, list[str]] = {}
+        self._effective_taxonomy_context: EffectiveTaxonomyContext | None = None
+        self._effective_taxonomy_cache: dict[int, dict[str, str]] = {}
+        self._effective_column_filter_ids: dict[int, set[int]] = {}
         self._matched_ids: set[int] | None = None
         self.matched_ids: set[int] | None = None
         self.audio_types: set[str] | None = None
@@ -78,8 +87,11 @@ class DbBackedStagingTableModel(QAbstractTableModel):
 
     @property
     def query(self) -> StagingQuery:
+        matched_ids = set(self.matched_ids) if self.matched_ids is not None else None
+        for allowed_ids in self._effective_column_filter_ids.values():
+            matched_ids = set(allowed_ids) if matched_ids is None else matched_ids & allowed_ids
         return StagingQuery(
-            matched_ids=frozenset(self.matched_ids) if self.matched_ids is not None else None,
+            matched_ids=frozenset(matched_ids) if matched_ids is not None else None,
             audio_types=frozenset(self.audio_types) if self.audio_types is not None else None,
             show_non_audio_assets=self.show_non_audio_assets,
             show_duplicates=self.show_duplicates,
@@ -114,6 +126,7 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             self.query,
             self.group_column,
             descending=self.sort_order == Qt.DescendingOrder,
+            effective_taxonomy=self._effective_taxonomy_context,
         )
         self.beginResetModel()
         try:
@@ -158,9 +171,78 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             record = self.store.record_by_row_id(row_id)
             if record is None:
                 raise IndexError(row)
+            self._cache_effective_taxonomy([row_id])
             self._record_cache.put_many({row_id: record})
             return record
         return cached
+
+    def set_effective_taxonomy_context(self, context: EffectiveTaxonomyContext | None) -> None:
+        if context == self._effective_taxonomy_context:
+            return
+        self._effective_taxonomy_context = context
+        self._effective_taxonomy_cache.clear()
+        self._effective_column_filter_ids.clear()
+        self._unique_values_cache.clear()
+        if self.rowCount():
+            self.dataChanged.emit(
+                self.index(0, StagingColumn.CATEGORY),
+                self.index(self.rowCount() - 1, StagingColumn.SUBCATEGORY),
+            )
+
+    def _cache_effective_taxonomy(self, row_ids: list[int]) -> None:
+        context = self._effective_taxonomy_context
+        missing = [row_id for row_id in row_ids if row_id not in self._effective_taxonomy_cache]
+        if context is None or not missing:
+            return
+        overlays = self.store.effective_taxonomy_for_ids(missing, context)
+        for row_id in missing:
+            self._effective_taxonomy_cache[row_id] = overlays.get(row_id, {})
+
+    def effective_taxonomy_value(self, row: int, placement: str) -> str:
+        rec = self.record(row)
+        row_id = self.record_id(row)
+        self._cache_effective_taxonomy([row_id])
+        overlay = self._effective_taxonomy_cache.get(row_id, {}).get(placement, "")
+        canonical = rec.category if placement == "category" else (rec.subcategory or "")
+        if placement == "subcategory" and overlay:
+            canonical = canonical or "Other"
+        return effective_taxonomy_label(overlay, canonical)
+
+    def taxonomy_options_for_index(self, index: QModelIndex, column: StagingColumn) -> list[tuple[str, str]]:
+        rec = self.record(index.row())
+        context = self._effective_taxonomy_context
+        if column == StagingColumn.CATEGORY:
+            canonical_values = set(self.store.distinct_values(StagingColumn.CATEGORY))
+            canonical_values.update(self.sub_taxonomy_map)
+        else:
+            canonical_values = {
+                value
+                for value in self.sub_taxonomy_map.get(rec.category, {}).values()
+                if value and value != "no-sub"
+            }
+            canonical_values.update(self.store.distinct_subcategories(rec.category))
+            canonical_values.add("")
+        options = list(context.options_for("category" if column == StagingColumn.CATEGORY else "subcategory")) if context else []
+        evaluator = FilterEvaluator()
+        result: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for canonical in sorted(canonical_values, key=lambda value: (not bool(value), str(value).casefold())):
+            candidate = copy(rec)
+            if column == StagingColumn.CATEGORY:
+                candidate.category = str(canonical)
+                if candidate.category != rec.category:
+                    candidate.subcategory = None
+            else:
+                candidate.subcategory = str(canonical) or None
+            overlay = next((option.label for option in options if evaluator.matches(candidate, option.query)), "")
+            display_canonical = str(canonical) or "Other"
+            label = effective_taxonomy_label(overlay, display_canonical)
+            key = label.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append((label, str(canonical)))
+        return result
 
     def records_for_rows(self, rows) -> list[PlanRecord]:
         """Hydrate a group of logical rows with one batched store read."""
@@ -181,6 +263,7 @@ class DbBackedStagingTableModel(QAbstractTableModel):
                 if db_row.get("row_id") is not None
             }
             records_by_id.update(hydrated)
+            self._cache_effective_taxonomy(list(hydrated))
             self._record_cache.put_many(hydrated)
         return [records_by_id[row_id] for row_id in row_ids if row_id in records_by_id]
 
@@ -194,6 +277,7 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             for db_row in rows
             if db_row.get("row_id") is not None
         }
+        self._cache_effective_taxonomy(list(records))
         self._record_cache.put_many(records)
 
     def prewarm_initial_window(self) -> None:
@@ -213,7 +297,21 @@ class DbBackedStagingTableModel(QAbstractTableModel):
         cached = self._unique_values_cache.get(column)
         if cached is not None:
             return list(cached)
-        values = self.store.distinct_values(column)
+        if self._effective_taxonomy_context is not None and column in {
+            StagingColumn.CATEGORY,
+            StagingColumn.SUBCATEGORY,
+        }:
+            field = "category" if column == StagingColumn.CATEGORY else "subcategory"
+            values = sorted(
+                {
+                    str(row.get(field) or "")
+                    for row in self.store.effective_taxonomy_group_counts(self._effective_taxonomy_context)
+                    if str(row.get(field) or "")
+                },
+                key=str.casefold,
+            )
+        else:
+            values = self.store.distinct_values(column)
         self._unique_values_cache[column] = values
         return list(values)
 
@@ -244,7 +342,7 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             if col == StagingColumn.FILENAME:
                 return rec.source_path.name
             if col == StagingColumn.CATEGORY:
-                return rec.category
+                return self.effective_taxonomy_value(index.row(), "category")
             if col == StagingColumn.TAGS:
                 return rec.tags
             if col == StagingColumn.CONFIDENCE:
@@ -260,7 +358,8 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             if col == StagingColumn.TYPE:
                 return rec.audio_type
             if col == StagingColumn.SUBCATEGORY:
-                return self._normalized_subcategory(getattr(rec, "subcategory", ""))
+                effective = self.effective_taxonomy_value(index.row(), "subcategory")
+                return effective if effective else self._normalized_subcategory(getattr(rec, "subcategory", ""))
         if role == Qt.EditRole:
             return self._get_record_value(rec, col)
         if role == Qt.UserRole:
@@ -491,6 +590,28 @@ class DbBackedStagingTableModel(QAbstractTableModel):
         self.refresh_index()
 
     def set_column_filters(self, col: int, values: set | None):
+        if self._effective_taxonomy_context is not None and col in {
+            StagingColumn.CATEGORY,
+            StagingColumn.SUBCATEGORY,
+        }:
+            self.column_filters.pop(int(col), None)
+            if values:
+                placement = "category" if col == StagingColumn.CATEGORY else "subcategory"
+                matched: set[int] = set()
+                for value in values:
+                    matched.update(
+                        self.store.effective_taxonomy_match_ids(
+                            placement,
+                            str(value),
+                            self._effective_taxonomy_context,
+                        )
+                    )
+                self._effective_column_filter_ids[int(col)] = matched
+            else:
+                self._effective_column_filter_ids.pop(int(col), None)
+            self.refresh_index()
+            return
+        self._effective_column_filter_ids.pop(int(col), None)
         if values:
             self.column_filters[int(col)] = {str(value) for value in values}
         else:

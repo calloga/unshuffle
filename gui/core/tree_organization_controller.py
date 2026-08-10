@@ -225,11 +225,31 @@ class TreeOrganizationController(QObject):
             if inner is not None:
                 setattr(inner, "active_tree_profile", profile)
         if getattr(self.app, "library_tab", None):
-            from gui.core.tree_filter_options import custom_tree_filter_options
+            from gui.core.tree_filter_options import EffectiveTaxonomyContext, custom_tree_filter_options
 
+            node_counts = None
+            signature = ""
+            store = getattr(self.app, "session_store", None)
+            if profile is not None and store is not None:
+                try:
+                    signature = self._profile_projection_signature(profile)
+                    if store.has_custom_tree_projection(profile.id, signature):
+                        node_counts = store.custom_tree_node_counts(profile.id, signature)
+                except (RuntimeError, ValueError):
+                    node_counts = None
+            options = custom_tree_filter_options(profile, node_counts)
+            context = None
+            if profile is not None and store is not None and node_counts is not None:
+                context = EffectiveTaxonomyContext(profile.id, signature, tuple(options))
+            model = getattr(self.app, "model", None)
+            if model is not None and hasattr(model, "set_effective_taxonomy_context"):
+                model.set_effective_taxonomy_context(context)
             self.app.library_tab.tree_model.set_custom_tree_profile(profile)
             if hasattr(self.app.library_tab, "set_custom_tree_filter_options"):
-                self.app.library_tab.set_custom_tree_filter_options(custom_tree_filter_options(profile))
+                self.app.library_tab.set_custom_tree_filter_options(options)
+            if store is not None and hasattr(self.app.library_tab, "set_taxonomy_availability"):
+                self.app.library_tab.set_taxonomy_availability(store.effective_taxonomy_group_counts(context))
+                self.app.library_tab.refresh_search_suggestions()
             self.app.library_tab.set_tree_organization_state(bool(profile), profile.name if profile else "")
             self._sync_profile_options()
         if refresh and getattr(self.app, "view_controller", None):

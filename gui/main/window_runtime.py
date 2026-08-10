@@ -59,12 +59,24 @@ def apply_runtime_model(window, model) -> None:
             proxy_model.set_show_duplicates(settings_controller.get_show_duplicates())
     window.search_controller.model = model
     window.acoustic_controller.model = model
+    store = getattr(model, "store", None) if model is not None else None
+    if store is not None and getattr(window, "library_tab", None) is not None:
+        context = getattr(model, "_effective_taxonomy_context", None)
+        taxonomy_rows = store.effective_taxonomy_group_counts(context)
+        window.library_tab.set_taxonomy_availability(taxonomy_rows)
+        if getattr(window, "dock_view", None) is not None:
+            window.dock_view.set_category_options(
+                [(label, value) for label, value in window.library_tab._category_options_for_type_state(False, False, True) if isinstance(value, str)]
+            )
     if getattr(window, "tagging_controller", None):
         window.tagging_controller.clear_state()
     if getattr(window, "coherence_controller", None):
         window.coherence_controller.clear_state()
     if model is not None and hasattr(window, "_reset_page_history"):
         window._reset_page_history()
+    tree_controller = getattr(window, "tree_organization_controller", None)
+    if model is not None and tree_controller is not None:
+        tree_controller._sync_active_profile(refresh=False)
     maybe_refresh_library_map(window)
     maybe_schedule_startup_coherence(window)
 

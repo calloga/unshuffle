@@ -1,10 +1,11 @@
 from gui.utils.styles import ColorPalette, apply_style, combo_style, make_qcolor
+from typing import cast
 from PySide6.QtWidgets import QComboBox, QLineEdit, QListView, QStyledItemDelegate, QStyle
 from PySide6.QtCore import Qt, QRect, QTimer
 from PySide6.QtGui import QColor, QPainter
 from unshuffle.core.constants import CATEGORIES, SUB_TAXONOMY_MAP
 from gui.utils.constants import LIB_TAB_COLUMN_MIN_WIDTH, StagingColumn
-from gui.styles import CATEGORY_IDENTITY_MAP
+from gui.styles import category_identity_role
 from gui.utils.styles import identity_lane_color, scaled_px
 from .table_editors import mark_table_editor
 
@@ -37,6 +38,36 @@ class ComboDelegate(QStyledItemDelegate):
     * Column SUBCATEGORY – Sub-category picker scoped to the row category
     """
 
+    def __init__(self, parent=None, *, taxonomy_options_provider=None):
+        super().__init__(parent)
+        self.taxonomy_options_provider = taxonomy_options_provider
+
+    def _taxonomy_options(self, column: StagingColumn, category: str = "") -> list[tuple[str, str]]:
+        if callable(self.taxonomy_options_provider):
+            options = self.taxonomy_options_provider(column, category)
+            if options is not None:
+                return list(cast(list[tuple[str, str]], options))
+        if column == StagingColumn.CATEGORY:
+            return [(cat, cat) for cat in CATEGORIES]
+        values = sorted(
+            {
+                sub
+                for sub in SUB_TAXONOMY_MAP.get(category, {}).values()
+                if sub and sub != "no-sub"
+            }
+        )
+        return [(value, value) for value in values]
+
+    @staticmethod
+    def _model_taxonomy_options(index, column: StagingColumn) -> list[tuple[str, str]] | None:
+        provider = getattr(index.model(), "taxonomy_options_for_index", None)
+        if not callable(provider):
+            return None
+        result = provider(index, column)
+        if not isinstance(result, (list, tuple)):
+            return None
+        return list(cast(list[tuple[str, str]], result))
+
     def _is_selected(self, option, index) -> bool:
         if option.state & QStyle.State_Selected:
             return True
@@ -61,21 +92,18 @@ class ComboDelegate(QStyledItemDelegate):
                 else:
                     cb.addItem(index.data(Qt.DisplayRole), index.data(Qt.DisplayRole))
             elif col == StagingColumn.CATEGORY:
-                for cat in CATEGORIES:
-                    cb.addItem(cat, cat)
+                options = self._model_taxonomy_options(index, StagingColumn.CATEGORY)
+                if options is None:
+                    options = self._taxonomy_options(StagingColumn.CATEGORY)
+                for label, value in options:
+                    cb.addItem(label, value)
             elif col == StagingColumn.SUBCATEGORY:
                 category = str(index.siblingAtColumn(StagingColumn.CATEGORY).data(Qt.DisplayRole) or "").strip()
-                cb.addItem("", "")
-                if category in SUB_TAXONOMY_MAP:
-                    subs = sorted(
-                        {
-                            sub
-                            for sub in SUB_TAXONOMY_MAP[category].values()
-                            if sub and sub != "no-sub"
-                        }
-                    )
-                    for sub in subs:
-                        cb.addItem(sub, sub)
+                options = self._model_taxonomy_options(index, StagingColumn.SUBCATEGORY)
+                if options is None:
+                    options = [("Other", ""), *self._taxonomy_options(StagingColumn.SUBCATEGORY, category)]
+                for label, value in options:
+                    cb.addItem(label, value)
             QTimer.singleShot(0, cb.showPopup)
             return cb
         editor = super().createEditor(parent, option, index)
@@ -171,7 +199,7 @@ class ComboDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _lane_for_category(self, category: str) -> int | None:
-        role = CATEGORY_IDENTITY_MAP.get(category, "identity.neutral")
+        role = category_identity_role(category)
         if role == "identity.neutral":
             return None
         try:

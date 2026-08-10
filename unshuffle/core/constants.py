@@ -8,7 +8,7 @@ from .config import _CONFIG
 from .patterns import BPM_REGEX_PATTERN, KEY_REGEX_PATTERN
 
 APP_NAME = "Unshuffle"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.1.0"
 Version = APP_VERSION
 
 AUDIO_EXTS = {".wav", ".mp3", ".aif", ".aiff", ".flac", ".ogg", ".m4a"}

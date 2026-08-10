@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0 - 2026-08-10
+
+- Add fast segmented hashing with full-hash collision confirmation for substantially faster large-library scans.
+- Add duplicate shadow records, confirmed-duplicate build skipping, and in-place promotion when source folders are removed.
+- Add batched audio extraction and consistent progress monitoring for scans, builds, undo, and library-layout operations.
+- Move large sessions to DB-backed table, tree, and sound-map views with bounded hydration, lazy loading, and prewarmed view caches.
+- Expand custom library structures with filter-backed nodes, semantic drag-and-drop reclassification, and faster draft application and discard.
+- Improve library navigation, saved duplicate filters, audio preview controls, themes, update notifications, and cross-platform packaging.
+- Fix session restore, rescan, build, undo, database lifecycle, and target-cleanup regressions.
+
 ## 1.0.2 - 2026-06-22
 
 - Fix play/pause icon swap logic in `AnimatedIconButton` by checking and rendering dynamic icons set via `setIcon()`.

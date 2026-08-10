@@ -40,7 +40,7 @@ class DiagnosticsTests(unittest.TestCase):
              mock.patch("subprocess.run", return_value=completed):
             report = get_version_report()
 
-        self.assertEqual(report["app_version"], "1.0.2")
+        self.assertEqual(report["app_version"], "1.1.0")
         self.assertEqual(report["native_available"], "yes")
         self.assertEqual(report["native_version"], "unshuffle_extractor 2.0.0")
 

@@ -343,6 +343,8 @@ class ViewController(QObject):
                 self.schedule_tree_rebuild(delay_ms=0)
             if self._view_available("map"):
                 self.prewarm_docked_map(delay_ms=0)
+            if hasattr(self.app.dock_view, "sync_transport_state"):
+                self.app.dock_view.sync_transport_state()
         else:
             self.app.setWindowFlags((self.app.windowFlags() & ~Qt.WindowStaysOnTopHint) | Qt.WindowCloseButtonHint)
             self.app.stack.setCurrentWidget(self.app.library_tab)
@@ -368,6 +370,8 @@ class ViewController(QObject):
             
         if not getattr(self.app, "_defer_window_show", False):
             self.app.show()
+        if checked and hasattr(self.app.dock_view, "sync_transport_state"):
+            QTimer.singleShot(0, self.app.dock_view.sync_transport_state)
         if hasattr(self.app, "_apply_native_window_theme"):
             self.app._apply_native_window_theme()
         self.dockedChanged.emit(checked)
@@ -492,6 +496,22 @@ class ViewController(QObject):
 
     def update_library_views(self, tree_delay_ms=100):
         self.update_footer_count()
+
+        store = getattr(self.app, "session_store", None)
+        library_tab = getattr(self.app, "library_tab", None)
+        if store is not None and library_tab is not None and hasattr(library_tab, "set_taxonomy_availability"):
+            context = getattr(getattr(self.app, "model", None), "_effective_taxonomy_context", None)
+            taxonomy_rows = store.effective_taxonomy_group_counts(context)
+            library_tab.set_taxonomy_availability(taxonomy_rows)
+            dock_view = getattr(self.app, "dock_view", None)
+            if dock_view is not None and hasattr(dock_view, "set_category_options"):
+                dock_view.set_category_options(
+                    [
+                        (label, value)
+                        for label, value in library_tab._category_options_for_type_state(False, False, True)
+                        if isinstance(value, str)
+                    ]
+                )
 
         if self._view_available("table"):
             self.app.library_tab.view_table.viewport().update()

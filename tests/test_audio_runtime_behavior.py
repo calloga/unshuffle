@@ -67,6 +67,7 @@ def test_windows_feature_extraction_hides_subprocess_window(tmp_path: Path, monk
         assert engine.extract_feature_payload(sample) is not None
 
     kwargs = run.call_args.kwargs
+    assert kwargs["encoding"] == "utf-8"
     assert kwargs["creationflags"] & 0x08000000
     assert kwargs["startupinfo"].dwFlags & 1
     assert kwargs["startupinfo"].wShowWindow == 0
@@ -106,6 +107,54 @@ def test_bulk_feature_extraction_parses_jsonl_success_and_failure(tmp_path: Path
     assert result[bad] is None
     assert engine.extraction_failure_tag(bad) == "Empty"
     assert engine.extraction_failure_message(bad) == "File is empty"
+
+
+def test_bulk_feature_extraction_preserves_unicode_paths(tmp_path: Path):
+    extractor = tmp_path / "extractor.exe"
+    extractor.write_text("fake", encoding="utf-8")
+    sample = tmp_path / "Sénégal Afro Mbalax" / "Kits mbalax (26).wav"
+    sample.parent.mkdir()
+    sample.write_bytes(b"audio")
+    engine = SimilarityEngine(extractor_path=str(extractor))
+    row = {
+        "path": str(sample),
+        "ok": True,
+        "payload": {
+            "vector": [0.1] * FEATURE_VECTOR_SIZE,
+            "feature_schema": list(CURRENT_FEATURE_SCHEMA),
+        },
+    }
+    completed = mock.Mock(returncode=0, stdout=json.dumps(row, ensure_ascii=False), stderr="")
+
+    with mock.patch.object(engine, "_run_batch_extractor", return_value=completed):
+        result = engine.extract_feature_payloads_bulk([sample])
+
+    assert set(result) == {sample}
+    assert result[sample] is not None
+
+
+def test_bulk_feature_extraction_retries_unrecognized_output_path(tmp_path: Path):
+    extractor = tmp_path / "extractor.exe"
+    extractor.write_text("fake", encoding="utf-8")
+    sample = tmp_path / "Sénégal" / "sample.wav"
+    sample.parent.mkdir()
+    sample.write_bytes(b"audio")
+    engine = SimilarityEngine(extractor_path=str(extractor))
+    row = {
+        "path": str(sample).replace("Sénégal", "SÃ©nÃ©gal"),
+        "ok": True,
+        "payload": {"vector": [0.1] * FEATURE_VECTOR_SIZE},
+    }
+    completed = mock.Mock(returncode=0, stdout=json.dumps(row), stderr="")
+    fallback_payload = mock.Mock(spec=object)
+
+    with mock.patch.object(engine, "_run_batch_extractor", return_value=completed), \
+         mock.patch.object(engine, "extract_feature_payload", return_value=fallback_payload) as fallback:
+        result = engine.extract_feature_payloads_bulk([sample])
+
+    fallback.assert_called_once_with(sample)
+    assert set(result) == {sample}
+    assert result[sample] is fallback_payload
 
 
 def test_bulk_feature_extraction_retries_decode_failures_but_not_terminal_rejections(tmp_path: Path):

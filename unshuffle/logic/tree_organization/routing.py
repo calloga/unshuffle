@@ -240,18 +240,33 @@ class TreeRouteBuilder:
         while True:
             enabled_children = compiled.enabled_children.get(current.id, ())
             custom = self._matching_custom_children(record, current.id, enabled_children, compiled, semantic_fields)
-            if len(custom) > 1:
-                raise ValueError("Custom sibling overlap must be resolved before routing.")
-            next_node = custom[0] if custom else None
-            if next_node is None:
-                system = [
+            system = [
+                node
+                for node in enabled_children
+                if node.node_type == "system"
+                and node.id != profile.root_node_id
+                and self._matches(record, node, compiled, semantic_fields)
+            ]
+            specific_system = next(
+                (
                     node
-                    for node in enabled_children
-                    if node.node_type == "system"
-                    and node.id != profile.root_node_id
-                    and self._matches(record, node, compiled, semantic_fields)
-                ]
-                next_node = system[0] if system else None
+                    for node in system
+                    if self._matching_custom_below(
+                        record,
+                        node,
+                        compiled,
+                        self._merged_semantic_fields(semantic_fields, node, compiled),
+                        set(),
+                    )
+                ),
+                None,
+            )
+            if specific_system is not None:
+                next_node = specific_system
+            else:
+                if len(custom) > 1:
+                    raise ValueError("Custom sibling overlap must be resolved before routing.")
+                next_node = custom[0] if custom else (system[0] if system else None)
             if next_node is None:
                 fallbacks = [node for node in enabled_children if node.node_type == "fallback"]
                 next_node = fallbacks[0] if fallbacks else None
@@ -283,6 +298,28 @@ class TreeRouteBuilder:
             current = next_node
         return parts
 
+    def _matching_custom_below(
+        self,
+        record,
+        node: TreeOrganizationNode,
+        compiled: CompiledTreeProfile,
+        inherited_fields: dict[str, str],
+        visited: set[str],
+    ) -> bool:
+        if node.id in visited:
+            return False
+        visited = {*visited, node.id}
+        children = compiled.enabled_children.get(node.id, ())
+        if self._matching_custom_children(record, node.id, children, compiled, inherited_fields):
+            return True
+        for child in children:
+            if child.node_type != "system" or not self._matches(record, child, compiled, inherited_fields):
+                continue
+            child_fields = self._merged_semantic_fields(inherited_fields, child, compiled)
+            if self._matching_custom_below(record, child, compiled, child_fields, visited):
+                return True
+        return False
+
     def _matching_custom_children(
         self,
         record,
@@ -293,6 +330,15 @@ class TreeRouteBuilder:
     ) -> list[TreeOrganizationNode]:
         if not enabled_children:
             return []
+
+        manually_routed = [
+            node
+            for node in enabled_children
+            if node.node_type == "custom"
+            and self._matches_manual_destination(record, node, inherited_fields)
+        ]
+        if manually_routed:
+            return manually_routed
 
         candidate_ids: set[str] = set()
         indexed = compiled.custom_child_index.get(parent_id, {})
@@ -338,6 +384,16 @@ class TreeRouteBuilder:
             elif self._matches(record, node, compiled, inherited_fields):
                 ordered.append(node)
         return ordered
+
+    @staticmethod
+    def _matches_manual_destination(record, node: TreeOrganizationNode, inherited_fields: dict[str, str]) -> bool:
+        if "category" in inherited_fields and "subcategory" not in inherited_fields:
+            field_name = "subcategory"
+        elif "audio_type" in inherited_fields and "category" not in inherited_fields:
+            field_name = "category"
+        else:
+            return False
+        return record_display_value(record, field_name).casefold() == str(node.name or "").strip().casefold()
 
     @staticmethod
     def _matches_exact_fields(record, exact_fields: dict[str, str], inherited_fields: dict[str, str]) -> bool:

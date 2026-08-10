@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unshuffle"
-version = "1.0.2"
+version = "1.1.0"
 description = "Producer-first sample-library staging and migration tool."
 readme = "README.md"
 requires-python = ">=3.11"
