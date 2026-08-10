@@ -111,7 +111,7 @@ Locking:
 
 ## Documentation Map
 
-- [User manual](www.calloga.com/#umu/unshuffles)
+- [User manual](https://www.calloga.com/#umu/unshuffle)
 - [Contributing Guide](CONTRIBUTING.md)
 - [Security Policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)

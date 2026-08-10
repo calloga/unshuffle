@@ -255,6 +255,25 @@ class DockView(QWidget):
         for button in (self.btn_preview_play, self.btn_preview_stop, self.btn_preview_export):
             button.setEnabled(available)
 
+    def sync_transport_state(self) -> None:
+        current_path = getattr(self._preview_player, "current_path", None)
+        path = Path(current_path) if current_path else self._selected_audio_path()
+        available = bool(path and path.exists())
+        self.btn_preview_export.selected_path = path if available else None
+        for button in (self.btn_preview_play, self.btn_preview_stop, self.btn_preview_export):
+            button.setEnabled(available)
+            button.updateGeometry()
+        self._update_docked_play_icon(self._preview_player.get_state())
+        self.main_layout.invalidate()
+        self.main_layout.activate()
+        self.scroll_content.adjustSize()
+        self.scroll_content.updateGeometry()
+
+    def set_category_options(self, options: list[tuple[str, str]]) -> None:
+        active = set(self.category_carousel.active_values or set())
+        self.category_carousel.set_options(options)
+        self.category_carousel.set_active_values(active & {value for _label, value in options})
+
     def _toggle_docked_playback(self) -> None:
         path = self._selected_audio_path()
         if path is None:

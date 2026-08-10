@@ -835,6 +835,43 @@ class DelegateCharacterizationTests(unittest.TestCase):
         self.assertFalse(editor.hasFrame())
         self.assertEqual(editor.geometry(), QRect(10, 20, 119, 25))
 
+    def test_subcategory_delegate_labels_empty_value_as_other(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication, QComboBox, QWidget
+        from gui.widgets.delegates.combo_delegate import ComboDelegate
+
+        _app = QApplication.instance() or QApplication([])
+        delegate = ComboDelegate()
+        option = QStyleOptionViewItem()
+        parent = QWidget()
+        category_index = mock.Mock()
+        category_index.data.return_value = "Percussion"
+        index = mock.Mock()
+        index.column.return_value = StagingColumn.SUBCATEGORY
+        index.siblingAtColumn.return_value = category_index
+
+        editor = delegate.createEditor(parent, option, index)
+
+        self.assertIsInstance(editor, QComboBox)
+        self.assertEqual(editor.itemText(0), "Other")
+        self.assertEqual(editor.itemData(0), "")
+
+    def test_taxonomy_pill_composite_inherits_canonical_category_lane(self):
+        from gui.widgets.delegates.combo_delegate import ComboDelegate
+
+        delegate = ComboDelegate()
+
+        self.assertEqual(delegate._lane_for_category("Dupes - Bass"), delegate._lane_for_category("Bass"))
+        self.assertEqual(
+            delegate._lane_for_category("Dupes - Hats & Cymbals"),
+            delegate._lane_for_category("Hats & Cymbals"),
+        )
+
+    def test_unknown_taxonomy_pill_remains_neutral(self):
+        from gui.widgets.delegates.combo_delegate import ComboDelegate
+
+        self.assertIsNone(ComboDelegate()._lane_for_category("Entirely Custom"))
+
     def test_tag_delegate_editor_uses_table_cell_style(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication, QWidget

@@ -22,6 +22,11 @@ from unshuffle.logic.tree_organization import (
     semantic_profile_for_record_batches,
 )
 from gui.utils.constants import StagingColumn
+from gui.core.tree_filter_options import (
+    EffectiveTaxonomyContext,
+    effective_taxonomy_label,
+    normalize_effective_taxonomy_label,
+)
 
 
 DB_TABLE_COLUMNS = {
@@ -163,7 +168,19 @@ class StagingSessionStore:
         sort_column: int | StagingColumn | None = None,
         *,
         descending: bool = False,
+        effective_taxonomy: EffectiveTaxonomyContext | None = None,
     ) -> list[int]:
+        try:
+            taxonomy_sort = StagingColumn(sort_column) in {StagingColumn.CATEGORY, StagingColumn.SUBCATEGORY}
+        except (TypeError, ValueError):
+            taxonomy_sort = False
+        if effective_taxonomy is not None and taxonomy_sort:
+            return self._effective_taxonomy_sorted_row_ids(
+                query,
+                StagingColumn(sort_column),
+                descending=descending,
+                context=effective_taxonomy,
+            )
         where, params = self._where(query)
         order = self._order_by(sort_column, descending=descending)
         cursor = self.conn.execute(
@@ -171,6 +188,56 @@ class StagingSessionStore:
             params,
         )
         return [int(row[0]) for row in cursor.fetchall() if row[0] is not None]
+
+    def _effective_taxonomy_sorted_row_ids(
+        self,
+        query: StagingQuery | None,
+        column: StagingColumn,
+        *,
+        descending: bool,
+        context: EffectiveTaxonomyContext,
+    ) -> list[int]:
+        placement = "category" if column == StagingColumn.CATEGORY else "subcategory"
+        db_column = placement
+        node_ids = [option.node_id for option in context.options_for(placement)]
+        if not node_ids:
+            where, params = self._where(query)
+            order = self._order_by(column, descending=descending)
+            return [
+                int(row[0])
+                for row in self.conn.execute(
+                    f"SELECT row_id FROM staging_records WHERE {where} {order}",
+                    params,
+                )
+                if row[0] is not None
+            ]
+        marks = ", ".join("?" for _ in node_ids)
+        where, params = self._where(query, table_alias="s")
+        canonical = f"COALESCE(NULLIF(s.{db_column}, ''), 'Other')" if placement == "subcategory" else f"s.{db_column}"
+        effective = (
+            f"CASE WHEN COALESCE(o.label, '') = '' THEN {canonical} "
+            f"WHEN LOWER(o.label) = LOWER({canonical}) THEN o.label "
+            f"ELSE o.label || ' - ' || {canonical} END"
+        )
+        direction = "DESC" if descending else "ASC"
+        cursor = self.conn.execute(
+            f"""
+            WITH overlays AS (
+                SELECT row_id, MAX(label) AS label
+                FROM custom_tree_memberships
+                WHERE session_id = ? AND profile_id = ? AND projection_signature = ?
+                  AND source_node_id IN ({marks})
+                GROUP BY row_id
+            )
+            SELECT s.row_id
+            FROM staging_records AS s
+            LEFT JOIN overlays AS o ON o.row_id = s.row_id
+            WHERE {where}
+            ORDER BY {effective} COLLATE NOCASE {direction}, s.row_id {direction}
+            """,
+            [self.session_id, context.profile_id, context.projection_signature, *node_ids, *params],
+        )
+        return [int(row[0]) for row in cursor if row[0] is not None]
 
     def rows_by_ids(self, row_ids: Iterable[int]) -> list[dict[str, Any]]:
         return self._rows_by_ids(row_ids, "*")
@@ -522,6 +589,7 @@ class StagingSessionStore:
         confidence_filter_enabled: bool,
     ) -> str:
         payload = {
+            "routing_version": 2,
             "profile": {
                 "root_node_id": profile.root_node_id,
                 "nodes": [node.to_dict() for node in profile.nodes],
@@ -878,6 +946,166 @@ class StagingSessionStore:
         )
         return {str(row["source_node_id"]): int(row["count"] or 0) for row in cursor}
 
+    def effective_taxonomy_for_ids(
+        self,
+        row_ids: Iterable[int],
+        context: EffectiveTaxonomyContext | None,
+    ) -> dict[int, dict[str, str]]:
+        ids = [int(row_id) for row_id in row_ids]
+        if not ids or context is None:
+            return {}
+        placement_by_node = {
+            option.node_id: option.placement
+            for option in context.options
+            if option.placement in {"category", "subcategory"}
+        }
+        if not placement_by_node:
+            return {}
+        result: dict[int, dict[str, str]] = {}
+        node_ids = list(placement_by_node)
+        for offset in range(0, len(ids), 700):
+            chunk = ids[offset : offset + 700]
+            row_marks = ", ".join("?" for _ in chunk)
+            node_marks = ", ".join("?" for _ in node_ids)
+            cursor = self.conn.execute(
+                f"""
+                SELECT row_id, source_node_id, label, depth
+                FROM custom_tree_memberships
+                WHERE session_id = ? AND profile_id = ? AND projection_signature = ?
+                  AND row_id IN ({row_marks})
+                  AND source_node_id IN ({node_marks})
+                ORDER BY row_id ASC, depth ASC
+                """,
+                [
+                    self.session_id,
+                    context.profile_id,
+                    context.projection_signature,
+                    *chunk,
+                    *node_ids,
+                ],
+            )
+            for row in cursor:
+                placement = placement_by_node.get(str(row["source_node_id"] or ""))
+                if placement:
+                    result.setdefault(int(row["row_id"]), {})[placement] = str(row["label"] or "").strip()
+        return result
+
+    def effective_taxonomy_group_counts(
+        self,
+        context: EffectiveTaxonomyContext | None,
+    ) -> list[dict[str, Any]]:
+        if context is None or not context.options:
+            return self.group_counts(["audio_type", "category", "subcategory"], None)
+        category_nodes = [option.node_id for option in context.options_for("category")]
+        subcategory_nodes = [option.node_id for option in context.options_for("subcategory")]
+        node_ids = [*category_nodes, *subcategory_nodes]
+        if not node_ids:
+            return self.group_counts(["audio_type", "category", "subcategory"], None)
+
+        node_marks = ", ".join("?" for _ in node_ids)
+        category_marks = ", ".join("?" for _ in category_nodes) or "NULL"
+        subcategory_marks = ", ".join("?" for _ in subcategory_nodes) or "NULL"
+        cursor = self.conn.execute(
+            f"""
+            WITH overlays AS (
+                SELECT row_id,
+                       MAX(CASE WHEN source_node_id IN ({category_marks}) THEN label END) AS custom_category,
+                       MAX(CASE WHEN source_node_id IN ({subcategory_marks}) THEN label END) AS custom_subcategory
+                FROM custom_tree_memberships
+                WHERE session_id = ? AND profile_id = ? AND projection_signature = ?
+                  AND source_node_id IN ({node_marks})
+                GROUP BY row_id
+            )
+            SELECT s.audio_type, s.category, s.subcategory,
+                   o.custom_category, o.custom_subcategory, COUNT(*) AS count
+            FROM staging_records AS s
+            LEFT JOIN overlays AS o ON o.row_id = s.row_id
+            WHERE s.session_id = ?
+            GROUP BY s.audio_type, s.category, s.subcategory,
+                     o.custom_category, o.custom_subcategory
+            """,
+            [
+                *category_nodes,
+                *subcategory_nodes,
+                self.session_id,
+                context.profile_id,
+                context.projection_signature,
+                *node_ids,
+                self.session_id,
+            ],
+        )
+        combined: dict[tuple[str, str, str], int] = {}
+        for row in cursor:
+            category = effective_taxonomy_label(row["custom_category"], row["category"])
+            canonical_subcategory = str(row["subcategory"] or "").strip()
+            subcategory = effective_taxonomy_label(row["custom_subcategory"], canonical_subcategory or "Other")
+            key = (str(row["audio_type"] or ""), category, subcategory if row["custom_subcategory"] else canonical_subcategory)
+            combined[key] = combined.get(key, 0) + int(row["count"] or 0)
+        return [
+            {"audio_type": audio_type, "category": category, "subcategory": subcategory, "count": count}
+            for (audio_type, category, subcategory), count in combined.items()
+        ]
+
+    def effective_taxonomy_match_ids(
+        self,
+        placement: str,
+        value: str,
+        context: EffectiveTaxonomyContext,
+    ) -> set[int]:
+        column = "category" if placement == "category" else "subcategory"
+        options = list(context.options_for(placement))
+        requested = normalize_effective_taxonomy_label(value)
+        canonical_values = [str(row[0] or "").strip() for row in self.conn.execute(
+            f"SELECT DISTINCT {column} FROM staging_records WHERE session_id = ?",
+            (self.session_id,),
+        )]
+        if placement == "subcategory" and "" in canonical_values:
+            canonical_display = {canonical: (canonical or "Other") for canonical in canonical_values}
+        else:
+            canonical_display = {canonical: canonical for canonical in canonical_values if canonical}
+
+        custom_targets: list[tuple[str, str]] = []
+        for option in options:
+            for canonical, display in canonical_display.items():
+                if normalize_effective_taxonomy_label(effective_taxonomy_label(option.label, display)) == requested:
+                    custom_targets.append((option.node_id, canonical))
+        plain_targets = [
+            canonical
+            for canonical, display in canonical_display.items()
+            if normalize_effective_taxonomy_label(display) == requested
+        ]
+        clauses: list[str] = []
+        params: list[Any] = [self.session_id]
+        all_node_ids = [option.node_id for option in options]
+        if plain_targets:
+            marks = ", ".join("?" for _ in plain_targets)
+            clause = f"s.{column} IN ({marks})"
+            params.extend(plain_targets)
+            if all_node_ids:
+                node_marks = ", ".join("?" for _ in all_node_ids)
+                clause += (
+                    " AND NOT EXISTS (SELECT 1 FROM custom_tree_memberships AS m "
+                    "WHERE m.session_id = s.session_id AND m.row_id = s.row_id "
+                    "AND m.profile_id = ? AND m.projection_signature = ? "
+                    f"AND m.source_node_id IN ({node_marks}))"
+                )
+                params.extend([context.profile_id, context.projection_signature, *all_node_ids])
+            clauses.append(f"({clause})")
+        for node_id, canonical in custom_targets:
+            clauses.append(
+                f"(s.{column} = ? AND EXISTS (SELECT 1 FROM custom_tree_memberships AS m "
+                "WHERE m.session_id = s.session_id AND m.row_id = s.row_id "
+                "AND m.profile_id = ? AND m.projection_signature = ? AND m.source_node_id = ?))"
+            )
+            params.extend([canonical, context.profile_id, context.projection_signature, node_id])
+        if not clauses:
+            return set()
+        cursor = self.conn.execute(
+            f"SELECT s.row_id FROM staging_records AS s WHERE s.session_id = ? AND ({' OR '.join(clauses)})",
+            params,
+        )
+        return {int(row[0]) for row in cursor if row[0] is not None}
+
     def update_row(self, row_id: int, fields: dict[str, Any], *, commit: bool = True) -> None:
         if not fields:
             return
@@ -1190,6 +1418,15 @@ class StagingSessionStore:
                 key=str.casefold,
             )[: int(limit)]
         return values
+
+    def distinct_subcategories(self, category: str, limit: int = 5000) -> list[str]:
+        cursor = self.conn.execute(
+            "SELECT DISTINCT subcategory FROM staging_records "
+            "WHERE session_id = ? AND category = ? AND subcategory IS NOT NULL AND subcategory != '' "
+            "ORDER BY subcategory COLLATE NOCASE LIMIT ?",
+            (self.session_id, str(category or ""), max(1, int(limit))),
+        )
+        return [str(row[0]) for row in cursor.fetchall() if row[0] not in (None, "")]
 
     def map_candidate_rows(self, *, audio_type: str = "", category: str = "", limit: int = 10000, priority_row_ids: Iterable[int] = ()) -> list[dict[str, Any]]:
         """Return a deterministic, category-balanced map sample.

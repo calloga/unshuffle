@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import replace
 
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMenu, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 from unshuffle.logic.tree_organization import TreeOrganizationProfile, TreeOrganizationResolver, make_empty_profile
 from unshuffle.logic.tree_organization.models import utc_now_iso
@@ -118,18 +118,36 @@ class TreeOrganizationProfileMixin:
             self._show_profile_list()
 
     def _apply(self) -> None:
-        if not self._validate(full=True):
-            return
-        profile = self._profile_from_ui()
-        self._profile = profile
-        self.profileSaved.emit(profile)
-        self.profileApplied.emit(profile)
-        if self._embedded:
-            self._active_profile_id = profile.id
-            self._selected_profile_id = profile.id
-            self._show_profile_list()
-        if not self._embedded:
-            self.accept()
+        app = self.parent() if hasattr(self, "parent") else None
+        monitor = getattr(app, "operation_monitor", None)
+        token = monitor.start("Saving Library Layout", compact=True) if monitor is not None else None
+        if token is not None:
+            monitor.update({"phase": "Preparing Library Layout", "percent": 10}, token=token)
+            QApplication.processEvents()
+        try:
+            if not self._validate(full=True):
+                if token is not None:
+                    monitor.finish("Library layout needs attention.", token=token)
+                return
+            if token is not None:
+                monitor.update({"phase": "Applying Library Layout", "percent": 70}, token=token)
+                QApplication.processEvents()
+            profile = self._profile_from_ui()
+            self._profile = profile
+            self.profileSaved.emit(profile)
+            self.profileApplied.emit(profile)
+            if self._embedded:
+                self._active_profile_id = profile.id
+                self._selected_profile_id = profile.id
+                self._show_profile_list()
+            if not self._embedded:
+                self.accept()
+            if token is not None:
+                monitor.finish("Library layout ready.", token=token)
+        except Exception as exc:
+            if token is not None:
+                monitor.fail(str(exc), token=token)
+            raise
 
     def _on_profile_selected(self, index: int) -> None:
         profile_id = self.profile_combo.itemData(index)

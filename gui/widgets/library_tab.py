@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 import shiboken6
 
-from unshuffle.core.constants import CATEGORIES
+from unshuffle.core.constants import CATEGORIES, SUB_TAXONOMY_MAP
 
 from . import sections as sw_sections
 from . import sidebar as sw_sidebar
@@ -150,6 +150,8 @@ class LibraryTab(QWidget):
         self.proxy_model = None
         self.saved_filters = []
         self._custom_tree_filter_options = []
+        self._available_categories_by_type: dict[str, set[str]] = {}
+        self._available_subcategories_by_category: dict[str, set[str]] = {}
         self._column_width_ratios: dict[StagingColumn, float] = {}
         self._applying_proportional_resize = False
         self._restoring_column_order = False
@@ -333,7 +335,11 @@ class LibraryTab(QWidget):
 
         self.lib_stack = QStackedWidget()
         self.view_table = StagingTableView()
-        self.view_table.setItemDelegate(ComboDelegate(self.view_table))
+        self.combo_delegate = ComboDelegate(
+            self.view_table,
+            taxonomy_options_provider=self._table_taxonomy_options,
+        )
+        self.view_table.setItemDelegate(self.combo_delegate)
         self.view_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view_table.customContextMenuRequested.connect(self._show_context_menu)
         header = self.view_table.horizontalHeader()
@@ -471,19 +477,53 @@ class LibraryTab(QWidget):
         self.combo_sort.setCurrentIndex(self.sort_columns.index(staging_column))
 
     def _category_options_for_type_state(self, oneshots: bool, loops: bool, all_files: bool) -> list[tuple[str, object]]:
+        available = set().union(*self._available_categories_by_type.values()) if self._available_categories_by_type else set(CATEGORIES)
+        if not all_files and self._available_categories_by_type:
+            selected_types = set()
+            if oneshots:
+                selected_types.add("Oneshots")
+            if loops:
+                selected_types.add("Loops")
+            if selected_types:
+                available = set().union(*(self._available_categories_by_type.get(value, set()) for value in selected_types))
+        canonical = [category for category in CATEGORIES if category in available]
+        canonical.extend(sorted(available - set(canonical), key=str.casefold))
         options: list[tuple[str, object]] = [
             (label, value)
-            for label, value in category_options_for_type_state(CATEGORIES, oneshots, loops, all_files)
+            for label, value in category_options_for_type_state(canonical, oneshots, loops, all_files)
         ]
-        for custom in self._custom_tree_filter_options:
-            if custom.placement != "category":
-                continue
-            if not all_files:
-                selected_type = "Oneshots" if oneshots and not loops else "Loops" if loops and not oneshots else ""
-                if custom.audio_type and selected_type and custom.audio_type != selected_type:
-                    continue
-            options.append((custom.label, custom))
         return options
+
+    def _table_taxonomy_options(self, column: StagingColumn, category: str = "") -> list[tuple[str, str]]:
+        if column == StagingColumn.CATEGORY:
+            present = set().union(*self._available_categories_by_type.values()) if self._available_categories_by_type else set(CATEGORIES)
+            canonical = list(CATEGORIES)
+            extras = sorted(present - set(canonical), key=str.casefold)
+            options = [(value, value) for value in [*canonical, *extras]]
+        else:
+            present = self._available_subcategories_by_category.get(category, set())
+            canonical = {
+                value
+                for value in SUB_TAXONOMY_MAP.get(category, {}).values()
+                if value and value != "no-sub"
+            }
+            options = [(value, value) for value in sorted(canonical | present, key=str.casefold)]
+        return options
+
+    def set_taxonomy_availability(self, rows) -> None:
+        categories: dict[str, set[str]] = {}
+        subcategories: dict[str, set[str]] = {}
+        for row in rows or []:
+            audio_type = str(row.get("audio_type") or "").strip()
+            category = str(row.get("category") or "").strip()
+            subcategory = str(row.get("subcategory") or "").strip()
+            if category:
+                categories.setdefault(audio_type, set()).add(category)
+            if category and subcategory:
+                subcategories.setdefault(category, set()).add(subcategory)
+        self._available_categories_by_type = categories
+        self._available_subcategories_by_category = subcategories
+        self._refresh_category_options_for_type(*self.type_picker.get_state())
 
     def _refresh_category_options_for_type(self, oneshots: bool, loops: bool, all_files: bool) -> None:
         options = self._category_options_for_type_state(oneshots, loops, all_files)
@@ -494,31 +534,18 @@ class LibraryTab(QWidget):
         self.category_carousel.set_options(options)
         if invalid_active_values:
             self.category_carousel.set_active_values(set())
-            from gui.core.tree_filter_options import CustomTreeFilterOption
-
             for value in invalid_active_values:
-                if isinstance(value, CustomTreeFilterOption):
-                    self.savedFilterRequested.emit(value.query, False, "replace")
-                else:
-                    self.categoryFilterRequested.emit(str(value), False)
+                self.categoryFilterRequested.emit(str(value), False)
 
     def _on_category_carousel_toggled(self, category, is_active):
         self.category_carousel.set_active_values({category} if is_active else set())
         self.sync_map_filters()
-        from gui.core.tree_filter_options import CustomTreeFilterOption
-        if isinstance(category, CustomTreeFilterOption):
-            self.savedFilterRequested.emit(category.query, is_active, "replace")
-        else:
-            self.categoryFilterRequested.emit(str(category), is_active)
+        self.categoryFilterRequested.emit(str(category), is_active)
 
     def _on_category_carousel_selected(self, category):
         self.category_carousel.set_active_values({category})
         self.sync_map_filters()
-        from gui.core.tree_filter_options import CustomTreeFilterOption
-        if isinstance(category, CustomTreeFilterOption):
-            self.savedFilterRequested.emit(category.query, True, "replace")
-        else:
-            self.categoryFilterRequested.emit(str(category), True)
+        self.categoryFilterRequested.emit(str(category), True)
 
     def _handle_tree_category_change(self, rec, category):
         self.bulkCategoryRequested.emit(category, [rec])
@@ -834,23 +861,19 @@ class LibraryTab(QWidget):
         active = list(getattr(self.category_carousel, "active_values", set()) or [])
         if len(active) != 1 or not isinstance(active[0], str):
             return ""
-        return active[0]
+        value = active[0]
+        if self._custom_tree_filter_options and value not in CATEGORIES:
+            # Effective composite categories are enforced by visible row IDs;
+            # the sound-map store only understands canonical categories.
+            return ""
+        return value
 
     def set_custom_tree_filter_options(self, options) -> None:
         self._custom_tree_filter_options = list(options or [])
         self._refresh_category_options_for_type(*self.type_picker.get_state())
 
     def category_filter_values_for_query(self, query: str, canonical_categories: set[str]) -> set[object]:
-        from gui.core.filter_query import query_contains_token
-
-        custom = {
-            option
-            for option in self._custom_tree_filter_options
-            if option.placement == "category" and query_contains_token(query, option.query)
-        }
-        values: set[object] = set(canonical_categories)
-        values.update(custom)
-        return values
+        return set(canonical_categories)
 
     def set_tree_organization_state(self, active: bool, profile_name: str = "") -> None:
         text = str(profile_name or "Custom Tree") if active else "Default"
@@ -1090,7 +1113,12 @@ class LibraryTab(QWidget):
         model = self.proxy_model.sourceModel() if self.proxy_model and hasattr(self.proxy_model, "sourceModel") else None
         store = getattr(model, "store", None)
         if store is not None and hasattr(store, "filter_suggestion_values"):
-            suggestions = build_filter_suggestions_from_values(store.filter_suggestion_values(), saved_queries)
+            values = store.filter_suggestion_values()
+            if self._available_categories_by_type:
+                values["category"] = set().union(*self._available_categories_by_type.values())
+            if self._available_subcategories_by_category:
+                values["subcategory"] = set().union(*self._available_subcategories_by_category.values())
+            suggestions = build_filter_suggestions_from_values(values, saved_queries)
         else:
             suggestions = build_filter_suggestions(self._records_for_search_suggestions(), saved_queries)
         self.edit_search.set_suggestions(suggestions, saved_queries)

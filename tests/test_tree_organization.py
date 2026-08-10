@@ -802,7 +802,8 @@ def test_first_edit_profile_mirrors_current_tree_and_allows_custom_override():
 
 
 def test_custom_tree_filter_options_follow_category_and_subcategory_placement():
-    from gui.core.tree_filter_options import custom_tree_filter_options
+    from gui.core.tree_filter_options import custom_tree_filter_options, expand_custom_taxonomy_query
+    from unshuffle.logic.tree_organization.filter_evaluator import FilterEvaluator
 
     profile = _profile(
         [
@@ -816,13 +817,85 @@ def test_custom_tree_filter_options_follow_category_and_subcategory_placement():
     options = {option.node_id: option for option in custom_tree_filter_options(profile)}
 
     assert options["favorites"].placement == "category"
-    assert options["favorites"].query == 'tag:"favorite"'
+    assert options["favorites"].query == 'type:"Oneshots" AND tag:"favorite"'
     assert options["hard"].placement == "subcategory"
     assert "oneshots" not in options
     assert "kicks" not in options
 
+    expanded_category = expand_custom_taxonomy_query('cat:"Favorites"', list(options.values()))
+    expanded_subcategory = expand_custom_taxonomy_query('subcat:"Hard Picks"', list(options.values()))
+    evaluator = FilterEvaluator()
+    assert evaluator.matches(_record("tagged.wav", audio_type="Oneshots", tags=["favorite"]), expanded_category)
+    assert not evaluator.matches(_record("manual.wav", audio_type="Oneshots", category="Favorites"), expanded_category)
+    assert not evaluator.matches(_record("loop.wav", audio_type="Loops", tags=["favorite"]), expanded_category)
+    assert evaluator.matches(
+        _record("hard.wav", audio_type="Oneshots", category="Kicks", tags=["hard"]),
+        expanded_subcategory,
+    )
 
-def test_custom_category_carousel_option_applies_saved_query(monkeypatch):
+
+def test_effective_taxonomy_query_groups_keep_non_taxonomy_terms_grouped():
+    from gui.core.tree_filter_options import effective_taxonomy_query_groups
+
+    groups = effective_taxonomy_query_groups(
+        'category:"Dupes-Bass" AND tag:"warm" OR subcat:"Picked-Other"'
+    )
+
+    assert groups == [
+        ('tag:"warm"', [("category", "Dupes-Bass")]),
+        ("", [("subcategory", "Picked-Other")]),
+    ]
+
+
+def test_nested_custom_bucket_beats_broader_root_custom_bucket():
+    record = _record(
+        "dupe.wav",
+        audio_type="Loops",
+        category="Bass",
+        tags=["possibleduplicate"],
+    )
+    profile = _profile(
+        [
+            TreeOrganizationNode("loops", "root", "Loops", 'type:"Loops"', "system", 1),
+            TreeOrganizationNode(
+                "loop_dupes",
+                "loops",
+                "Loop Dupes",
+                'tag:"possibleduplicate"',
+                "custom",
+                1,
+            ),
+            TreeOrganizationNode(
+                "all_dupes",
+                "root",
+                "All Dupes",
+                'tag:"possibleduplicate"',
+                "custom",
+                2,
+            ),
+        ]
+    )
+
+    route = TreeRouteBuilder().routes_for([record], profile)[0]
+
+    assert [part.label for part in route.parts[:2]] == ["Loops", "Loop Dupes"]
+
+
+def test_identical_custom_sibling_filters_are_rejected_without_records():
+    profile = _profile(
+        [
+            TreeOrganizationNode("first", "root", "First", 'tag:"possibleduplicate"', "custom", 1),
+            TreeOrganizationNode("second", "root", "Second", 'tags:"PossibleDuplicate"', "custom", 2),
+        ]
+    )
+
+    result = TreeOrganizationResolver().validate_profile(profile, [])
+
+    assert not result.valid
+    assert any("same sibling filter" in message for message in result.blocking_messages)
+
+
+def test_custom_category_is_not_a_direct_carousel_destination(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtGui import QUndoStack
     from PySide6.QtWidgets import QApplication
@@ -838,8 +911,55 @@ def test_custom_category_carousel_option_applies_saved_query(monkeypatch):
 
     tab._on_category_carousel_selected(option)
 
-    assert emitted == [('tag:"favorite"', True, "replace")]
+    assert emitted == []
     assert tab._current_category_filter() == ""
+
+
+def test_custom_subcategory_is_not_a_direct_table_destination(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QUndoStack
+    from PySide6.QtWidgets import QApplication
+    from gui.core.tree_filter_options import custom_tree_filter_options
+    from gui.utils.constants import StagingColumn
+    from gui.widgets.library_tab import LibraryTab
+
+    _app = QApplication.instance() or QApplication([])
+    profile = _profile(
+        [
+            TreeOrganizationNode("oneshots", "root", "Oneshots", 'type:"Oneshots"', "system", 1),
+            TreeOrganizationNode("bass", "oneshots", "Bass", 'cat:"Bass"', "system", 1),
+            TreeOrganizationNode("test", "bass", "test", 'name:"bass"', "custom", 1),
+        ]
+    )
+    options = custom_tree_filter_options(profile, {"test": 0})
+    tab = LibraryTab(QUndoStack())
+    tab.set_custom_tree_filter_options(options)
+
+    dropdown = tab._table_taxonomy_options(StagingColumn.SUBCATEGORY, "Bass")
+    assert ("test", "test") not in dropdown
+
+    record = _record("manual-bass.wav", category="Bass", audio_type="Oneshots")
+    route = TreeRouteBuilder().routes_for([record], profile)[0]
+    assert any(part.source_node_id == "test" for part in route.parts)
+
+
+def test_category_carousel_hides_zero_count_categories(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtGui import QUndoStack
+    from PySide6.QtWidgets import QApplication
+    from gui.utils.constants import StagingColumn
+    from gui.widgets.library_tab import LibraryTab
+
+    _app = QApplication.instance() or QApplication([])
+    tab = LibraryTab(QUndoStack())
+    tab.set_taxonomy_availability(
+        [{"audio_type": "Oneshots", "category": "Kicks", "subcategory": "Hard", "count": 4}]
+    )
+
+    values = [value for _label, value in tab.category_carousel.options]
+    assert "Kicks" in values
+    assert "Bass" not in values
+    assert ("Bass", "Bass") in tab._table_taxonomy_options(StagingColumn.CATEGORY)
 
 
 def test_tree_switcher_reserves_default_and_shows_active_profile_name(monkeypatch):

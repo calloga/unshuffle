@@ -349,6 +349,19 @@ def _discover_paths_in_memory(root_path: Path, context: AnalysisContext) -> list
     return all_paths
 
 
+def _ensure_root_node(root_path: Path, context: AnalysisContext) -> LibNode:
+    root_node = context.nodes.get(root_path)
+    if root_node is not None:
+        return root_node
+
+    root_node = LibNode(path=root_path, name=root_path.name, node_type=NodeType.ROOT)
+    if (root_path / PRESERVED_MARKER).exists():
+        root_node.is_preserved = True
+        root_node.preserved_root = root_path
+    context.nodes[root_path] = root_node
+    return root_node
+
+
 def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
     root_path = root_path.resolve()
     context.root_path = root_path
@@ -441,6 +454,10 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
             context.frequency_analyzer.feed_path(path)
 
         mapping_progress.emit(index)
+
+    if context.is_interrupted():
+        return _ensure_root_node(root_path, context)
+
     mapping_progress.emit(total_found, force=True)
 
     if use_scan_store:

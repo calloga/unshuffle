@@ -565,16 +565,56 @@ class SearchWorker(QThread):
     finished = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, request_id, bridge=None, query_text=""):
+    def __init__(self, request_id, bridge=None, query_text="", *, store=None, taxonomy_context=None):
         super().__init__()
         self.request_id = request_id
         self.bridge = bridge
         self.query_text = str(query_text or "")
+        self.store = store
+        self.taxonomy_context = taxonomy_context
+
+    def _run_effective_taxonomy_query(self):
+        from gui.core.tree_filter_options import effective_taxonomy_query_groups
+
+        union_ids: set[int] = set()
+        ranked: list[int] = []
+        for db_query, predicates in effective_taxonomy_query_groups(self.query_text):
+            if db_query:
+                base = SearchEngine.run_query(self.bridge, db_query)
+                if base is None:
+                    base_ids = set(self.store.row_ids())
+                    base_ranked = None
+                elif isinstance(base, list):
+                    base_ids = set(base)
+                    base_ranked = [int(row_id) for row_id in base]
+                else:
+                    base_ids = {int(row_id) for row_id in base}
+                    base_ranked = None
+            else:
+                base_ids = set(self.store.row_ids())
+                base_ranked = None
+            for placement, value in predicates:
+                base_ids.intersection_update(
+                    self.store.effective_taxonomy_match_ids(
+                        placement,
+                        value,
+                        self.taxonomy_context,
+                    )
+                )
+            if base_ranked is not None:
+                ranked.extend(row_id for row_id in base_ranked if row_id in base_ids and row_id not in ranked)
+            union_ids.update(base_ids)
+        if ranked:
+            return [*ranked, *(row_id for row_id in union_ids if row_id not in set(ranked))]
+        return union_ids
 
     @safe_gc_run
     def run(self):
         try:
-            matched_ids = SearchEngine.run_query(self.bridge, self.query_text)
+            if self.store is not None and self.taxonomy_context is not None:
+                matched_ids = self._run_effective_taxonomy_query()
+            else:
+                matched_ids = SearchEngine.run_query(self.bridge, self.query_text)
             self.finished.emit(
                 {
                     "request_id": self.request_id,

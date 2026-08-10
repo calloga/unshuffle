@@ -190,7 +190,6 @@ class SearchController(QObject):
         self._search_request_id += 1
         request_id = self._search_request_id
         query = self._current_query
-        
         self.searchStarted.emit(query)
         if not query:
             if self.model:
@@ -227,7 +226,20 @@ class SearchController(QObject):
                 self._active_worker.finished.disconnect()
             except Exception: pass
             
-        worker = SearchWorker(request_id, self.search_engine.bridge, query)
+        search_store = getattr(self.model, "store", None)
+        taxonomy_context = getattr(self.model, "_effective_taxonomy_context", None)
+        from .tree_filter_options import EffectiveTaxonomyContext
+
+        if search_store is not None and isinstance(taxonomy_context, EffectiveTaxonomyContext):
+            worker = SearchWorker(
+                request_id,
+                self.search_engine.bridge,
+                query,
+                store=search_store,
+                taxonomy_context=taxonomy_context,
+            )
+        else:
+            worker = SearchWorker(request_id, self.search_engine.bridge, query)
         search_model = self.model
         search_proxy = self.proxy_model
         self._active_worker = worker
@@ -243,7 +255,7 @@ class SearchController(QObject):
                 or search_proxy is not self.proxy_model
             ):
                 return
-            
+
             matched_ids = result.get("matched_ids")
             active_query = result.get("query_text", "")
             

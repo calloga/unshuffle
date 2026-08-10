@@ -132,7 +132,7 @@ StartupWMClass=Unshuffle
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the Linux AppImage package for Unshuffle.")
-    parser.add_argument("--version", default="1.0.2")
+    parser.add_argument("--version", default="1.1.0")
     parser.add_argument("--source-dir", type=Path, default=Path("dist") / APP_NAME)
     parser.add_argument("--output-dir", type=Path, default=Path("dist") / "installer")
     parser.add_argument("--appimagetool-path", type=Path, default=None, help="Path to appimagetool binary.")

@@ -29,6 +29,22 @@ CATEGORY_IDENTITY_MAP = {
 }
 
 
+def category_identity_role(category: str) -> str:
+    """Resolve effective taxonomy labels through their canonical category."""
+    label = str(category or "").strip()
+    role = CATEGORY_IDENTITY_MAP.get(label)
+    if role is not None:
+        return role
+
+    canonical = label.rsplit(" - ", 1)[-1]
+    normalized = "".join(ch.casefold() for ch in canonical if ch.isalnum())
+    for known_category, known_role in CATEGORY_IDENTITY_MAP.items():
+        known_normalized = "".join(ch.casefold() for ch in known_category if ch.isalnum())
+        if normalized == known_normalized:
+            return known_role
+    return "identity.neutral"
+
+
 @dataclass(frozen=True)
 class ThemeColors:
     name: str

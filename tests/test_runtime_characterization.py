@@ -400,6 +400,23 @@ class CacheRebuildTests(unittest.TestCase):
 
 
 class AnalysisHashingTests(unittest.TestCase):
+    def test_build_node_graph_cancelled_before_mapping_returns_root(self):
+        from unshuffle.core.models import NodeType
+        from unshuffle.logic.analysis.service import AnalysisContext, build_node_graph
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Source"
+            root.mkdir()
+            (root / "sample.wav").write_bytes(b"sample")
+            context = AnalysisContext(root)
+            context.is_interrupted = lambda: True
+
+            root_node = build_node_graph(root, context)
+
+            self.assertIs(root_node, context.nodes[root.resolve()])
+            self.assertEqual(root_node.node_type, NodeType.ROOT)
+            self.assertEqual(context.total_scanned, 0)
+
     def test_build_node_graph_uses_batched_hash_cache_before_hashing(self):
         from unshuffle.logic.analysis.service import AnalysisContext, build_node_graph
 
