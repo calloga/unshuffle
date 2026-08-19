@@ -2,10 +2,10 @@ import json
 import sqlite3
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
-from typing import Any, Callable, Optional, cast
+from typing import Any, Optional, cast
 
 from pathlib import Path
-from peewee import SqliteDatabase, fn
+from peewee import fn
 
 from unshuffle.core.features import (
     CURRENT_EXTRACTOR_VERSION,
@@ -13,9 +13,12 @@ from unshuffle.core.features import (
     CURRENT_VECTOR_SCHEMA,
 )
 from unshuffle.persistence.schema.enums import RecordStepStatus, RecordStatus
-from unshuffle.persistence.schema.models import db_proxy, FileCache, Record
-from unshuffle.persistence.utils.thread_aware_sqlite_database import ThreadAwareSqliteDatabase
-from unshuffle.persistence.utils.thread_aware_sqlite_database import PeeweeStore
+from unshuffle.persistence.schema.models import FileCache, Record
+from unshuffle.persistence.utils.thread_aware_sqlite_database import (
+    ConnectionBoundStore,
+    ConnectionProvider,
+    PeeweeStore,
+)
 
 CacheHashEntry = dict[str, Optional[str]]
 CacheHashRow = Mapping[str, Any]
@@ -155,9 +158,10 @@ class CacheStore(ABC):
         pass
 
 
-class SqliteCacheStore(CacheStore):
-    def __init__(self, connection: sqlite3.Connection):
-        self._conn = connection
+class SqliteCacheStore(CacheStore, ConnectionBoundStore):
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        return self._connection
 
     def _get_feature_vectors(self, chunk: list[str]) -> Iterable[FeatureVectorRow]:
         placeholders = ", ".join("?" for _ in chunk)
@@ -186,6 +190,7 @@ class SqliteCacheStore(CacheStore):
             chunk,
         )
         return cast(Iterable[CacheHashRow], cursor.fetchall())
+
     def _get_cached_entries(self, chunk: list[str]) -> Iterable[CacheHashRow]:
         placeholders = ", ".join("?" for _ in chunk)
         cursor = self._conn.execute(
@@ -216,7 +221,7 @@ class SqliteCacheStore(CacheStore):
         )
         return cursor.fetchone() is not None
 
-    def get_committed_hashes(self,) -> set[str]:
+    def get_committed_hashes(self, ) -> set[str]:
         cursor = self._conn.execute(
             """
             SELECT DISTINCT file_hash
@@ -292,10 +297,11 @@ class SqliteCacheStore(CacheStore):
             return False
         return list(schema) == list(CURRENT_VECTOR_SCHEMA)
 
+
 class PeeweeCacheStore(SqliteCacheStore, PeeweeStore):
-    def __init__(self, connection: sqlite3.Connection):
-        self._initialize_db_proxy(connection)
-        super().__init__(connection)
+    def __init__(self, connection_provider: ConnectionProvider):
+        self._initialize_db_proxy(connection_provider)
+        super().__init__(connection_provider)
 
     def get_all_hashes(self) -> dict[str, str]:
         return {x.hash: x.last_path for x in FileCache.select()}
@@ -322,9 +328,9 @@ class PeeweeCacheStore(SqliteCacheStore, PeeweeStore):
 
     def get_cached_hash(self, path: Path, size: int, mtime: float) -> Optional[str]:
         _hash = FileCache.select().where(
-            (FileCache.last_path==Path(path).as_posix())
-            & (FileCache.size==size)
-            & (FileCache.mtime==mtime)
+            (FileCache.last_path == Path(path).as_posix())
+            & (FileCache.size == size)
+            & (FileCache.mtime == mtime)
         ).first()
 
         return _hash.hash if _hash else None

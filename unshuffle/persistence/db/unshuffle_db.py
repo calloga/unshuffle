@@ -64,17 +64,21 @@ class UnshuffleDB:
     def _init_stores(self):
         store_migration_config = get_config().get("STORE_MIGRATION", {})
 
+        # Stores resolve the connection lazily so every thread works on the
+        # connection _get_connection() handed to that thread.
+        connection_provider = self._get_connection
+
         self._cache_store: CacheStore = self._migration_config.get(StoreName.CACHE).get(
             store_migration_config.get(StoreName.CACHE)
-        )(self.conn)
+        )(connection_provider)
 
         self._coherence_store: CoherenceStore = self._migration_config.get(StoreName.COHERENCE).get(
             store_migration_config.get(StoreName.COHERENCE)
-        )(self.conn)
+        )(connection_provider)
 
         self._maintenance_store: MaintenanceStore = self._migration_config.get(StoreName.MAINTENANCE).get(
             store_migration_config.get(StoreName.MAINTENANCE)
-        )(self.conn)
+        )(connection_provider)
 
     def __del__(self):
         try:

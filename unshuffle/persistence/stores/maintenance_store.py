@@ -15,7 +15,11 @@ from unshuffle.persistence.schema.models import (
     SessionSource,
     StagingRecord,
 )
-from unshuffle.persistence.utils.thread_aware_sqlite_database import PeeweeStore
+from unshuffle.persistence.utils.thread_aware_sqlite_database import (
+    ConnectionBoundStore,
+    ConnectionProvider,
+    PeeweeStore,
+)
 
 EPHEMERAL_TABLES = (
     "staging_records",
@@ -154,10 +158,7 @@ class MaintenanceStore(abc.ABC):
         return {"ran": True, "before": before, "after": after}
 
 
-class SqliteMaintenanceStore(MaintenanceStore):
-    def __init__(self, connection: sqlite3.Connection):
-        self._connection = connection
-
+class SqliteMaintenanceStore(MaintenanceStore, ConnectionBoundStore):
     def _all_session_ids(self) -> set[str]:
         rows = self._connection.execute("SELECT session_id FROM sessions WHERE session_id IS NOT NULL").fetchall()
         return {str(row["session_id"]) for row in rows if str(row["session_id"] or "").strip()}
@@ -302,9 +303,8 @@ class PeeweeMaintenanceStore(MaintenanceStore, PeeweeStore):
         "refinement_candidates": RefinementCandidate,
     }
 
-    def __init__(self, connection: sqlite3.Connection):
-        self._initialize_db_proxy(connection)
-        super().__init__()
+    def __init__(self, connection_provider: ConnectionProvider):
+        self._initialize_db_proxy(connection_provider)
 
     @staticmethod
     def _anchor_prune_condition(prune_list: list[str]):

@@ -3,19 +3,21 @@ import dataclasses
 import json
 import sqlite3
 import time
-from collections.abc import Iterator
-from typing import Any, Optional, Dict, Callable, List
+from typing import Any, Optional, Callable, List
 
 from pathlib import Path
-
-from peewee import EXCLUDED, SQL, Case, fn
+from peewee import EXCLUDED, SQL, Case
 
 from unshuffle.core.features import vector_from_blob
 from unshuffle.persistence.schema.enums import AnchorProfileState, RefinementCandidateState
 from unshuffle.persistence.schema.models import AnchorProfile, CoherenceResult, CoherenceReviewDecision, \
-    RefinementCandidate, StagingRecord
+    RefinementCandidate
 from unshuffle.persistence.utils.cache_utils import normalize_feature_vector
-from unshuffle.persistence.utils.thread_aware_sqlite_database import PeeweeStore
+from unshuffle.persistence.utils.thread_aware_sqlite_database import (
+    ConnectionBoundStore,
+    ConnectionProvider,
+    PeeweeStore,
+)
 
 REMOVED_VERIFIED_ANCHOR_SESSION = "__removed_verified_anchors__"
 
@@ -128,9 +130,8 @@ class CoherenceStore(abc.ABC):
     ) -> None: pass
 
 
-class SqliteCoherenceStore(CoherenceStore):
-    def __init__(self, connection):
-        self._connection = connection
+class SqliteCoherenceStore(CoherenceStore, ConnectionBoundStore):
+    pass
 
 
 class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
@@ -150,10 +151,8 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
                 time.sleep(0.2 * (attempt + 1))
         return None
 
-    def __init__(self, connection: sqlite3.Connection):
-        self._initialize_db_proxy(connection)
-        self._connection = connection
-        super().__init__()
+    def __init__(self, connection_provider: ConnectionProvider):
+        self._initialize_db_proxy(connection_provider)
 
     def clear_generated_coherence_audit(self, session_id: str) -> None:
         self._with_write_retry(lambda:self._clear_generated_coherence_audit(session_id))
@@ -183,7 +182,7 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
         CoherenceResult.insert_many(_results).on_conflict_replace().execute()
 
     def list_coherence_results(self, session_id: str) -> list[dict[str, Any]]:
-        return (
+        return list(
             CoherenceResult.select()
             .where(CoherenceResult.session_id == session_id)
             .order_by(CoherenceResult.record_id)
@@ -253,7 +252,7 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
         query = RefinementCandidate.select().where(RefinementCandidate.session_id == session_id)
         if state:
             query = query.where(RefinementCandidate.state == state)
-        return query.order_by(RefinementCandidate.confidence_score.desc()).dicts()
+        return list(query.order_by(RefinementCandidate.confidence_score.desc()).dicts())
 
     def count_refinement_candidates(self, session_id: str, state: Optional[str] = None) -> int:
         query = RefinementCandidate.select().where(RefinementCandidate.session_id == session_id)
@@ -456,9 +455,11 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
         query = AnchorProfile.select().where(AnchorProfile.session_id == session_id)
         if state:
             query = query.where(AnchorProfile.state == state)
-        return query.order_by(
-            AnchorProfile.audio_type, AnchorProfile.category, AnchorProfile.subcategory
-        ).dicts()
+        return list(
+            query.order_by(
+                AnchorProfile.audio_type, AnchorProfile.category, AnchorProfile.subcategory
+            ).dicts()
+        )
 
     def ensure_verified_anchors_for_session(self, session_id: str) -> int:
         removed_verified_anchor_ids = {

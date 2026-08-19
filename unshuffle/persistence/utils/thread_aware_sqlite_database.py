@@ -1,17 +1,40 @@
 import sqlite3
+from typing import Callable
 
 from peewee import SqliteDatabase
 
 from unshuffle.persistence.schema.models import db_proxy
 
+ConnectionProvider = Callable[[], sqlite3.Connection]
+
 
 class ThreadAwareSqliteDatabase(SqliteDatabase):
-    def __init__(self, connection: sqlite3.Connection):
-        self._existing_connection = connection
+    """Peewee database that reuses the sqlite3 connection owned by UnshuffleDB.
+
+    UnshuffleDB hands out one connection per thread, so the provider is
+    resolved lazily on every ``_connect``: Peewee keeps its connection state
+    in thread locals, which means each thread ends up bound to the very same
+    connection the raw SQL paths use in that thread. Sharing one connection
+    across threads would make a worker write and a follow-up write from
+    another thread deadlock on the database lock.
+    """
+
+    def __init__(self, connection_provider: ConnectionProvider):
+        self._connection_provider = connection_provider
         super().__init__(':memory:') # not real file for hacking InterfaceError
 
     def _connect(self):
-        return self._existing_connection
+        return self._connection_provider()
+
+    def begin(self, lock_type=None):
+        # The shared sqlite3 connection runs in the legacy isolation mode, so
+        # raw DML executed outside Peewee opens an implicit transaction that
+        # Peewee does not know about. Issuing BEGIN on top of it raises
+        # "cannot start a transaction within a transaction"; joining the open
+        # transaction matches what the raw ``with conn:`` blocks did before.
+        if self.connection().in_transaction:
+            return
+        super().begin(lock_type)
 
     def close(self):
         # lifecycle in UnshuffleDB, not here
@@ -21,11 +44,24 @@ class ThreadAwareSqliteDatabase(SqliteDatabase):
         # lifecycle in UnshuffleDB, not here
         pass
 
-class PeeweeStore:
-    _db:SqliteDatabase|None = None
 
-    def _initialize_db_proxy(self, connection):
-        self._db = ThreadAwareSqliteDatabase(connection)
+class ConnectionBoundStore:
+    """Store bound to UnshuffleDB's per-thread connection provider."""
+
+    def __init__(self, connection_provider: ConnectionProvider):
+        self._connection_provider = connection_provider
+
+    @property
+    def _connection(self) -> sqlite3.Connection:
+        return self._connection_provider()
+
+
+class PeeweeStore(ConnectionBoundStore):
+    _db: SqliteDatabase | None = None
+
+    def _initialize_db_proxy(self, connection_provider: ConnectionProvider):
+        self._connection_provider = connection_provider
+        self._db = ThreadAwareSqliteDatabase(connection_provider)
         db_proxy.initialize(self._db)
 
     def _bind_db_proxy(self):
