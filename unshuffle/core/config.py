@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     "CATEGORY_SUPPRESS_MAP": {},
     "SUB_TAXONOMY_MAP": {},
     "DEFAULT_SUB_MAP": {},
+    "STORE_MIGRATION": {}
 }
 
 _CONFIG_CACHE: dict[str, Any] | None = None

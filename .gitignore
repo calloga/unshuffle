@@ -58,4 +58,7 @@ DO_NOT_DELETE_unshuffle/
 .test_tmp/
 .unshuffle/
 .unshuffle_drag_exports/
+/.idea/
+/unshuffle.egg-info/
+/uv.lock
 .bench-appdata-*/
