@@ -9,10 +9,12 @@ from unshuffle.core import get_config
 from unshuffle.persistence import (
     connection,
 )
-from unshuffle.persistence.storages import storage_taxonomy, storage_lifecycle, storage_coherence, storage_learning, \
-    storage_sessions, storage_maintenance, storage_scan
-from unshuffle.persistence.stores.cache_store import SqliteCacheStore, PeeweeCacheStore
-from unshuffle.persistence.stores.coherence_store import SqliteCoherenceStore, PeeweeCoherenceStore
+from unshuffle.persistence.storages import storage_taxonomy, storage_lifecycle, storage_learning, storage_sessions, \
+    storage_scan
+from unshuffle.persistence.stores.cache_store import SqliteCacheStore, PeeweeCacheStore, CacheStore
+from unshuffle.persistence.stores.coherence_store import SqliteCoherenceStore, PeeweeCoherenceStore, CoherenceStore
+from unshuffle.persistence.stores.maintenance_store import SqliteMaintenanceStore, PeeweeMaintenanceStore, \
+    MaintenanceStore
 from unshuffle.persistence.utils import cache_utils
 from unshuffle.persistence.utils.cache_utils import normalize_cache_rows, cache_row
 from unshuffle.persistence.utils.enums import StoreName, DatabaseDriver
@@ -36,7 +38,10 @@ class UnshuffleDB:
         },
         StoreName.LEARNING: {},
         StoreName.LIFECYCLE: {},
-        StoreName.MAINTENANCE: {},
+        StoreName.MAINTENANCE: {
+            DatabaseDriver.PEEWEE: PeeweeMaintenanceStore,
+            DatabaseDriver.SQLITE: SqliteMaintenanceStore
+        },
         StoreName.SESSIONS: {},
         StoreName.TAXONOMY: {}
     }
@@ -48,10 +53,10 @@ class UnshuffleDB:
         self._connection_lock = threading.RLock()
         self._write_lock = threading.RLock()
         self._closed = False
-        self._initialize_schema()
-
         # migration logic, would be deleted after full migration to peewee
         self._init_stores()
+        self._initialize_schema()
+
 
         if os.environ.get("UNSHUFFLE_DB_FOREIGN_KEY_CHECK", "0") == "1":
             self._log_foreign_key_integrity()
@@ -59,12 +64,16 @@ class UnshuffleDB:
     def _init_stores(self):
         store_migration_config = get_config().get("STORE_MIGRATION", {})
 
-        self._cache_store = self._migration_config.get(StoreName.CACHE).get(
+        self._cache_store: CacheStore = self._migration_config.get(StoreName.CACHE).get(
             store_migration_config.get(StoreName.CACHE)
         )(self.conn)
 
-        self._coherence_store = self._migration_config.get(StoreName.COHERENCE).get(
+        self._coherence_store: CoherenceStore = self._migration_config.get(StoreName.COHERENCE).get(
             store_migration_config.get(StoreName.COHERENCE)
+        )(self.conn)
+
+        self._maintenance_store: MaintenanceStore = self._migration_config.get(StoreName.MAINTENANCE).get(
+            store_migration_config.get(StoreName.MAINTENANCE)
         )(self.conn)
 
     def __del__(self):
@@ -233,6 +242,7 @@ class UnshuffleDB:
     """
     CACHE STORE LOGIC
     """
+
     def get_all_hashes(self) -> Dict[str, str]:
         return self._cache_store.get_all_hashes()
 
@@ -316,6 +326,7 @@ class UnshuffleDB:
     """
     SESSION STORAGE LOGIC
     """
+
     def register_session(self, session_id: str, source: Path, target: Path, mode: str, is_flat: bool = False):
         storage_sessions.register_session(self, session_id, source, target, mode, is_flat)
 
@@ -381,6 +392,7 @@ class UnshuffleDB:
     """
     MAINTENANCE STORAGE LOGIC
     """
+
     def prune_ephemeral_state(
             self,
             keep_session_ids: Set[str] | List[str] | Tuple[str, ...] | None = None,
@@ -388,18 +400,18 @@ class UnshuffleDB:
             *,
             use_restorable_fallback: bool = True,
     ) -> Dict[str, Any]:
-        return storage_maintenance.prune_ephemeral_state(
-            self,
-            keep_session_ids,
-            target_root,
-            use_restorable_fallback=use_restorable_fallback,
-        )
+        with self._write_transaction():
+            return self._maintenance_store.prune_ephemeral_state(
+                keep_session_ids,
+                target_root,
+                use_restorable_fallback=use_restorable_fallback,
+            )
 
     def newest_restorable_staging_session(self, target_root: Path | str | None = None) -> str:
-        return storage_maintenance.newest_restorable_staging_session(self, target_root)
+        return self._maintenance_store.newest_restorable_staging_session(target_root)
 
     def database_size_stats(self) -> Dict[str, int]:
-        return storage_maintenance.database_size_stats(self)
+        return self._maintenance_store.database_size_stats()
 
     def compact_if_worthwhile(
             self,
@@ -407,14 +419,17 @@ class UnshuffleDB:
             min_reclaim_mb: int = 512,
             min_reclaim_ratio: float = 0.25,
     ) -> Dict[str, Any]:
-        return storage_maintenance.compact_if_worthwhile(
-            self,
-            min_reclaim_mb=min_reclaim_mb,
-            min_reclaim_ratio=min_reclaim_ratio,
-        )
+        with self._write_lock:
+            self.conn.commit()
+            return self._maintenance_store.compact_if_worthwhile(
+                min_reclaim_mb=min_reclaim_mb,
+                min_reclaim_ratio=min_reclaim_ratio,
+            )
 
     def force_compact(self) -> Dict[str, Any]:
-        return storage_maintenance.force_compact(self)
+        with self._write_lock:
+            self.conn.commit()
+            return self._maintenance_store.force_compact()
 
     def remove_staging_by_source(self, session_id: str, source_path: str):
         storage_sessions.remove_staging_by_source(self, session_id, source_path)
@@ -434,6 +449,7 @@ class UnshuffleDB:
     """
     COHERENCE STORAGE LOGIC
     """
+
     def get_coherence_staging_records(self, session_id: str) -> List[Dict]:
         return storage_sessions.get_coherence_staging_records(self, session_id)
 
@@ -450,79 +466,106 @@ class UnshuffleDB:
         return storage_sessions.coherence_records_by_row_ids(self, session_id, row_ids)
 
     def upsert_coherence_results(self, session_id: str, results: List[Any]):
-        storage_coherence.upsert_coherence_results(self, session_id, results)
+        with self._write_transaction():
+            self._coherence_store.upsert_coherence_results(session_id, results)
 
     def list_coherence_results(self, session_id: str) -> List[Dict[str, Any]]:
-        return storage_coherence.list_coherence_results(self, session_id)
+        return self._coherence_store.list_coherence_results(session_id)
 
     def list_coherence_result_clusters(self, session_id: str) -> List[Dict[str, Any]]:
-        return storage_coherence.list_coherence_result_clusters(self, session_id)
+        return self._coherence_store.list_coherence_result_clusters(self, session_id)
 
     def coherence_cache_stats(self, session_id: str) -> Dict[str, int]:
-        return storage_coherence.coherence_cache_stats(self, session_id)
+        return self._coherence_store.coherence_cache_stats(session_id)
 
     def upsert_refinement_candidates(self, session_id: str, candidates: List[Any]):
-        storage_coherence.upsert_refinement_candidates(self, session_id, candidates)
+        with self._write_transaction():
+            self._coherence_store.upsert_refinement_candidates(session_id, candidates)
 
     def list_refinement_candidates(self, session_id: str, state: Optional[str] = None) -> List[Dict[str, Any]]:
-        return storage_coherence.list_refinement_candidates(self, session_id, state)
+        return self._coherence_store.list_refinement_candidates(session_id, state)
 
     def count_refinement_candidates(self, session_id: str, state: Optional[str] = None) -> int:
-        return storage_coherence.count_refinement_candidates(self, session_id, state)
+        return self._coherence_store.count_refinement_candidates(session_id, state)
 
     def set_refinement_candidate_state(self, session_id: str, candidate_ids: List[str], state: str):
-        storage_coherence.set_refinement_candidate_state(self, session_id, candidate_ids, state)
+        if not candidate_ids:
+            return
+        with self._write_transaction():
+            self._coherence_store.set_refinement_candidate_state(session_id, candidate_ids, state)
 
     def upsert_coherence_review_decisions(self, session_id: str, decisions: List[Dict[str, Any]]):
-        storage_coherence.upsert_coherence_review_decisions(self, session_id, decisions)
+        if not decisions:
+            return
+        with self._write_transaction():
+            self._coherence_store.upsert_coherence_review_decisions(session_id, decisions)
 
     def list_coherence_review_decisions(
             self,
             source_paths: List[str] | None = None,
             file_hashes: List[str] | None = None,
     ) -> List[Dict[str, Any]]:
-        return storage_coherence.list_coherence_review_decisions(self, source_paths, file_hashes)
+        return self._coherence_store.list_coherence_review_decisions(source_paths=source_paths, file_hashes=file_hashes)
 
     def apply_target_review_decisions_to_staging(self, session_id: str) -> int:
-        return storage_coherence.apply_target_review_decisions_to_staging(self, session_id)
+        return self._coherence_store.apply_target_review_decisions_to_staging(self, session_id)
 
     def upsert_anchor_candidates(self, session_id: str, anchors: List[Any]):
-        storage_coherence.upsert_anchor_candidates(self, session_id, anchors)
+        with self._write_transaction():
+            self._coherence_store.upsert_anchor_candidates(session_id, anchors)
 
     def upsert_coherence_audit(self, session_id: str, results: List[Any], candidates: List[Any], anchors: List[Any]):
-        storage_coherence.upsert_coherence_audit(self, session_id, results, candidates, anchors)
+        with self._write_transaction():
+            self._coherence_store.upsert_coherence_results(session_id, results)
+            self._coherence_store.upsert_refinement_candidates(session_id, candidates)
+            self._coherence_store.upsert_anchor_candidates(session_id, anchors)
 
     def clear_generated_coherence_audit(self, session_id: str):
-        storage_coherence.clear_generated_coherence_audit(self, session_id)
+        self._coherence_store.clear_generated_coherence_audit(session_id)
 
     def append_coherence_group(self, session_id: str, results: List[Any], candidates=None, anchors=None):
-        storage_coherence.append_coherence_group(self, session_id, results, candidates, anchors)
+        self._coherence_store.append_coherence_group(session_id, results, candidates, anchors)
 
     def upsert_anchor_profiles(self, session_id: str, anchors: List[Any]):
-        storage_coherence.upsert_anchor_profiles(self, session_id, anchors)
+        with self._write_transaction():
+            self._coherence_store.upsert_anchor_profiles(session_id, anchors)
 
     def upsert_anchor_profile_rows(self, session_id: str, rows: List[Dict[str, Any]]):
-        storage_coherence.upsert_anchor_profile_rows(self, session_id, rows)
+        with self._write_transaction():
+            self._coherence_store.upsert_anchor_profile_rows(session_id, rows)
 
     def list_anchor_candidates(self, session_id: str, state: Optional[str] = None) -> List[Dict[str, Any]]:
-        return storage_coherence.list_anchor_candidates(self, session_id, state)
+        return self._coherence_store.list_anchor_candidates(session_id, state)
 
     def ensure_verified_anchors_for_session(self, session_id: str) -> int:
-        return storage_coherence.ensure_verified_anchors_for_session(self, session_id)
+        with self._write_transaction():
+            return self._coherence_store.ensure_verified_anchors_for_session(session_id)
 
     def set_anchor_candidate_state(self, session_id: str, anchor_ids: List[str], state: str):
-        storage_coherence.set_anchor_candidate_state(self, session_id, anchor_ids, state)
+        if not anchor_ids:
+            return
+        with self._write_transaction():
+            self._coherence_store.set_anchor_candidate_state(session_id, anchor_ids, state)
 
     def remove_verified_anchor_profiles(self, session_id: str, anchor_ids: List[str]):
-        storage_coherence.remove_verified_anchor_profiles(self, session_id, anchor_ids)
+        if not anchor_ids:
+            return
+        with self._write_transaction():
+            self._coherence_store.remove_verified_anchor_profiles(session_id, anchor_ids)
 
     def repair_anchor_profile_json(self, session_id: str, anchor_ids: List[str], payload_builder) -> List[str]:
         """Rebuild profile_json from binary columns for anchors missing it.
         Returns anchor_ids that could not be repaired (caller should treat as failure)."""
-        return storage_coherence.repair_anchor_profile_json(self, session_id, anchor_ids, payload_builder)
+        if not anchor_ids:
+            return []
+        with self._write_transaction():
+            return self._coherence_store.repair_anchor_profile_json(session_id, anchor_ids, payload_builder)
 
     def seed_system_anchors(self, rows: List[Dict[str, Any]]):
-        storage_coherence.seed_system_anchors(self, rows)
+        if not rows:
+            return
+        with self._write_transaction():
+            self._coherence_store.seed_system_anchors(rows)
 
     def _normalize_acoustic_vector(self, value) -> Optional[bytes]:
         return cache_utils.normalize_feature_vector(value)
@@ -532,6 +575,7 @@ class UnshuffleDB:
     """
     def update_staging_record(self, session_id: str, row_id: int, data: Dict[str, str]):
         storage_sessions.update_staging_record(self, session_id, row_id, data)
+
 
     def search_staging(self, session_id: str, query_text: str) -> List[int] | Set[int]:
         return storage_learning.search_staging(self, session_id, query_text)
@@ -578,6 +622,7 @@ class UnshuffleDB:
     """
     STORAGE TAXONOMY LOGIC
     """
+
     def reset_adjustments(self):
         storage_taxonomy.reset_adjustments(self)
 

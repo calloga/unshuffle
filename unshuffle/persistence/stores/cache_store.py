@@ -156,12 +156,8 @@ class CacheStore(ABC):
 
 
 class SqliteCacheStore(CacheStore):
-    def __init__(self, connection_provider: Callable[[], sqlite3.Connection]):
-        self._conn_provider = connection_provider
-
-    @property
-    def _conn(self) -> sqlite3.Connection:
-        return self._conn_provider()
+    def __init__(self, connection: sqlite3.Connection):
+        self._conn = connection
 
     def _get_feature_vectors(self, chunk: list[str]) -> Iterable[FeatureVectorRow]:
         placeholders = ", ".join("?" for _ in chunk)
