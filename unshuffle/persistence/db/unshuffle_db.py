@@ -512,7 +512,8 @@ class UnshuffleDB:
         return self._coherence_store.list_coherence_review_decisions(source_paths=source_paths, file_hashes=file_hashes)
 
     def apply_target_review_decisions_to_staging(self, session_id: str) -> int:
-        return self._coherence_store.apply_target_review_decisions_to_staging(self, session_id)
+        with self._write_transaction():
+            return self._coherence_store.apply_target_review_decisions_to_staging(session_id)
 
     def upsert_anchor_candidates(self, session_id: str, anchors: List[Any]):
         with self._write_transaction():

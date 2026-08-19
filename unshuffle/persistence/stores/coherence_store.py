@@ -850,3 +850,66 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
                 for candidate in candidates
             ],
         )
+
+    def apply_target_review_decisions_to_staging(self, session_id: str) -> int:
+        cursor = self._db.cursor()
+        exact = cursor.execute(
+            """
+            UPDATE staging_records AS staging
+            SET audio_type  = COALESCE(NULLIF((SELECT target_audio_type
+                                               FROM coherence_review_decisions
+                                               WHERE source_path = staging.source_path
+                                                 AND decision_type = 'target'), ''), audio_type),
+                category    = COALESCE(NULLIF((SELECT target_category
+                                               FROM coherence_review_decisions
+                                               WHERE source_path = staging.source_path
+                                                 AND decision_type = 'target'), ''), category),
+                subcategory = COALESCE((SELECT target_subcategory
+                                        FROM coherence_review_decisions
+                                        WHERE source_path = staging.source_path
+                                          AND decision_type = 'target'), subcategory)
+            WHERE staging.session_id = ?
+              AND EXISTS (SELECT 1
+                          FROM coherence_review_decisions
+                          WHERE source_path = staging.source_path
+                            AND decision_type = 'target')
+            """,
+            (session_id,),
+        )
+        by_hash = cursor.execute(
+            """
+            WITH unique_staging AS (SELECT hash
+                                    FROM staging_records
+                                    WHERE session_id = ?
+                                      AND COALESCE(hash, '') != ''
+                                    GROUP BY hash
+                                    HAVING COUNT(*) = 1),
+                 unique_decisions AS (SELECT file_hash,
+                                             MAX(target_audio_type)  AS target_audio_type,
+                                             MAX(target_category)    AS target_category,
+                                             MAX(target_subcategory) AS target_subcategory
+                                      FROM coherence_review_decisions
+                                      WHERE decision_type = 'target'
+                                        AND COALESCE(file_hash, '') != ''
+                                      GROUP BY file_hash
+                                      HAVING COUNT(*) = 1)
+            UPDATE staging_records AS staging
+            SET audio_type  = COALESCE(
+                    NULLIF((SELECT target_audio_type FROM unique_decisions WHERE file_hash = staging.hash), ''),
+                    audio_type),
+                category    = COALESCE(
+                        NULLIF((SELECT target_category FROM unique_decisions WHERE file_hash = staging.hash), ''),
+                        category),
+                subcategory = COALESCE((SELECT target_subcategory FROM unique_decisions WHERE file_hash = staging.hash),
+                                       subcategory)
+            WHERE staging.session_id = ?
+              AND staging.hash IN (SELECT hash FROM unique_staging)
+              AND staging.hash IN (SELECT file_hash FROM unique_decisions)
+              AND NOT EXISTS (SELECT 1
+                              FROM coherence_review_decisions
+                              WHERE source_path = staging.source_path
+                                AND decision_type = 'target')
+            """,
+            (session_id, session_id),
+        )
+        return max(0, int(exact.rowcount or 0)) + max(0, int(by_hash.rowcount or 0))
