@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from ...utils.history import (
     clear_migration_history,
+    database_handles_for_target,
     invalidate_history_cache,
     load_executed_sessions,
     resolve_history_target,
@@ -27,7 +28,11 @@ def _normalized_path(path: str) -> str:
 
 
 def _history_target(app) -> str:
-    return resolve_history_target(app.settings)
+    active_target = str(app.settings.value("last_target", "") or "")
+    return resolve_history_target(
+        app.settings,
+        **database_handles_for_target(getattr(app, "engine", None), active_target),
+    )
 
 
 def refresh_history_menu(app):
@@ -44,7 +49,11 @@ def refresh_history_menu(app):
 
 
     try:
-        sessions = load_executed_sessions(tgt, limit=10)
+        sessions = load_executed_sessions(
+            tgt,
+            limit=10,
+            **database_handles_for_target(getattr(app, "engine", None), tgt),
+        )
     except Exception:
         logging.exception("Failed to load history menu for target %s", tgt)
         app.custom_menu_bar.menu_history.addAction("No history found").setEnabled(False)
@@ -132,7 +141,11 @@ def reset_learning(app):
         return
 
     try:
-        reset_learning_weights(tgt)
+        handles = database_handles_for_target(getattr(app, "engine", None), tgt)
+        reset_learning_weights(
+            tgt,
+            global_db=handles.get("global_db"),
+        )
         QMessageBox.information(app, "Reset Learned Weights", "Learned weights were reset.")
     except Exception as e:
         QMessageBox.critical(app, "Reset Learned Weights", f"Could not reset learned weights: {e}")
@@ -149,7 +162,10 @@ def clear_history(app):
         return
 
     try:
-        clear_migration_history(tgt)
+        clear_migration_history(
+            tgt,
+            **database_handles_for_target(getattr(app, "engine", None), tgt),
+        )
         QTimer.singleShot(0, lambda: refresh_history_menu(app))
         QMessageBox.information(app, "Clear Migration History", "Migration history was cleared.")
     except Exception as e:

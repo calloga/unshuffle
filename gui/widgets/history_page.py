@@ -24,7 +24,7 @@ from ..utils.constants import (
     WORKSPACE_ROOT_MARGINS,
     WORKSPACE_ROOT_SPACING,
 )
-from ..utils.history import load_executed_sessions
+from ..utils.history import database_handles_for_target, load_executed_sessions
 from ..utils.layout_helpers import apply_layout_margins, apply_layout_spacing
 from ..utils.styles import (
     ColorPalette,
@@ -117,7 +117,11 @@ class HistoryPage(QWidget):
             self._set_sessions([], "Select a target library to view history.")
             return
         try:
-            sessions = load_executed_sessions(target, limit=100)
+            sessions = load_executed_sessions(
+                target,
+                limit=100,
+                **database_handles_for_target(getattr(self.parent(), "engine", None), target),
+            )
         except Exception:
             logging.exception("Failed to load history page for target %s", target)
             self._set_sessions([], "History could not be loaded for this library.")

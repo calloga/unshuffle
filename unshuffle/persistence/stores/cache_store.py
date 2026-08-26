@@ -2,7 +2,7 @@ import json
 import sqlite3
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
-from typing import Any, Callable, Optional, cast
+from typing import Any, Optional, cast
 
 from pathlib import Path
 from peewee import fn
@@ -13,8 +13,13 @@ from unshuffle.core.features import (
     CURRENT_VECTOR_SCHEMA,
 )
 from unshuffle.persistence.schema.enums import RecordStepStatus, RecordStatus
-from unshuffle.persistence.schema.models import db_proxy, FileCache, Record
-from unshuffle.persistence.utils.thread_aware_sqlite_database import ThreadAwareSqliteDatabase
+from unshuffle.persistence.schema.models import FileCache, Record
+from unshuffle.persistence.utils.thread_aware_sqlite_database import (
+    ConnectionBoundStore,
+    ConnectionProvider,
+    PeeweeStore,
+    bind_peewee_store,
+)
 
 CacheHashEntry = dict[str, Optional[str]]
 CacheHashRow = Mapping[str, Any]
@@ -154,13 +159,10 @@ class CacheStore(ABC):
         pass
 
 
-class SqliteCacheStore(CacheStore):
-    def __init__(self, connection_provider: Callable[[], sqlite3.Connection]):
-        self._conn_provider = connection_provider
-
+class SqliteCacheStore(CacheStore, ConnectionBoundStore):
     @property
     def _conn(self) -> sqlite3.Connection:
-        return self._conn_provider()
+        return self._connection
 
     def _get_feature_vectors(self, chunk: list[str]) -> Iterable[FeatureVectorRow]:
         placeholders = ", ".join("?" for _ in chunk)
@@ -189,6 +191,7 @@ class SqliteCacheStore(CacheStore):
             chunk,
         )
         return cast(Iterable[CacheHashRow], cursor.fetchall())
+
     def _get_cached_entries(self, chunk: list[str]) -> Iterable[CacheHashRow]:
         placeholders = ", ".join("?" for _ in chunk)
         cursor = self._conn.execute(
@@ -219,7 +222,7 @@ class SqliteCacheStore(CacheStore):
         )
         return cursor.fetchone() is not None
 
-    def get_committed_hashes(self,) -> set[str]:
+    def get_committed_hashes(self, ) -> set[str]:
         cursor = self._conn.execute(
             """
             SELECT DISTINCT file_hash
@@ -238,7 +241,7 @@ class SqliteCacheStore(CacheStore):
         )
         row = cursor.fetchone()
         return row["hash"] if row else None
-    
+
     def get_cached_entry(self, path: Path, size: int, mtime: float) -> Optional[CacheHashEntry]:
         cursor = self._conn.execute(
             "SELECT hash, fast_hash FROM file_cache WHERE last_path = ? AND size = ? AND mtime = ?",
@@ -295,11 +298,12 @@ class SqliteCacheStore(CacheStore):
             return False
         return list(schema) == list(CURRENT_VECTOR_SCHEMA)
 
-class PeeweeCacheStore(SqliteCacheStore):
-    def __init__(self, connection: sqlite3.Connection):
-        self._db = ThreadAwareSqliteDatabase(connection)
-        db_proxy.initialize(self._db)
-        super().__init__(lambda: connection)
+
+@bind_peewee_store
+class PeeweeCacheStore(SqliteCacheStore, PeeweeStore):
+    def __init__(self, connection_provider: ConnectionProvider):
+        self._initialize_db_proxy(connection_provider)
+        super().__init__(connection_provider)
 
     def get_all_hashes(self) -> dict[str, str]:
         return {x.hash: x.last_path for x in FileCache.select()}
@@ -326,9 +330,9 @@ class PeeweeCacheStore(SqliteCacheStore):
 
     def get_cached_hash(self, path: Path, size: int, mtime: float) -> Optional[str]:
         _hash = FileCache.select().where(
-            (FileCache.last_path==Path(path).as_posix())
-            & (FileCache.size==size)
-            & (FileCache.mtime==mtime)
+            (FileCache.last_path == Path(path).as_posix())
+            & (FileCache.size == size)
+            & (FileCache.mtime == mtime)
         ).first()
 
         return _hash.hash if _hash else None
@@ -339,7 +343,7 @@ class PeeweeCacheStore(SqliteCacheStore):
         ).where(
             cast(Any, FileCache.last_path).in_(chunk)
         ).dicts()
-        return cast(Iterable[CacheHashRow], rows)
+        return cast(Iterable[CacheHashRow], list(rows))
 
     def _get_cached_entries(self, chunk: list[str]) -> Iterable[CacheHashRow]:
         rows = FileCache.select(
@@ -347,7 +351,7 @@ class PeeweeCacheStore(SqliteCacheStore):
         ).where(
             cast(Any, FileCache.last_path).in_(chunk)
         ).dicts()
-        return cast(Iterable[CacheHashRow], rows)
+        return cast(Iterable[CacheHashRow], list(rows))
 
     def _get_feature_vectors(self, chunk: list[str]) -> Iterable[FeatureVectorRow]:
         rows = FileCache.select(
@@ -358,7 +362,7 @@ class PeeweeCacheStore(SqliteCacheStore):
             & (FileCache.feature_space_version == CURRENT_FEATURE_SPACE_VERSION)
             & (FileCache.extractor_version == CURRENT_EXTRACTOR_VERSION)
         ).dicts()
-        return cast(Iterable[FeatureVectorRow], rows)
+        return cast(Iterable[FeatureVectorRow], list(rows))
 
     def get_feature_vector(self, file_hash: str) -> Optional[bytes]:
         cache = FileCache.select(
@@ -375,7 +379,7 @@ class PeeweeCacheStore(SqliteCacheStore):
         return cache.feature_vector
 
     def clear_cache(self) -> None:
-        FileCache.delete()
+        FileCache.delete().execute()
 
     def get_cached_path_by_hash(self, file_hash: str) -> Optional[str]:
         _row = FileCache.select(FileCache.last_path).where(FileCache.hash == file_hash).first()

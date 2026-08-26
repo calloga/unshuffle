@@ -80,9 +80,13 @@ def open_history_workspace(window) -> None:
 
 def refresh_history_page(window) -> None:
     if getattr(window, "history_page", None):
-        from ..utils.history import resolve_history_target
+        from ..utils.history import database_handles_for_target, resolve_history_target
 
-        target = resolve_history_target(window.settings)
+        active_target = str(window.settings.value("last_target", "") or "")
+        target = resolve_history_target(
+            window.settings,
+            **database_handles_for_target(getattr(window, "engine", None), active_target),
+        )
         window.history_page.refresh_from_target(str(target or ""))
 
 
