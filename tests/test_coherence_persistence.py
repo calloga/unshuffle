@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 from unittest import mock
 
@@ -61,6 +62,62 @@ def test_coherence_results_and_refinement_candidate_states_round_trip(tmp_path: 
         db.close()
 
 
+def test_large_coherence_audit_batches_writes_below_sqlite_variable_limit(tmp_path: Path):
+    db = UnshuffleDB(tmp_path / "coherence_batched.db")
+    original_limit = db.conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 100)
+    try:
+        vector = [0.1] * FEATURE_VECTOR_SIZE
+        results = [
+            CoherenceResult(
+                record_id=str(index),
+                category="Bass",
+                subcategory="Sub",
+                coherence_status="stable",
+                coherence_score=0.9,
+            )
+            for index in range(20)
+        ]
+        candidates = [
+            RefinementCandidate(
+                candidate_id=f"candidate-{index}",
+                record_id=str(index),
+                current_category="Bass",
+                current_subcategory="Sub",
+                suggested_category="Kicks",
+                suggested_subcategory="Kick",
+                evidence="near kick cluster",
+            )
+            for index in range(20)
+        ]
+        anchors = [
+            AnchorProfile(
+                anchor_id=f"anchor-{index}",
+                category="Bass",
+                subcategory="Sub",
+                cluster_id=f"cluster-{index}",
+                feature_space_version="test",
+                extractor_version="test",
+                vector_schema=CURRENT_FEATURE_SCHEMA,
+                medoid_vector=vector,
+                cluster_centroid=vector,
+                cluster_std=vector,
+                coherence_radius=0.2,
+                n_reference_items=5,
+            )
+            for index in range(20)
+        ]
+
+        db.upsert_coherence_audit("s1", results, candidates, anchors)
+
+        assert len(db.list_coherence_results("s1")) == 20
+        assert len(db.list_refinement_candidates("s1")) == 20
+        assert len(db.list_anchor_candidates("s1")) == 20
+    finally:
+        db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, original_limit)
+        db.close()
+
+
 def test_auto_staged_refinement_candidate_state_round_trips(tmp_path: Path):
     db = UnshuffleDB(tmp_path / "coherence_auto_staged.db")
     try:
@@ -87,15 +144,20 @@ def test_auto_staged_refinement_candidate_state_round_trips(tmp_path: Path):
 
 def test_coherence_audit_persistence_rolls_back_as_one_unit(tmp_path: Path):
     db = UnshuffleDB(tmp_path / "coherence_atomic.db")
+    original_limit = db.conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 100)
     try:
-        result = CoherenceResult(
-            record_id="1",
-            category="Bass",
-            subcategory="Sub",
-            coherence_status="low_coherence",
-            coherence_score=0.2,
-            is_outlier=True,
-        )
+        results = [
+            CoherenceResult(
+                record_id=str(index),
+                category="Bass",
+                subcategory="Sub",
+                coherence_status="low_coherence",
+                coherence_score=0.2,
+                is_outlier=True,
+            )
+            for index in range(20)
+        ]
 
         with mock.patch(
             f"{type(db._coherence_store).__module__}."
@@ -104,7 +166,7 @@ def test_coherence_audit_persistence_rolls_back_as_one_unit(tmp_path: Path):
             side_effect=RuntimeError("forced failure"),
         ):
             try:
-                db.upsert_coherence_audit("s1", [result], [], [])
+                db.upsert_coherence_audit("s1", results, [], [])
             except RuntimeError:
                 pass
             else:
@@ -112,6 +174,7 @@ def test_coherence_audit_persistence_rolls_back_as_one_unit(tmp_path: Path):
 
         assert db.list_coherence_results("s1") == []
     finally:
+        db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, original_limit)
         db.close()
 
 

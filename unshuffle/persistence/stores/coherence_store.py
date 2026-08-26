@@ -2,8 +2,8 @@ import abc
 import json
 import sqlite3
 import time
-from collections.abc import Mapping
-from typing import Any, Optional, Callable, List
+from collections.abc import Iterator, Mapping
+from typing import Any, Optional, Callable, List, cast
 
 from pathlib import Path
 from peewee import EXCLUDED, SQL, Case
@@ -22,6 +22,34 @@ from unshuffle.persistence.utils.thread_aware_sqlite_database import (
 from unshuffle.persistence.stores import sqlite_coherence_queries
 
 REMOVED_VERIFIED_ANCHOR_SESSION = "__removed_verified_anchors__"
+_PEEWEE_INSERT_MAX_ROWS = 500
+_PEEWEE_INSERT_VARIABLE_RESERVE = 32
+
+
+def _peewee_insert_batches(
+    connection: sqlite3.Connection,
+    model: Any,
+    rows: list[dict[str, Any]],
+) -> Iterator[list[dict[str, Any]]]:
+    """Yield batches that fit the active connection's SQL-variable limit."""
+    if not rows:
+        return
+    variable_limit = 999
+    getlimit = getattr(connection, "getlimit", None)
+    if callable(getlimit):
+        try:
+            variable_limit = int(cast(Any, getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)))
+        except (TypeError, ValueError):
+            pass
+    model_field_count = len(getattr(model._meta, "sorted_fields", ()))
+    variables_per_row = max(1, len(rows[0]), model_field_count)
+    available_variables = max(1, variable_limit - _PEEWEE_INSERT_VARIABLE_RESERVE)
+    batch_size = max(
+        1,
+        min(_PEEWEE_INSERT_MAX_ROWS, available_variables // variables_per_row),
+    )
+    for start in range(0, len(rows), batch_size):
+        yield rows[start:start + batch_size]
 
 
 def _normalized_source_path(value: Any) -> str:
@@ -335,8 +363,8 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
     def upsert_coherence_results(self, session_id: str, results: list[Any]):
         CoherenceResult.delete().where(CoherenceResult.session_id == session_id).execute()
         rows = [_coherence_result_row(session_id, result) for result in results]
-        if rows:
-            CoherenceResult.insert_many(rows).on_conflict_replace().execute()
+        for batch in _peewee_insert_batches(self._connection, CoherenceResult, rows):
+            CoherenceResult.insert_many(batch).on_conflict_replace().execute()
 
     def list_coherence_results(self, session_id: str) -> list[dict[str, Any]]:
         return list(
@@ -378,35 +406,36 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
             }
             for candidate in candidates
         ]
-        (
-            RefinementCandidate
-            .insert_many(rows)
-            .on_conflict(
-                conflict_target=[RefinementCandidate.session_id, RefinementCandidate.candidate_id],
-                update={
-                    RefinementCandidate.record_id: EXCLUDED.record_id,
-                    RefinementCandidate.current_audio_type: EXCLUDED.current_audio_type,
-                    RefinementCandidate.current_category: EXCLUDED.current_category,
-                    RefinementCandidate.current_subcategory: EXCLUDED.current_subcategory,
-                    RefinementCandidate.suggested_audio_type: EXCLUDED.suggested_audio_type,
-                    RefinementCandidate.suggested_category: EXCLUDED.suggested_category,
-                    RefinementCandidate.suggested_subcategory: EXCLUDED.suggested_subcategory,
-                    RefinementCandidate.evidence: EXCLUDED.evidence,
-                    RefinementCandidate.coherence_status: EXCLUDED.coherence_status,
-                    RefinementCandidate.confidence_score: EXCLUDED.confidence_score,
-                    RefinementCandidate.state: Case(None, [
-                        (
-                            RefinementCandidate.state.in_(
-                                [RefinementCandidateState.ACCEPTED, RefinementCandidateState.IGNORED]
+        for batch in _peewee_insert_batches(self._connection, RefinementCandidate, rows):
+            (
+                RefinementCandidate
+                .insert_many(batch)
+                .on_conflict(
+                    conflict_target=[RefinementCandidate.session_id, RefinementCandidate.candidate_id],
+                    update={
+                        RefinementCandidate.record_id: EXCLUDED.record_id,
+                        RefinementCandidate.current_audio_type: EXCLUDED.current_audio_type,
+                        RefinementCandidate.current_category: EXCLUDED.current_category,
+                        RefinementCandidate.current_subcategory: EXCLUDED.current_subcategory,
+                        RefinementCandidate.suggested_audio_type: EXCLUDED.suggested_audio_type,
+                        RefinementCandidate.suggested_category: EXCLUDED.suggested_category,
+                        RefinementCandidate.suggested_subcategory: EXCLUDED.suggested_subcategory,
+                        RefinementCandidate.evidence: EXCLUDED.evidence,
+                        RefinementCandidate.coherence_status: EXCLUDED.coherence_status,
+                        RefinementCandidate.confidence_score: EXCLUDED.confidence_score,
+                        RefinementCandidate.state: Case(None, [
+                            (
+                                RefinementCandidate.state.in_(
+                                    [RefinementCandidateState.ACCEPTED, RefinementCandidateState.IGNORED]
+                                ),
+                                RefinementCandidate.state,
                             ),
-                            RefinementCandidate.state,
-                        ),
-                    ], EXCLUDED.state),
-                    RefinementCandidate.updated_at: SQL('CURRENT_TIMESTAMP'),
-                },
+                        ], EXCLUDED.state),
+                        RefinementCandidate.updated_at: SQL('CURRENT_TIMESTAMP'),
+                    },
+                )
+                .execute()
             )
-            .execute()
-        )
 
     def list_refinement_candidates(self, session_id: str, state: Optional[str] = None) -> list[dict[str, Any]]:
         query = RefinementCandidate.select().where(RefinementCandidate.session_id == session_id)
@@ -533,31 +562,32 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
         ]
         if not _rows:
             return
-        (
-            AnchorProfile
-            .insert_many(_rows)
-            .on_conflict(
-                conflict_target=[AnchorProfile.session_id, AnchorProfile.anchor_id],
-                update={
-                    AnchorProfile.audio_type: EXCLUDED.audio_type,
-                    AnchorProfile.category: EXCLUDED.category,
-                    AnchorProfile.subcategory: EXCLUDED.subcategory,
-                    AnchorProfile.cluster_id: EXCLUDED.cluster_id,
-                    AnchorProfile.feature_space_version: EXCLUDED.feature_space_version,
-                    AnchorProfile.extractor_version: EXCLUDED.extractor_version,
-                    AnchorProfile.feature_schema_json: EXCLUDED.feature_schema_json,
-                    AnchorProfile.medoid_vector: EXCLUDED.medoid_vector,
-                    AnchorProfile.cluster_centroid: EXCLUDED.cluster_centroid,
-                    AnchorProfile.cluster_std: EXCLUDED.cluster_std,
-                    AnchorProfile.coherence_radius: EXCLUDED.coherence_radius,
-                    AnchorProfile.n_reference_items: EXCLUDED.n_reference_items,
-                    AnchorProfile.state: EXCLUDED.state,
-                    AnchorProfile.profile_json: EXCLUDED.profile_json,
-                    AnchorProfile.updated_at: SQL('CURRENT_TIMESTAMP'),
-                },
+        for batch in _peewee_insert_batches(self._connection, AnchorProfile, _rows):
+            (
+                AnchorProfile
+                .insert_many(batch)
+                .on_conflict(
+                    conflict_target=[AnchorProfile.session_id, AnchorProfile.anchor_id],
+                    update={
+                        AnchorProfile.audio_type: EXCLUDED.audio_type,
+                        AnchorProfile.category: EXCLUDED.category,
+                        AnchorProfile.subcategory: EXCLUDED.subcategory,
+                        AnchorProfile.cluster_id: EXCLUDED.cluster_id,
+                        AnchorProfile.feature_space_version: EXCLUDED.feature_space_version,
+                        AnchorProfile.extractor_version: EXCLUDED.extractor_version,
+                        AnchorProfile.feature_schema_json: EXCLUDED.feature_schema_json,
+                        AnchorProfile.medoid_vector: EXCLUDED.medoid_vector,
+                        AnchorProfile.cluster_centroid: EXCLUDED.cluster_centroid,
+                        AnchorProfile.cluster_std: EXCLUDED.cluster_std,
+                        AnchorProfile.coherence_radius: EXCLUDED.coherence_radius,
+                        AnchorProfile.n_reference_items: EXCLUDED.n_reference_items,
+                        AnchorProfile.state: EXCLUDED.state,
+                        AnchorProfile.profile_json: EXCLUDED.profile_json,
+                        AnchorProfile.updated_at: SQL('CURRENT_TIMESTAMP'),
+                    },
+                )
+                .execute()
             )
-            .execute()
-        )
 
     def _upsert_anchor_profiles(self, session_id: str, anchors: list[Any], *, update_state: bool) -> None:
         if not anchors:
@@ -601,15 +631,16 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
         }
         if update_state:
             update[AnchorProfile.state] = EXCLUDED.state
-        (
-            AnchorProfile
-            .insert_many(rows)
-            .on_conflict(
-                conflict_target=[AnchorProfile.session_id, AnchorProfile.anchor_id],
-                update=update,
+        for batch in _peewee_insert_batches(self._connection, AnchorProfile, rows):
+            (
+                AnchorProfile
+                .insert_many(batch)
+                .on_conflict(
+                    conflict_target=[AnchorProfile.session_id, AnchorProfile.anchor_id],
+                    update=update,
+                )
+                .execute()
             )
-            .execute()
-        )
 
     def list_anchor_candidates(self, session_id: str, state: Optional[str] = None) -> list[dict[str, Any]]:
         query = AnchorProfile.select().where(AnchorProfile.session_id == session_id)
