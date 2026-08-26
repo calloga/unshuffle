@@ -88,34 +88,52 @@ def _resolve_restore_session_id(db_conn, target: Path, requested_session_id: str
     return ""
 
 
-def _open_restore_db(target: Path, requested_session_id: str):
+def _open_restore_db(
+    target: Path,
+    requested_session_id: str,
+    *,
+    local_db=None,
+    global_db=None,
+):
     from unshuffle.persistence import get_db, get_local_db
 
     target = Path(target)
     candidates = []
     if (target / SYSTEM_FOLDER_NAME / DB_FILE_NAME).exists():
-        candidates.append(("local", get_local_db(target)))
-    candidates.append(("global", get_db(target)))
+        candidates.append(("local", local_db, lambda: get_local_db(target)))
+    candidates.append(("global", global_db, lambda: get_db(target)))
 
     fallback = None
     fallback_session_id = ""
     fallback_scope = "global"
-    for scope, db_conn in candidates:
+    fallback_owned = False
+    for scope, existing_db, database_factory in candidates:
+        db_conn = existing_db
+        owned = False
+        if db_conn is None:
+            db_conn = database_factory()
+            owned = True
         session_id = _resolve_restore_session_id(db_conn, target, requested_session_id)
         if session_id:
             if requested_session_id and session_id == (requested_session_id).strip():
-                if fallback is not None:
+                if fallback is not None and fallback_owned:
                     fallback.close()
-                return db_conn, session_id, scope
+                return db_conn, session_id, scope, owned
             if fallback is None:
                 fallback = db_conn
                 fallback_session_id = session_id
                 fallback_scope = scope
+                fallback_owned = owned
                 continue
-        db_conn.close()
+        if scope == "global" and fallback is None:
+            return db_conn, "", "global", owned
+        if owned:
+            db_conn.close()
     if fallback is not None:
-        return fallback, fallback_session_id, fallback_scope
-    return get_db(target), "", "global"
+        return fallback, fallback_session_id, fallback_scope, fallback_owned
+    if global_db is not None:
+        return global_db, "", "global", False
+    return get_db(target), "", "global", True
 
 
 class ScanWorker(QThread):
@@ -790,10 +808,12 @@ class SessionLoadWorker(QThread):
     finished = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, target, session_id):
+    def __init__(self, target, session_id, *, local_db=None, global_db=None):
         super().__init__()
         self.target = str(target or "")
         self.session_id = str(session_id or "")
+        self.local_db = local_db
+        self.global_db = global_db
 
     @safe_gc_run
     def run(self):
@@ -803,7 +823,12 @@ class SessionLoadWorker(QThread):
             session_id = self.session_id
             db_scope = "global"
             if self.target:
-                db_conn, session_id, db_scope = _open_restore_db(Path(self.target), session_id)
+                db_conn, session_id, db_scope, owned_db = _open_restore_db(
+                    Path(self.target),
+                    session_id,
+                    local_db=self.local_db,
+                    global_db=self.global_db,
+                )
                 try:
                     try:
                         if hasattr(db_conn, "prune_ephemeral_state"):
@@ -822,7 +847,8 @@ class SessionLoadWorker(QThread):
                         else load_session_sources(self.target, session_id) if session_id else []
                     )
                 finally:
-                    db_conn.close()
+                    if owned_db:
+                        db_conn.close()
             else:
                 record_count = 0
                 sources = []
@@ -858,7 +884,7 @@ class StartupRestoreWorker(QThread):
             session_id = self.session_id
             db_scope = "global"
             if self.target:
-                db_conn, session_id, db_scope = _open_restore_db(Path(self.target), session_id)
+                db_conn, session_id, db_scope, owned_db = _open_restore_db(Path(self.target), session_id)
                 try:
                     try:
                         if hasattr(db_conn, "prune_ephemeral_state"):
@@ -877,7 +903,8 @@ class StartupRestoreWorker(QThread):
                         else load_session_sources(self.target, session_id) if session_id else []
                     )
                 finally:
-                    db_conn.close()
+                    if owned_db:
+                        db_conn.close()
             else:
                 record_count = 0
                 sources = []

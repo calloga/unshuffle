@@ -9,6 +9,32 @@ _SOURCES_CACHE: dict[tuple[str, str], list[str]] = {}
 _SESSION_DETAIL_CACHE: dict[tuple[str, str], dict | None] = {}
 
 
+def database_handles_for_target(engine, target: str | Path) -> dict[str, object]:
+    """Return open engine-owned databases only when they belong to target."""
+    runtime = getattr(engine, "engine", engine)
+    runtime_target = getattr(runtime, "target_dir", None)
+    try:
+        if runtime_target is None or Path(runtime_target).resolve() != Path(target).resolve():
+            return {}
+    except (OSError, TypeError, ValueError):
+        return {}
+
+    target_path = Path(target)
+    local_db_path = (target_path / SYSTEM_FOLDER_NAME / DB_FILE_NAME).resolve()
+    handles = {}
+    for attribute in ("db", "local_db"):
+        database = getattr(runtime, attribute, None)
+        if database is None or bool(getattr(database, "_closed", False)):
+            continue
+        try:
+            is_local = Path(database.db_path).resolve() == local_db_path
+        except (AttributeError, OSError, TypeError, ValueError):
+            is_local = False
+        argument = "local_db" if is_local else "global_db"
+        handles.setdefault(argument, database)
+    return handles
+
+
 def invalidate_history_cache(target: str | None = None, session_id: str | None = None) -> None:
     target_key = (target or "").strip().lower()
     session_key = (session_id or "").strip()
@@ -62,11 +88,14 @@ def _db_candidates(target: str | Path):
     yield get_db(target_path)
 
 
-def _history_db_candidates(target: str | Path):
+def _history_db_candidates(target: str | Path, *, global_db=None, local_db=None):
     target_path = Path(target)
-    yield "global", get_db(target_path)
+    global_candidate = global_db or get_db(target_path)
+    yield "global", global_candidate, global_db is None
     if _local_db_exists(target_path):
-        yield "local", get_local_db(target_path)
+        local_candidate = local_db or get_local_db(target_path)
+        if local_candidate is not global_candidate:
+            yield "local", local_candidate, local_db is None
 
 
 def _first_nonempty(target: str, loader):
@@ -102,11 +131,15 @@ def _all_results(target: str, loader):
     return results
 
 
-def _all_history_results(target: str, loader):
+def _all_history_results(target: str, loader, *, global_db=None, local_db=None):
     results = []
-    for scope, db in _history_db_candidates(target):
+    for scope, db, owned in _history_db_candidates(
+        target,
+        global_db=global_db,
+        local_db=local_db,
+    ):
         try:
-            if hasattr(db, "__enter__"):
+            if owned and hasattr(db, "__enter__"):
                 with db as ctx_db:
                     value = loader(ctx_db)
             else:
@@ -114,7 +147,7 @@ def _all_history_results(target: str, loader):
             if value:
                 results.extend((scope, row) for row in value)
         finally:
-            if not hasattr(db, "__enter__") and hasattr(db, "close"):
+            if owned and not hasattr(db, "__enter__") and hasattr(db, "close"):
                 db.close()
     return results
 
@@ -148,7 +181,13 @@ def _dedupe_sessions_by_id(sessions: list[dict]) -> list[dict]:
     return _dedupe_history_sessions_by_id([("unknown", session) for session in sessions])
 
 
-def load_executed_sessions(target: str, limit: int = 10) -> list[dict]:
+def load_executed_sessions(
+    target: str,
+    limit: int = 10,
+    *,
+    global_db=None,
+    local_db=None,
+) -> list[dict]:
     if not target:
         return []
     cache_key = (target, "executed", limit)
@@ -161,7 +200,9 @@ def load_executed_sessions(target: str, limit: int = 10) -> list[dict]:
         except TypeError:
             return db.get_recent_sessions(limit=limit, only_executed=True)
 
-    sessions = _dedupe_history_sessions_by_id(_all_history_results(target, _load))[:limit]
+    sessions = _dedupe_history_sessions_by_id(
+        _all_history_results(target, _load, global_db=global_db, local_db=local_db)
+    )[:limit]
     _SESSION_CACHE[cache_key] = list(sessions)
     return list(sessions)
 
@@ -179,14 +220,19 @@ def load_latest_history_target(limit: int = 100) -> str:
     return ""
 
 
-def resolve_history_target(settings) -> str:
+def resolve_history_target(settings, *, global_db=None, local_db=None) -> str:
     history_target = str(settings.value("last_history_target", "") or "").strip()
     if history_target:
         return history_target
 
     active_target = str(settings.value("last_target", "") or "").strip()
     try:
-        if active_target and load_executed_sessions(active_target, limit=1):
+        if active_target and load_executed_sessions(
+            active_target,
+            limit=1,
+            global_db=global_db,
+            local_db=local_db,
+        ):
             return active_target
     except Exception:
         return active_target
@@ -281,25 +327,35 @@ def load_session_sources(target: str, session_id: str) -> list[str]:
     return list(sources)
 
 
-def reset_learning_weights(target: str) -> None:
+def reset_learning_weights(target: str, *, global_db=None) -> None:
     if not target:
+        return
+    if global_db is not None:
+        global_db.reset_adjustments()
         return
     with get_db(Path(target)) as db:
         db.reset_adjustments()
 
 
-def clear_migration_history(target: str) -> None:
+def clear_migration_history(target: str, *, global_db=None, local_db=None) -> None:
     if not target:
         return
     target_path = Path(target)
-    databases = [get_db(target_path)]
+    databases = [(global_db or get_db(target_path), global_db is None)]
     if _local_db_exists(target_path):
-        databases.append(get_local_db(target_path))
-    for db in databases:
-        with db:
+        local_database = local_db or get_local_db(target_path)
+        if local_database is not databases[0][0]:
+            databases.append((local_database, local_db is None))
+    for db, owned in databases:
+        def clear_database():
             clear_target = getattr(db, "clear_history_for_target", None)
             if callable(clear_target):
                 clear_target(target_path)
             else:
                 db.clear_all_history()
+        if owned:
+            with db:
+                clear_database()
+        else:
+            clear_database()
     invalidate_history_cache(target)

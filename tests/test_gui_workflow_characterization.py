@@ -5010,10 +5010,12 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
             finished = Signal(dict)
             error = Signal(str)
 
-            def __init__(self, target, session_id):
+            def __init__(self, target, session_id, *, local_db=None, global_db=None):
                 super().__init__()
                 self.target = target
                 self.session_id = session_id
+                self.local_db = local_db
+                self.global_db = global_db
 
             def start(self):
                 self.finished.emit(

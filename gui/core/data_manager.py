@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 from unshuffle.bridge.persistence_bridge import PersistenceBridge
 from unshuffle.core import PlanRecord, parse_tags, plan_records_from_staging_rows
+from unshuffle.core.paths import DB_FILE_NAME, SYSTEM_FOLDER_NAME
 from unshuffle.persistence.exports import export_staging_plan_csv
 
 from ..utils.constants import StagingColumn, STAGING_HEADERS
@@ -40,6 +41,42 @@ class DataManager:
         self.bridge = bridge
         self.engine = bridge.workflow if bridge else None
 
+    def _active_databases_for_target(self, target_path: Path):
+        """Return engine-owned (local, global) databases for the active target."""
+        runtime = getattr(self.bridge, "engine", None) if self.bridge is not None else None
+        if runtime is None:
+            runtime = getattr(self.engine, "engine", self.engine)
+        runtime_target = getattr(runtime, "target_dir", None)
+        try:
+            if runtime_target is None or Path(runtime_target).resolve() != target_path.resolve():
+                return None, None
+        except (OSError, TypeError, ValueError):
+            return None, None
+
+        local_db_path = (target_path / SYSTEM_FOLDER_NAME / DB_FILE_NAME).resolve()
+
+        def live_database(name, *, expect_local: bool):
+            database = getattr(runtime, name, None)
+            if database is None or bool(getattr(database, "_closed", False)):
+                return None
+            try:
+                is_local = Path(database.db_path).resolve() == local_db_path
+            except (AttributeError, OSError, TypeError, ValueError):
+                is_local = False
+            if is_local != expect_local:
+                return None
+            try:
+                database.conn.execute("SELECT 1").fetchone()
+            except Exception:
+                return None
+            return database
+
+        local_database = live_database("local_db", expect_local=True) or live_database(
+            "db", expect_local=True
+        )
+        global_database = live_database("db", expect_local=False)
+        return local_database, global_database
+
     def sync_record_to_db(self, row_id, record):
         """Updates a single record in the staging database."""
         if not self.bridge or not self.bridge.has_session():
@@ -59,11 +96,17 @@ class DataManager:
             return False
         local_db = None
         global_db = None
+        owned_databases = []
         try:
             from unshuffle.persistence import get_local_db, get_db
             target_path = Path(target_path)
-            local_db = get_local_db(target_path)
-            global_db = get_db(target_path)
+            local_db, global_db = self._active_databases_for_target(target_path)
+            if local_db is None:
+                local_db = get_local_db(target_path)
+                owned_databases.append(local_db)
+            if global_db is None:
+                global_db = get_db(target_path)
+                owned_databases.append(global_db)
             
             local_sessions = local_db.get_recent_sessions(50)
             if not local_sessions:
@@ -97,7 +140,7 @@ class DataManager:
         except Exception as e:
             logging.error(f"Data sync failed: {e}")
         finally:
-            for db in (local_db, global_db):
+            for db in owned_databases:
                 if db is not None:
                     try:
                         db.close()

@@ -69,12 +69,18 @@ class WorkflowController(QObject):
             except Exception:
                 logging.debug("Could not close detached build database.", exc_info=True)
 
-    def _build_record_source(self, records, *, include_duplicate_shadows: bool = False):
+    def _build_record_source(
+        self,
+        records,
+        *,
+        include_duplicate_shadows: bool = False,
+        reuse_database: bool = False,
+    ):
         """Return a build stream backed by a live DB handle.
 
-        A restored model may outlive the engine that originally owned its database.
-        Build workers run later, so they need an independent handle rather than that
-        engine-owned connection.
+        Reuse an active engine-owned database for ordinary same-target builds.
+        A target change can close that database before the worker starts, so those
+        builds retain an independently owned database.
         """
         store = getattr(records, "store", None)
         if store is None:
@@ -92,12 +98,28 @@ class WorkflowController(QObject):
                 return records
             return buildable_records(records)
 
+        engine_databases = {
+            database
+            for database in (
+                getattr(self._engine, "db", None),
+                getattr(self._engine, "local_db", None),
+            )
+            if database is not None
+        }
+        if reuse_database and database in engine_databases:
+            try:
+                database.conn.execute("SELECT 1").fetchone()
+            except Exception:
+                database = None
+
         self._close_detached_build_db()
-        detached_db = UnshuffleDB(Path(db_path))
-        detached_store = StagingSessionStore(detached_db, str(store.session_id))
-        self._detached_build_db = detached_db
+        if database is None or not reuse_database or database not in engine_databases:
+            database = UnshuffleDB(Path(db_path))
+            self._detached_build_db = database
+
+        build_store = StagingSessionStore(database, str(store.session_id))
         return BuildableDbRecordSequence(
-            detached_store,
+            build_store,
             include_duplicate_shadows=include_duplicate_shadows,
         )
 
@@ -420,9 +442,14 @@ class WorkflowController(QObject):
         self.clear_build_handover_state()
 
         skip_confirmed_duplicates = bool(skip_confirmed_duplicates)
+        try:
+            same_target = Path(self._engine.target_dir).resolve() == Path(resolved_target).resolve()
+        except OSError:
+            same_target = str(self._engine.target_dir) == str(resolved_target)
         records = self._build_record_source(
             records,
             include_duplicate_shadows=not skip_confirmed_duplicates,
+            reuse_database=same_target,
         )
 
         if str(self._engine.target_dir) != str(resolved_target):

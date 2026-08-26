@@ -64,7 +64,12 @@ def load_staging_session(app, sess, show_errors=True):
     src = sess.get("source_path")
     from ...core.workers import SessionLoadWorker
 
-    worker = SessionLoadWorker(tgt, sid)
+    worker = SessionLoadWorker(
+        tgt,
+        sid,
+        local_db=getattr(new_engine, "local_db", None),
+        global_db=getattr(new_engine, "db", None),
+    )
     app._session_load_worker = worker
 
     def _finish_resume(payload):
