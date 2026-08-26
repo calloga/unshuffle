@@ -129,6 +129,22 @@ def test_app_binary_builder_uses_platform_icons(monkeypatch) -> None:
     assert build_app_binary._icon_arg(repo_root) == ["--icon", str(repo_root / "icons" / "app_logo.png")]
 
 
+def test_app_binary_builder_sets_macos_bundle_identifier_only_on_macos(monkeypatch) -> None:
+    from scripts import build_app_binary
+
+    repo_root = Path("repo")
+    monkeypatch.setattr(build_app_binary.sys, "platform", "darwin")
+
+    command = build_app_binary.pyinstaller_command(repo_root)
+
+    assert ["--osx-bundle-identifier", "com.umu.unshuffle"] == command[
+        command.index("--osx-bundle-identifier"):command.index("--osx-bundle-identifier") + 2
+    ]
+
+    monkeypatch.setattr(build_app_binary.sys, "platform", "linux")
+    assert "--osx-bundle-identifier" not in build_app_binary.pyinstaller_command(repo_root)
+
+
 def test_app_binary_expected_path_matches_platform(monkeypatch) -> None:
     from scripts import build_app_binary
 
@@ -204,6 +220,14 @@ def test_windows_installer_script_registers_app_shortcuts_and_logo() -> None:
     assert 'Name: "{autodesktop}\\{#AppName}"' in script
     assert 'Filename: "{app}\\Unshuffle.exe"' in script
     assert 'IconFilename: "{app}\\_internal\\icons\\app_logo.ico"' in script
+
+
+def test_macos_package_identifier_matches_app_bundle_identifier() -> None:
+    from scripts import build_app_binary
+
+    script = (Path(__file__).resolve().parent.parent / "scripts" / "build_macos_pkg.sh").read_text(encoding="utf-8")
+
+    assert f'IDENTIFIER="${{3:-{build_app_binary.BUNDLE_IDENTIFIER}}}"' in script
 
 
 def test_app_binary_workflow_uploads_installable_platform_artifacts() -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 APP_NAME = "Unshuffle"
+BUNDLE_IDENTIFIER = "com.umu.unshuffle"
 ASSET_PATHS = (
     ("data/config.json", "data"),
     ("data/anchors", "data/anchors"),
@@ -68,6 +69,7 @@ def pyinstaller_command(
     repo_root: Path,
     *,
     name: str = APP_NAME,
+    bundle_identifier: str = BUNDLE_IDENTIFIER,
     dist_dir: Path | None = None,
     work_dir: Path | None = None,
     spec_dir: Path | None = None,
@@ -104,6 +106,8 @@ def pyinstaller_command(
         command.extend(["--workpath", str(work_dir)])
     if spec_dir is not None:
         command.extend(["--specpath", str(spec_dir)])
+    if sys.platform == "darwin":
+        command.extend(["--osx-bundle-identifier", bundle_identifier])
     command.extend(_icon_arg(repo_root))
     command.extend(_asset_args(repo_root))
     command.append(str(app_entrypoint(repo_root)))
@@ -124,6 +128,11 @@ def _validate_app_binary(repo_root: Path, *, name: str, dist_dir: Path | None) -
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the standalone Unshuffle GUI app for the current platform.")
     parser.add_argument("--name", default=APP_NAME, help="Application/binary name.")
+    parser.add_argument(
+        "--bundle-identifier",
+        default=BUNDLE_IDENTIFIER,
+        help="macOS application bundle identifier.",
+    )
     parser.add_argument("--dist-dir", type=Path, default=None, help="PyInstaller output directory.")
     parser.add_argument("--work-dir", type=Path, default=None, help="PyInstaller work directory.")
     parser.add_argument("--spec-dir", type=Path, default=None, help="PyInstaller spec output directory.")
@@ -135,6 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     command = pyinstaller_command(
         repo_root,
         name=args.name,
+        bundle_identifier=args.bundle_identifier,
         dist_dir=args.dist_dir,
         work_dir=args.work_dir,
         spec_dir=args.spec_dir,
