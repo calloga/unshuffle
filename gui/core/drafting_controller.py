@@ -2,6 +2,7 @@ import logging
 import re
 import uuid
 from dataclasses import replace
+from typing import Any
 from PySide6.QtGui import QUndoCommand
 from PySide6.QtCore import QObject, Signal, QTimer
 from PySide6.QtWidgets import QMessageBox, QWidget
@@ -1081,7 +1082,7 @@ class DraftingController(QObject):
         }
         monitor = getattr(self.app, "operation_monitor", None)
         token = None
-        worker_holder = {"worker": None}
+        worker_holder: dict[str, Any] = {"worker": None}
         cancel_requested = {"value": False}
 
         def request_cancel() -> None:

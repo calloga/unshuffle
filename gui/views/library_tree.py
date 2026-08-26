@@ -118,7 +118,9 @@ class LibraryTreeView(QTreeView):
         if not color.isValid():
             color = QColor(getattr(self, "_branch_color", ColorPalette.BORDER))
         if callable(self._branch_color_transform):
-            color = self._branch_color_transform(color)
+            transformed = self._branch_color_transform(color)
+            if isinstance(transformed, QColor):
+                color = transformed
         color.setAlpha(145)
         painter.save()
         painter.setPen(QPen(color, 1))

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from PySide6.QtCore import QObject, Qt, QSettings
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPixmap
 
 from gui.core.settings_controller import SettingsController
 from gui.styles import (
@@ -105,10 +105,10 @@ class ThemeManagerTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         widget = CoherenceMapWidget()
         try:
-            widget._cached_bg_pixmap = object()
-            widget._cached_points_pixmap = object()
-            widget._background_pixmap_cache[("old-theme",)] = object()
-            widget._points_pixmap_cache[("old-theme",)] = object()
+            widget._cached_bg_pixmap = QPixmap()
+            widget._cached_points_pixmap = QPixmap()
+            widget._background_pixmap_cache[("old-theme",)] = QPixmap()
+            widget._points_pixmap_cache[("old-theme",)] = QPixmap()
 
             widget.refresh_theme()
 
@@ -129,13 +129,14 @@ class ThemeManagerTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         widget = CoherenceMapWidget()
         try:
-            widget._projection_cache[("projection",)] = object()
-            widget._background_pixmap_cache[("paint",)] = object()
-            widget._points_pixmap_cache[("paint",)] = object()
+            projection_key = (None, "projection", "")
+            widget._projection_cache[projection_key] = ([], {})
+            widget._background_pixmap_cache[("paint",)] = QPixmap()
+            widget._points_pixmap_cache[("paint",)] = QPixmap()
 
             widget.set_color_transform(lambda _color: QColor("#123456"))
 
-            self.assertIn(("projection",), widget._projection_cache)
+            self.assertIn(projection_key, widget._projection_cache)
             self.assertFalse(widget._background_pixmap_cache)
             self.assertFalse(widget._points_pixmap_cache)
             self.assertEqual(widget._paint_color(QColor("#ffffff")), QColor("#123456"))

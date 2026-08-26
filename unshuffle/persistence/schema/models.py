@@ -1,5 +1,16 @@
-from peewee import *
 from datetime import datetime
+
+from peewee import (
+    BlobField,
+    BooleanField,
+    CompositeKey,
+    DatabaseProxy,
+    DateTimeField,
+    FloatField,
+    IntegerField,
+    Model,
+    TextField,
+)
 
 db_proxy = DatabaseProxy()
 

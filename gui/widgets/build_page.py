@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import cast
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QCheckBox, QFileDialog, QTreeWidget, QTreeWidgetItem,
@@ -71,8 +72,10 @@ class BuildPage(QWidget):
         source_records = records or []
         self.total_record_count = len(source_records)
         common_tokens = getattr(source_records, "common_filename_tokens_by_pack", None)
-        self._pack_common_filename_tokens = (
-            common_tokens() if callable(common_tokens) else common_filename_tokens_by_pack(source_records)
+        self._pack_common_filename_tokens: dict[str, frozenset[str]] = (
+            cast(dict[str, frozenset[str]], common_tokens())
+            if callable(common_tokens)
+            else common_filename_tokens_by_pack(source_records)
         )
         if isinstance(source_records, (list, tuple)):
             self.records = list(source_records)

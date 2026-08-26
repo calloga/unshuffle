@@ -82,9 +82,9 @@ def test_db_tagging_matches_in_memory_duplicate_detection(tmp_path):
     db = UnshuffleDB(tmp_path / "tagging.db")
     try:
         db.register_session("session", Path("D:/Samples"), tmp_path, "pending")
-        rows = []
+        rows: list[tuple[object, ...]] = []
         for index, (name, blob) in enumerate((("a.wav", vec), ("b.wav", vec), ("far.wav", far))):
-            row = list(_staging_row(index, name))
+            row: list[object] = list(_staging_row(index, name))
             row[14] = blob
             row[9] = 0.7
             rows.append(tuple(row))

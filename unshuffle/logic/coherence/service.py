@@ -14,6 +14,7 @@ from .coherence_engine import CoherenceEngine
 from .models import (
     COHERENCE_STATUS_LOW,
     COHERENCE_STATUS_MISCATEGORIZATION,
+    CoherenceRecord,
     CoherenceResult,
     CoherenceRunSummary,
     REFINEMENT_AUTO_STAGED,
@@ -397,7 +398,7 @@ def _apply_streamed_refinements(
         rows = work_rows.fetchmany(32)
         if not rows:
             break
-        work: list[tuple[object, CoherenceResult, dict]] = []
+        work: list[tuple[CoherenceRecord, CoherenceResult, dict]] = []
         for row in rows:
             records, _stats = records_from_staging_rows([dict(row)])
             if not records:

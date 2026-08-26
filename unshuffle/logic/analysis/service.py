@@ -375,6 +375,7 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
     if use_scan_store:
         from .scan_discovery import discover_to_scan_store
 
+        assert context.scan_id is not None
         total_found = discover_to_scan_store(
             context.db,
             context.scan_id,
@@ -463,6 +464,7 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
     if use_scan_store:
         from .scan_hashing import hash_scan_items
 
+        assert context.scan_id is not None
         hash_scan_items(
             context.db,
             context.scan_id,
@@ -660,6 +662,7 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
             analyze_scan_structure,
         )
 
+        assert context.scan_id is not None
         analyze_scan_structure(
             context.db,
             context.scan_id,

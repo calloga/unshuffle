@@ -1,3 +1,5 @@
+from typing import Callable
+
 from PySide6.QtWidgets import QWidget, QSizePolicy
 from PySide6.QtCore import Qt, QSize, QPoint, QRectF, Signal
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QLinearGradient
@@ -21,13 +23,13 @@ class ModernKnob(QWidget):
         self._last_pos = None
         self._fine_tune_factor = 1.0
         self._symmetric = True
-        self._color_transform = None
+        self._color_transform: Callable[[QColor], QColor] | None = None
 
     def _paint_color(self, color: QColor) -> QColor:
         transform = self._color_transform
         return transform(color) if callable(transform) else QColor(color)
 
-    def set_color_transform(self, transform) -> None:
+    def set_color_transform(self, transform: Callable[[QColor], QColor] | None) -> None:
         self._color_transform = transform
         self.update()
         

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtWidgets import QPushButton
 from PySide6.QtCore import Property, QPropertyAnimation, QEasingCurve, QSize, Qt
@@ -55,7 +55,7 @@ class AnimatedIconButton(QPushButton):
         self.icon_size = icon_size
         self._uses_theme_color = color is None
         self.color = color or make_qcolor(ColorPalette.TEXT_GRAY)
-        self._color_transform = None
+        self._color_transform: Callable[[QColor], QColor] | None = None
         
         apply_fixed_size_q(self, icon_size + QSize(8, 8))
         self.setCursor(Qt.PointingHandCursor)
@@ -156,7 +156,7 @@ class AnimatedIconButton(QPushButton):
         transform = self._color_transform
         return transform(color) if callable(transform) else QColor(color)
 
-    def set_color_transform(self, transform) -> None:
+    def set_color_transform(self, transform: Callable[[QColor], QColor] | None) -> None:
         self._color_transform = transform
         self.update()
 
@@ -207,11 +207,6 @@ class SidebarIconButton(AnimatedIconButton):
         self._adaptive_checked_icon = QColor(checked_icon) if checked_icon is not None else None
         self._adaptive_unchecked_icon = QColor(unchecked_icon) if unchecked_icon is not None else None
         self.update()
-
-    def refresh_theme(self) -> None:
-        super().refresh_theme()
-        self._active = sidebar_icon_active_color()
-        self.set_adaptive_colors(None, None)
 
     def paintEvent(self, event):
         paint_icon = False

@@ -73,6 +73,7 @@ class TestHashing(unittest.TestCase):
             h1 = get_fast_hash(f_path)
             h2 = get_fast_hash(f_path)
             self.assertIsNotNone(h1)
+            assert h1 is not None
             fast_hash = h1
             self.assertEqual(h1, h2)
             self.assertTrue(is_fast_hash(fast_hash))

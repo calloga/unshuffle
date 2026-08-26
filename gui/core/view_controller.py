@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Sized
 from typing import cast
 
 from PySide6.QtCore import QObject, Signal, Qt, QTimer
@@ -115,7 +116,7 @@ class ViewController(QObject):
             map_point_limit = getattr(page, "_map_point_limit", None)
             if callable(map_point_limit):
                 try:
-                    point_limit = max(1, int(map_point_limit()))
+                    point_limit = max(1, int(cast(int | str | float, map_point_limit())))
                 except (TypeError, ValueError):
                     point_limit = 10000
             visible_ids_from_proxy = getattr(library_tab, "_visible_record_ids_from_proxy", None)
@@ -159,7 +160,7 @@ class ViewController(QObject):
                 force,
                 audio_type,
                 category,
-                "none" if visible_ids is None else len(visible_ids),
+                "none" if visible_ids is None else len(cast(Sized, visible_ids)),
                 elapsed_ms,
             )
         self._map_prewarm_scheduled = False

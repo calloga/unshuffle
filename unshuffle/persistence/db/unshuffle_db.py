@@ -399,24 +399,6 @@ class UnshuffleDB:
     def clear_staging(self, session_id: Optional[str] = None):
         storage_sessions.clear_staging(self, session_id)
 
-    def remove_staging_by_source(self, session_id: str, source_path: str):
-        storage_sessions.remove_staging_by_source(self, session_id, source_path)
-
-    def add_staging_records_bulk(self, session_id: str, records: List[Tuple]):
-        storage_sessions.add_staging_records_bulk(self, session_id, records)
-
-    def get_staging_records(self, session_id: str) -> List[Dict]:
-        return storage_sessions.get_staging_records(self, session_id)
-
-    def update_staging_record(self, session_id: str, row_id: int, data: Dict[str, str]):
-        storage_sessions.update_staging_record(self, session_id, row_id, data)
-
-    def clear_all_history(self):
-        storage_sessions.clear_all_history(self)
-
-    def clear_history_for_target(self, target_root: Path | str):
-        storage_sessions.clear_history_for_target(self, target_root)
-
     """
     MAINTENANCE STORAGE LOGIC
     """

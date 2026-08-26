@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterator
 from unittest import mock
 
 from unshuffle.persistence import UnshuffleDB
@@ -25,7 +26,10 @@ def _directory_rows(count: int):
         )
 
 
-def _item_rows(count: int):
+ScanItemRow = tuple[int, int, int, Path, str, str, int, float, int, bool, bool, bool]
+
+
+def _item_rows(count: int) -> Iterator[ScanItemRow]:
     for index in range(count):
         yield (
             index,
@@ -111,7 +115,9 @@ def test_scan_schema_and_state_transitions_are_additive(tmp_path):
         assert run["state"] == "paused"
         assert run["phase"] == "hash"
         assert run["completed_count"] == 2
-        assert db.newest_resumable_scan(tmp_path)["scan_id"] == "scan-1"
+        resumable = db.newest_resumable_scan(tmp_path)
+        assert resumable is not None
+        assert resumable["scan_id"] == "scan-1"
 
         db.create_scan_run(
             scan_id="scan-1",
@@ -119,10 +125,14 @@ def test_scan_schema_and_state_transitions_are_additive(tmp_path):
             target_root=tmp_path,
             roots=[Path("C:/Samples")],
         )
-        assert db.get_scan_run("scan-1")["state"] == "running"
+        restarted_run = db.get_scan_run("scan-1")
+        assert restarted_run is not None
+        assert restarted_run["state"] == "running"
         assert db.update_session_scan_runs("session-1", state="ready", phase="ready") == 1
-        assert db.get_scan_run("scan-1")["state"] == "ready"
-        assert db.get_scan_run("scan-1")["phase"] == "ready"
+        ready_run = db.get_scan_run("scan-1")
+        assert ready_run is not None
+        assert ready_run["state"] == "ready"
+        assert ready_run["phase"] == "ready"
     finally:
         db.close()
 
@@ -594,7 +604,9 @@ def test_interrupted_hash_batch_persists_progress_and_resumes_pending_only(tmp_p
 
         completed = db.count_scan_items("scan", "hash", "fast_new") + db.count_scan_items("scan", "hash", "done")
         assert 0 < completed < 8
-        assert db.get_scan_run("scan")["state"] == "paused"
+        paused_run = db.get_scan_run("scan")
+        assert paused_run is not None
+        assert paused_run["state"] == "paused"
         first_calls = len(hashed)
 
         db.create_scan_run(
@@ -609,8 +621,10 @@ def test_interrupted_hash_batch_persists_progress_and_resumes_pending_only(tmp_p
 
         assert len(hashed) - first_calls == 8 - completed
         assert db.count_scan_items("scan", "hash", "done") == 8
-        assert db.get_scan_run("scan")["state"] == "running"
-        assert db.get_scan_run("scan")["phase"] == "structure"
+        running_run = db.get_scan_run("scan")
+        assert running_run is not None
+        assert running_run["state"] == "running"
+        assert running_run["phase"] == "structure"
     finally:
         db.close()
 
@@ -687,15 +701,21 @@ def test_resume_discovery_reuses_unchanged_manifest_and_rebuilds_changed_manifes
             roots=[source],
         )
         assert discover_to_scan_store(db, "scan", source) == 2
-        first_signature = db.get_scan_run("scan")["source_signature"]
+        initial_run = db.get_scan_run("scan")
+        assert initial_run is not None
+        first_signature = initial_run["source_signature"]
         db.update_scan_run("scan", phase="hash")
         assert discover_to_scan_store(db, "scan", source) == 2
-        assert db.get_scan_run("scan")["source_signature"] == first_signature
+        reused_run = db.get_scan_run("scan")
+        assert reused_run is not None
+        assert reused_run["source_signature"] == first_signature
 
         (source / "two.txt").write_text("two", encoding="utf-8")
         assert discover_to_scan_store(db, "scan", source) == 3
         assert db.count_scan_items("scan") == 2
-        assert db.get_scan_run("scan")["source_signature"] != first_signature
+        rebuilt_run = db.get_scan_run("scan")
+        assert rebuilt_run is not None
+        assert rebuilt_run["source_signature"] != first_signature
     finally:
         db.close()
 

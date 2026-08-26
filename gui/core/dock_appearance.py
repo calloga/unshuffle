@@ -6,6 +6,7 @@ import os
 from collections import Counter
 from dataclasses import asdict, dataclass
 from math import cbrt
+from typing import cast
 
 from PySide6.QtCore import QEvent, QObject, QRect, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QImage
@@ -69,7 +70,8 @@ def _srgb_channel(value: float) -> float:
 
 
 def _oklab(color: QColor) -> tuple[float, float, float]:
-    red, green, blue = (_linear_channel(channel) for channel in color.getRgbF()[:3])
+    rgba = cast(tuple[float, float, float, float], color.getRgbF())
+    red, green, blue = (_linear_channel(channel) for channel in rgba[:3])
     l_value = 0.4122214708 * red + 0.5363325363 * green + 0.0514459929 * blue
     m_value = 0.2119034982 * red + 0.6806995451 * green + 0.1073969566 * blue
     s_value = 0.0883024619 * red + 0.2817188376 * green + 0.6299787005 * blue
@@ -141,7 +143,8 @@ def transfer_palette_color(color: QColor | str, palette: DockAdaptivePalette | N
 
 def _contrast_ratio(first: QColor, second: QColor) -> float:
     def luminance(color: QColor) -> float:
-        red, green, blue = (_linear_channel(channel) for channel in color.getRgbF()[:3])
+        rgba = cast(tuple[float, float, float, float], color.getRgbF())
+        red, green, blue = (_linear_channel(channel) for channel in rgba[:3])
         return 0.2126 * red + 0.7152 * green + 0.0722 * blue
 
     lighter, darker = sorted((luminance(first), luminance(second)), reverse=True)

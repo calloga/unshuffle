@@ -43,6 +43,7 @@ from .formatting import (
     _slug,
 )
 from .density import clamp_density_ratio, outlier_iqr_multiplier
+from .spatial_index import SparseSimilarityGraph
 from .refinement_candidates import refinement_candidates_for_engine
 
 
@@ -582,11 +583,13 @@ class CoherenceEngine:
             self._last_vector_inputs = payload
         return payload
 
-    def _knn_similarity(self, distances: np.ndarray, nearest: np.ndarray) -> np.ndarray:
+    def _knn_similarity(
+        self,
+        distances: np.ndarray,
+        nearest: np.ndarray,
+    ) -> np.ndarray | SparseSimilarityGraph:
         n = distances.shape[0]
         if hasattr(distances, "nearest_distances"):
-            from .spatial_index import SparseSimilarityGraph
-
             nearest_distances = distances.nearest_distances
             kth = np.maximum(nearest_distances[:, -1].astype(float, copy=False), 1e-9)
             weights = np.zeros_like(nearest_distances, dtype=np.float64)
@@ -610,8 +613,8 @@ class CoherenceEngine:
                 W[i, j] = math.exp(-((float(distances[i, j]) ** 2) / denom))
         return np.maximum(W, W.T)
 
-    def _cluster_labels(self, W: np.ndarray, n: int) -> np.ndarray:
-        if hasattr(W, "normalized_matmul"):
+    def _cluster_labels(self, W: np.ndarray | SparseSimilarityGraph, n: int) -> np.ndarray:
+        if isinstance(W, SparseSimilarityGraph):
             eigen_count = min(n - 1, min(6, max(1, n // 8)) + 1)
             if eigen_count <= 1:
                 return np.zeros(n, dtype=int)
@@ -690,7 +693,7 @@ class CoherenceEngine:
         distances: np.ndarray,
         nearest: np.ndarray,
         clusters: np.ndarray,
-        W: np.ndarray,
+        W: np.ndarray | SparseSimilarityGraph,
         cluster_medoids: dict[int, int] | None = None,
         density_ratios: dict[int, float] | None = None,
     ) -> np.ndarray:

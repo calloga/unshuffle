@@ -124,6 +124,7 @@ def test_db_model_semantic_edit_mirrors_duplicate_shadow(tmp_path):
         reloaded_shadow = model.store.record_by_row_id(2)
         assert reloaded_shadow is not None
         assert reloaded_shadow.is_duplicate_shadow is True
+        assert isinstance(canonical[1], str)
         assert reloaded_shadow.duplicate_of_path == Path(canonical[1])
     finally:
         db.close()

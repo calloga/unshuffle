@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any, cast
 
 from .workflow_summary import format_bytes, remaining_source_footprint
 
@@ -19,7 +20,7 @@ def _workbench_record_count(controller, state: dict | None = None) -> int:
     row_count = getattr(model, "rowCount", None)
     if callable(row_count):
         try:
-            return max(0, int(row_count()))
+            return max(0, int(cast(Any, row_count())))
         except (RuntimeError, TypeError, ValueError):
             logging.debug("Could not read the workbench model row count.", exc_info=True)
 
