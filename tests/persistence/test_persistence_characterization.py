@@ -761,7 +761,7 @@ class PersistenceTests(unittest.TestCase):
                 first.update_cache_bulk([("hash-cached", audio_path, 10, 1.0)])
 
                 second = UnshuffleDB(db_path)
-                second.close()
+                # second.close()
 
                 cached = first.get_cached_entries([(audio_path, 10, 1.0)])
 
