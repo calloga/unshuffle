@@ -1,4 +1,7 @@
 import sqlite3
+from contextlib import contextmanager
+from functools import wraps
+from threading import RLock
 from typing import Callable
 
 from peewee import SqliteDatabase
@@ -6,6 +9,28 @@ from peewee import SqliteDatabase
 from unshuffle.persistence.schema.models import db_proxy
 
 ConnectionProvider = Callable[[], sqlite3.Connection]
+
+# Peewee models use one process-wide DatabaseProxy. Binding that proxy and
+# executing a query must therefore be one atomic operation across all
+# UnshuffleDB instances and worker threads.
+_PEEWEE_PROXY_LOCK = RLock()
+
+
+def bind_peewee_store(cls):
+    """Serialize and bind every operation implemented by a Peewee store."""
+    for name, method in tuple(vars(cls).items()):
+        if name == "__init__" or isinstance(method, (staticmethod, classmethod, property)):
+            continue
+        if not callable(method):
+            continue
+
+        @wraps(method)
+        def bound_method(self, *args, __method=method, **kwargs):
+            with self._bound_database():
+                return __method(self, *args, **kwargs)
+
+        setattr(cls, name, bound_method)
+    return cls
 
 
 class ThreadAwareSqliteDatabase(SqliteDatabase):
@@ -62,7 +87,8 @@ class PeeweeStore(ConnectionBoundStore):
     def _initialize_db_proxy(self, connection_provider: ConnectionProvider):
         self._connection_provider = connection_provider
         self._db = ThreadAwareSqliteDatabase(connection_provider)
-        db_proxy.initialize(self._db)
+        with _PEEWEE_PROXY_LOCK:
+            db_proxy.initialize(self._db)
 
     def _bind_db_proxy(self):
         """Re-point the shared db_proxy at this store's connection.
@@ -73,5 +99,13 @@ class PeeweeStore(ConnectionBoundStore):
         proxy from older ones. Call this before any Peewee query to make
         sure it still targets this store's connection.
         """
+        if self._db is None:
+            raise RuntimeError("Peewee store has not been initialized")
         if db_proxy.obj is not self._db:
             db_proxy.initialize(self._db)
+
+    @contextmanager
+    def _bound_database(self):
+        with _PEEWEE_PROXY_LOCK:
+            self._bind_db_proxy()
+            yield self._db

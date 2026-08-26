@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import threading
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -18,6 +19,8 @@ from unshuffle.persistence.stores.maintenance_store import SqliteMaintenanceStor
 from unshuffle.persistence.utils import cache_utils
 from unshuffle.persistence.utils.cache_utils import normalize_cache_rows, cache_row
 from unshuffle.persistence.utils.enums import StoreName, DatabaseDriver
+
+logger = logging.getLogger(__name__)
 
 
 class UnshuffleDB:
@@ -63,22 +66,43 @@ class UnshuffleDB:
 
     def _init_stores(self):
         store_migration_config = get_config().get("STORE_MIGRATION", {})
+        if not isinstance(store_migration_config, dict):
+            logger.warning("Invalid STORE_MIGRATION configuration; using sqlite stores.")
+            store_migration_config = {}
 
         # Stores resolve the connection lazily so every thread works on the
         # connection _get_connection() handed to that thread.
         connection_provider = self._get_connection
 
-        self._cache_store: CacheStore = self._migration_config.get(StoreName.CACHE).get(
-            store_migration_config.get(StoreName.CACHE)
+        self._cache_store: CacheStore = self._store_class(
+            StoreName.CACHE, store_migration_config.get(StoreName.CACHE)
+        )(connection_provider)
+        self._coherence_store: CoherenceStore = self._store_class(
+            StoreName.COHERENCE, store_migration_config.get(StoreName.COHERENCE)
+        )(connection_provider)
+        self._maintenance_store: MaintenanceStore = self._store_class(
+            StoreName.MAINTENANCE, store_migration_config.get(StoreName.MAINTENANCE)
         )(connection_provider)
 
-        self._coherence_store: CoherenceStore = self._migration_config.get(StoreName.COHERENCE).get(
-            store_migration_config.get(StoreName.COHERENCE)
-        )(connection_provider)
+    @classmethod
+    def _store_class(cls, store_name: StoreName, configured_driver: Any):
+        raw_driver = configured_driver
+        if isinstance(raw_driver, str):
+            raw_driver = raw_driver.strip().lower()
+        try:
+            driver = DatabaseDriver(raw_driver or DatabaseDriver.SQLITE)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Unknown STORE_MIGRATION driver %r for %s; using sqlite.",
+                configured_driver,
+                store_name.value,
+            )
+            driver = DatabaseDriver.SQLITE
 
-        self._maintenance_store: MaintenanceStore = self._migration_config.get(StoreName.MAINTENANCE).get(
-            store_migration_config.get(StoreName.MAINTENANCE)
-        )(connection_provider)
+        store_class = cls._migration_config[store_name].get(driver)
+        if store_class is None:
+            raise RuntimeError(f"No {driver.value} store is registered for {store_name.value}")
+        return store_class
 
     def __del__(self):
         try:
@@ -477,7 +501,7 @@ class UnshuffleDB:
         return self._coherence_store.list_coherence_results(session_id)
 
     def list_coherence_result_clusters(self, session_id: str) -> List[Dict[str, Any]]:
-        return self._coherence_store.list_coherence_result_clusters(self, session_id)
+        return self._coherence_store.list_coherence_result_clusters(session_id)
 
     def coherence_cache_stats(self, session_id: str) -> Dict[str, int]:
         return self._coherence_store.coherence_cache_stats(session_id)

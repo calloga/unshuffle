@@ -17,7 +17,9 @@ from unshuffle.persistence.utils.thread_aware_sqlite_database import (
     ConnectionBoundStore,
     ConnectionProvider,
     PeeweeStore,
+    bind_peewee_store,
 )
+from unshuffle.persistence.stores import sqlite_coherence_queries
 
 REMOVED_VERIFIED_ANCHOR_SESSION = "__removed_verified_anchors__"
 
@@ -35,6 +37,10 @@ class CoherenceStore(abc.ABC):
 
     @abc.abstractmethod
     def list_coherence_results(self, session_id: str) -> list[dict[str, Any]]:
+        pass
+
+    @abc.abstractmethod
+    def list_coherence_result_clusters(self, session_id: str) -> list[dict[str, Any]]:
         pass
 
     @abc.abstractmethod
@@ -65,6 +71,10 @@ class CoherenceStore(abc.ABC):
             source_paths: list[str] | None = None,
             file_hashes: list[str] | None = None,
     ) -> list[dict[str, Any]]:
+        pass
+
+    @abc.abstractmethod
+    def apply_target_review_decisions_to_staging(self, session_id: str) -> int:
         pass
 
     @abc.abstractmethod
@@ -131,9 +141,136 @@ class CoherenceStore(abc.ABC):
 
 
 class SqliteCoherenceStore(CoherenceStore, ConnectionBoundStore):
-    pass
+    def _with_write_retry(self, callback: Callable[[], Any]) -> Any:
+        for attempt in range(5):
+            try:
+                with self._connection:
+                    return callback()
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                if attempt == 4:
+                    raise
+                time.sleep(0.2 * (attempt + 1))
+        return None
+
+    def upsert_coherence_results(self, session_id: str, results: list[Any]) -> None:
+        sqlite_coherence_queries.upsert_coherence_results(self._connection, session_id, results)
+
+    def clear_generated_coherence_audit(self, session_id: str) -> None:
+        self._with_write_retry(
+            lambda: sqlite_coherence_queries.clear_generated_coherence_audit(self._connection, session_id)
+        )
+
+    def list_coherence_results(self, session_id: str) -> list[dict[str, Any]]:
+        return sqlite_coherence_queries.list_coherence_results(self._connection, session_id)
+
+    def list_coherence_result_clusters(self, session_id: str) -> list[dict[str, Any]]:
+        return sqlite_coherence_queries.list_coherence_result_clusters(self._connection, session_id)
+
+    def upsert_refinement_candidates(self, session_id: str, candidates: list[Any]) -> None:
+        sqlite_coherence_queries.upsert_refinement_candidates(self._connection, session_id, candidates)
+
+    def list_refinement_candidates(self, session_id: str, state: Optional[str] = None) -> list[dict[str, Any]]:
+        return sqlite_coherence_queries.list_refinement_candidates(self._connection, session_id, state)
+
+    def count_refinement_candidates(self, session_id: str, state: Optional[str] = None) -> int:
+        return sqlite_coherence_queries.count_refinement_candidates(self._connection, session_id, state)
+
+    def set_refinement_candidate_state(self, session_id: str, candidate_ids: list[str], state: str) -> None:
+        sqlite_coherence_queries.set_refinement_candidate_state(self._connection, session_id, candidate_ids, state)
+
+    def upsert_coherence_review_decisions(self, session_id: str, decisions: list[dict[str, Any]]) -> None:
+        sqlite_coherence_queries.upsert_coherence_review_decisions(self._connection, session_id, decisions)
+
+    def list_coherence_review_decisions(
+            self,
+            source_paths: list[str] | None = None,
+            file_hashes: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        return sqlite_coherence_queries.list_coherence_review_decisions(
+            self._connection,
+            source_paths=source_paths,
+            file_hashes=file_hashes,
+        )
+
+    def apply_target_review_decisions_to_staging(self, session_id: str) -> int:
+        return sqlite_coherence_queries.apply_target_review_decisions_to_staging(self._connection, session_id)
+
+    def upsert_anchor_candidates(self, session_id: str, anchors: list[Any]) -> None:
+        sqlite_coherence_queries.upsert_anchor_candidates(self._connection, session_id, anchors)
+
+    def upsert_anchor_profiles(self, session_id: str, anchors: list[Any]) -> None:
+        sqlite_coherence_queries.upsert_anchor_profiles(self._connection, session_id, anchors)
+
+    def upsert_anchor_profile_rows(self, session_id: str, rows: list[dict[str, Any]]) -> None:
+        sqlite_coherence_queries.upsert_anchor_profile_rows(self._connection, session_id, rows)
+
+    def _upsert_anchor_profiles(
+            self,
+            session_id: str,
+            anchors: list[Any],
+            *,
+            update_state: bool,
+    ) -> None:
+        sqlite_coherence_queries._upsert_anchor_profiles(
+            self._connection,
+            session_id,
+            anchors,
+            update_state=update_state,
+        )
+
+    def list_anchor_candidates(self, session_id: str, state: Optional[str] = None) -> list[dict[str, Any]]:
+        return sqlite_coherence_queries.list_anchor_candidates(self._connection, session_id, state)
+
+    def ensure_verified_anchors_for_session(self, session_id: str) -> int:
+        return sqlite_coherence_queries.ensure_verified_anchors_for_session(self._connection, session_id)
+
+    def set_anchor_candidate_state(self, session_id: str, anchor_ids: list[str], state: str) -> None:
+        sqlite_coherence_queries.set_anchor_candidate_state(self._connection, session_id, anchor_ids, state)
+
+    def remove_verified_anchor_profiles(self, session_id: str, anchor_ids: list[str]) -> None:
+        sqlite_coherence_queries.remove_verified_anchor_profiles(self._connection, session_id, anchor_ids)
+
+    def repair_anchor_profile_json(
+            self,
+            session_id: str,
+            anchor_ids: list[str],
+            payload_builder,
+    ) -> list[str]:
+        return sqlite_coherence_queries.repair_anchor_profile_json(
+            self._connection,
+            session_id,
+            anchor_ids,
+            payload_builder,
+        )
+
+    def seed_system_anchors(self, rows: list[dict[str, Any]]) -> None:
+        sqlite_coherence_queries.seed_system_anchors(self._connection, rows)
+
+    def coherence_cache_stats(self, session_id: str) -> dict[str, int]:
+        return sqlite_coherence_queries.coherence_cache_stats(self._connection, session_id)
+
+    def append_coherence_group(
+            self,
+            session_id: str,
+            results: List[Any],
+            candidates: List[Any] | None = None,
+            anchors: List[Any] | None = None,
+    ) -> None:
+        def write_group() -> None:
+            sqlite_coherence_queries.append_coherence_results(self._connection, session_id, results)
+            sqlite_coherence_queries.append_refinement_candidates(
+                self._connection, session_id, list(candidates or ())
+            )
+            sqlite_coherence_queries.append_anchor_candidates(
+                self._connection, session_id, list(anchors or ())
+            )
+
+        self._with_write_retry(write_group)
 
 
+@bind_peewee_store
 class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
     def upsert_anchor_profiles(self, session_id: str, anchors: list[Any]) -> None:
         self._upsert_anchor_profiles(session_id, anchors, update_state=True)
@@ -188,6 +325,9 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
             .order_by(CoherenceResult.record_id)
             .dicts()
         )
+
+    def list_coherence_result_clusters(self, session_id: str) -> list[dict[str, Any]]:
+        return sqlite_coherence_queries.list_coherence_result_clusters(self._connection, session_id)
 
     def upsert_refinement_candidates(self, session_id: str, candidates: list[Any]) -> None:
         RefinementCandidate.delete().where(
@@ -806,7 +946,7 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
         if not candidates:
             return
         cursor = self._db.cursor()
-        cursor.executemany.executemany(
+        cursor.executemany(
             """
             INSERT INTO refinement_candidates (session_id, candidate_id, record_id, current_audio_type,
                                                current_category,
@@ -913,3 +1053,8 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
             (session_id, session_id),
         )
         return max(0, int(exact.rowcount or 0)) + max(0, int(by_hash.rowcount or 0))
+
+
+# Compatibility for maintenance scripts that imported this raw query helper
+# before the store classes were introduced.
+repair_anchor_profile_json = sqlite_coherence_queries.repair_anchor_profile_json

@@ -18,6 +18,7 @@ from unshuffle.persistence.utils.thread_aware_sqlite_database import (
     ConnectionBoundStore,
     ConnectionProvider,
     PeeweeStore,
+    bind_peewee_store,
 )
 
 CacheHashEntry = dict[str, Optional[str]]
@@ -298,6 +299,7 @@ class SqliteCacheStore(CacheStore, ConnectionBoundStore):
         return list(schema) == list(CURRENT_VECTOR_SCHEMA)
 
 
+@bind_peewee_store
 class PeeweeCacheStore(SqliteCacheStore, PeeweeStore):
     def __init__(self, connection_provider: ConnectionProvider):
         self._initialize_db_proxy(connection_provider)
@@ -341,7 +343,7 @@ class PeeweeCacheStore(SqliteCacheStore, PeeweeStore):
         ).where(
             cast(Any, FileCache.last_path).in_(chunk)
         ).dicts()
-        return cast(Iterable[CacheHashRow], rows)
+        return cast(Iterable[CacheHashRow], list(rows))
 
     def _get_cached_entries(self, chunk: list[str]) -> Iterable[CacheHashRow]:
         rows = FileCache.select(
@@ -349,7 +351,7 @@ class PeeweeCacheStore(SqliteCacheStore, PeeweeStore):
         ).where(
             cast(Any, FileCache.last_path).in_(chunk)
         ).dicts()
-        return cast(Iterable[CacheHashRow], rows)
+        return cast(Iterable[CacheHashRow], list(rows))
 
     def _get_feature_vectors(self, chunk: list[str]) -> Iterable[FeatureVectorRow]:
         rows = FileCache.select(
@@ -360,7 +362,7 @@ class PeeweeCacheStore(SqliteCacheStore, PeeweeStore):
             & (FileCache.feature_space_version == CURRENT_FEATURE_SPACE_VERSION)
             & (FileCache.extractor_version == CURRENT_EXTRACTOR_VERSION)
         ).dicts()
-        return cast(Iterable[FeatureVectorRow], rows)
+        return cast(Iterable[FeatureVectorRow], list(rows))
 
     def get_feature_vector(self, file_hash: str) -> Optional[bytes]:
         cache = FileCache.select(
@@ -377,7 +379,7 @@ class PeeweeCacheStore(SqliteCacheStore, PeeweeStore):
         return cache.feature_vector
 
     def clear_cache(self) -> None:
-        FileCache.delete()
+        FileCache.delete().execute()
 
     def get_cached_path_by_hash(self, file_hash: str) -> Optional[str]:
         _row = FileCache.select(FileCache.last_path).where(FileCache.hash == file_hash).first()

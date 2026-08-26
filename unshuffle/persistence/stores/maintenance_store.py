@@ -19,6 +19,7 @@ from unshuffle.persistence.utils.thread_aware_sqlite_database import (
     ConnectionBoundStore,
     ConnectionProvider,
     PeeweeStore,
+    bind_peewee_store,
 )
 
 EPHEMERAL_TABLES = (
@@ -296,6 +297,7 @@ class SqliteMaintenanceStore(MaintenanceStore, ConnectionBoundStore):
         }
 
 
+@bind_peewee_store
 class PeeweeMaintenanceStore(MaintenanceStore, PeeweeStore):
     _EPHEMERAL_MODELS = {
         "staging_records": StagingRecord,
