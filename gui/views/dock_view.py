@@ -1,13 +1,15 @@
+import os
 from pathlib import Path
 
 from .. import widgets
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QFrame, QSizePolicy, QStackedWidget, QButtonGroup,
-    QScrollArea,
+    QScrollArea, QToolButton, QApplication, QLabel, QMenu, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem,
 )
-from PySide6.QtCore import QSize, Signal, Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRect, QSize, Signal, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPalette, QPen, QPixmap
 
 from unshuffle.core.constants import CATEGORIES
 
@@ -35,6 +37,7 @@ from ..utils.constants import (
     LIB_TAB_VIEW_BUTTON_WIDTH,
 )
 from ..utils.styles import (
+    ColorPalette,
     apply_style,
     dock_options_button_style,
     dock_save_search_button_style,
@@ -42,11 +45,281 @@ from ..utils.styles import (
     scaled_px,
 )
 from ..utils.layout_helpers import apply_layout_margins, apply_layout_spacing
+from ..utils.app_icon import app_icon
 from ..utils.widget_helpers import apply_fixed_height, apply_fixed_width, apply_minimum_width
 from ..widgets.buttons import SidebarIconButton
 from ..widgets import AnimatedIconButton
 from ..widgets.preview_control_bar import DragOutIconButton
 from ..utils.constants import PAUSE_ICON, PLAY_ICON, STOP_ICON
+from ..core.dock_appearance import transfer_palette_color
+
+
+class DockHoverTitleStrip(QWidget):
+    undockRequested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("DockHoverTitleStrip")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self._background_color = QColor(ColorPalette.BG_MED)
+        self._border_color = QColor(ColorPalette.BORDER)
+        self.setFixedHeight(3)
+        self.setMouseTracking(True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 2, 4, 2)
+        layout.setSpacing(4)
+        self.logo = QLabel(self)
+        self.logo.setPixmap(app_icon().pixmap(18, 18))
+        self.logo.setFixedSize(20, 20)
+        self.logo.setAlignment(Qt.AlignCenter)
+        self.logo.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout.addWidget(self.logo)
+        layout.addStretch(1)
+        self.menu_buttons: list[QToolButton] = []
+        self.window_buttons: list[tuple[QToolButton, QStyle.StandardPixmap]] = []
+        style = QApplication.style()
+        for standard_icon, tooltip, callback in (
+            (QStyle.SP_TitleBarMinButton, "Minimize", lambda: self.window().showMinimized()),
+            (QStyle.SP_TitleBarNormalButton, "Return to normal mode", self.undockRequested.emit),
+            (QStyle.SP_TitleBarCloseButton, "Close", lambda: self.window().close()),
+        ):
+            button = QToolButton(self)
+            button.setIcon(style.standardIcon(standard_icon))
+            button.setIconSize(QSize(14, 14))
+            button.setToolTip(tooltip)
+            button.setFixedSize(24, 22)
+            button.clicked.connect(callback)
+            layout.addWidget(button)
+            self.window_buttons.append((button, standard_icon))
+
+    def set_menus(self, *menus) -> None:
+        layout = self.layout()
+        if layout is None:
+            return
+        insert_at = max(0, layout.count() - 3)
+        for button in self.menu_buttons:
+            layout.removeWidget(button)
+            button.deleteLater()
+        self.menu_buttons.clear()
+        available_menus = [menu for menu in menus if menu is not None]
+        if available_menus:
+            overflow_menu = QMenu(self)
+            for menu in available_menus:
+                overflow_menu.addMenu(menu)
+            button = QToolButton(self)
+            button.setObjectName("DockMenusButton")
+            button.setToolTip("Menus")
+            button.setMenu(overflow_menu)
+            button.setPopupMode(QToolButton.InstantPopup)
+            button.setAutoRaise(True)
+            button.setText("Menus")
+            button.setFixedSize(58, 22)
+            button.setStyleSheet(
+                "QToolButton#DockMenusButton::menu-indicator { image: none; width: 0px; }"
+            )
+            layout.insertWidget(insert_at, button)
+            self.menu_buttons.append(button)
+
+    def set_background_colors(self, background: str, border: str) -> None:
+        self._background_color = QColor(background)
+        self._border_color = QColor(border)
+        self.update()
+
+    def set_foreground_color(self, color: str) -> None:
+        tint = QColor(color)
+        style = QApplication.style()
+        for button, standard_icon in self.window_buttons:
+            pixmap = style.standardIcon(standard_icon).pixmap(button.iconSize())
+            if pixmap.isNull():
+                continue
+            painter = QPainter(pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(pixmap.rect(), tint)
+            painter.end()
+            button.setIcon(QIcon(pixmap))
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._background_color)
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            handle = self.window().windowHandle()
+            if handle is not None and handle.startSystemMove():
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
+class DockVerticalResizeEdge(QWidget):
+    def __init__(self, edge: Qt.Edge, parent=None):
+        super().__init__(parent)
+        self.edge = edge
+        self.setFixedHeight(4)
+        self.setCursor(Qt.SizeVerCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            handle = self.window().windowHandle()
+            if handle is not None and handle.startSystemResize(self.edge):
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
+class DockChromeSpacer(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._extent = 0
+        self.setFixedHeight(0)
+
+    def get_extent(self) -> int:
+        return self._extent
+
+    def set_extent(self, value: int) -> None:
+        self._extent = max(0, int(value))
+        self.setFixedHeight(self._extent)
+
+    extent = Property(int, get_extent, set_extent)
+
+
+class DockSideResizeEdge(QWidget):
+    def __init__(self, edge: Qt.Edge, parent=None):
+        super().__init__(parent)
+        self.edge = edge
+        self.setFixedWidth(4)
+        self.setCursor(Qt.SizeHorCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            handle = self.window().windowHandle()
+            if handle is not None and handle.startSystemResize(self.edge):
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
+class DockEnvironmentScreenOverlay(QWidget):
+    """Click-through border pulse around the dock while its environment is sampled."""
+
+    sweepFinished = Signal()
+
+    def __init__(self, dock_view):
+        super().__init__(
+            dock_view.window(),
+            Qt.Tool
+            | Qt.FramelessWindowHint
+            | Qt.WindowStaysOnTopHint
+            | Qt.WindowTransparentForInput
+            | Qt.NoDropShadowWindowHint,
+        )
+        self.dock_view = dock_view
+        self._progress = 0.0
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._timer = QTimer(self)
+        self._timer.setInterval(32)
+        self._timer.timeout.connect(self._advance)
+        self.hide()
+
+    def set_scanning(self, scanning: bool) -> None:
+        if scanning:
+            window = self.dock_view.window()
+            screen = window.screen() if window is not None else None
+            if screen is None:
+                return
+            self._progress = 0.0
+            self.setGeometry(screen.geometry())
+            self.show()
+            self.raise_()
+            self._timer.start()
+        else:
+            self._timer.stop()
+            self.hide()
+
+    def _advance(self) -> None:
+        self._progress += 1.0 / 45.0
+        if self._progress >= 1.0:
+            self._timer.stop()
+            self.hide()
+            self.sweepFinished.emit()
+            return
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        dock_window = self.dock_view.window()
+        if dock_window is None:
+            return
+        dock_rect = QRect(dock_window.frameGeometry())
+        dock_rect.translate(-self.geometry().topLeft())
+
+        palette = getattr(self.dock_view, "_adaptive_palette", None)
+        accent = QColor(palette.accent if palette is not None else ColorPalette.PRIMARY)
+        painter = QPainter(self)
+        pulse = 1.0 - abs((self._progress * 2.0) - 1.0)
+        glow = QColor(accent)
+        glow.setAlpha(round(35 + (90 * pulse)))
+        painter.setPen(QPen(glow, 3))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(dock_rect.adjusted(-3, -3, 3, 3), 7, 7)
+        painter.end()
+
+
+class DockPaletteTransitionOverlay(QWidget):
+    def __init__(self, snapshot: QPixmap, parent=None):
+        super().__init__(parent)
+        self._snapshot = snapshot
+        self._progress = 0.0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+    def get_progress(self) -> float:
+        return self._progress
+
+    def set_progress(self, value: float) -> None:
+        self._progress = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    progress = Property(float, get_progress, set_progress)
+
+    def paintEvent(self, _event) -> None:
+        if self._snapshot.isNull():
+            return
+        top = round(self.height() * self._progress)
+        if top >= self.height():
+            return
+        painter = QPainter(self)
+        source_top = round(self._snapshot.height() * self._progress)
+        painter.drawPixmap(
+            QRect(0, top, self.width(), self.height() - top),
+            self._snapshot,
+            QRect(0, source_top, self._snapshot.width(), self._snapshot.height() - source_top),
+        )
+        painter.end()
+
+
+class DockAdaptiveTreeDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.palette = None
+
+    def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:
+        super().initStyleOption(option, index)
+        if self.palette is None:
+            return
+        foreground = index.data(Qt.ForegroundRole)
+        color = foreground.color() if isinstance(foreground, QBrush) else foreground
+        if not isinstance(color, QColor):
+            color = option.palette.color(QPalette.Text)
+        shifted = transfer_palette_color(color, self.palette)
+        option.palette.setColor(QPalette.Text, shifted)
+        option.palette.setColor(QPalette.HighlightedText, shifted)
+
+    def paint(self, painter, option, index) -> None:
+        option.state &= ~QStyle.State_HasFocus
+        super().paint(painter, option, index)
 
 
 class DockView(QWidget):
@@ -73,6 +346,7 @@ class DockView(QWidget):
     audioPreviewRequested = Signal(str)
     anchorRequested = Signal(str)
     findRequested = Signal(str)
+    undockRequested = Signal()
 
     def __init__(self, tree_model, parent=None):
         super().__init__(parent)
@@ -82,6 +356,11 @@ class DockView(QWidget):
         self._view_mode = "tree"
         self._map_available = True
         self.map_page = None
+        self._adaptive_palette = None
+        self._palette_overlay = None
+        self._palette_overlay_animation = None
+        self._chrome_enabled = False
+        self._chrome_visible = False
         self._setup_ui()
         self.setMinimumSize(DOCKED_MINIMUM_WIDTH, DOCKED_MINIMUM_HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -101,13 +380,30 @@ class DockView(QWidget):
         apply_layout_margins(root_layout, LIB_TAB_CONTENT_ZERO_MARGINS)
         apply_layout_spacing(root_layout, LIB_TAB_CONTENT_ZERO_MARGINS[0])
 
+        self.chrome_spacer = DockChromeSpacer(self)
+        root_layout.addWidget(self.chrome_spacer)
+
+        self.hover_title_strip = DockHoverTitleStrip(self)
+        self.hover_title_strip.undockRequested.connect(self.undockRequested.emit)
+        self._apply_default_chrome_style()
+        self.hover_title_strip.hide()
+        self.top_resize_edge = DockVerticalResizeEdge(Qt.TopEdge, self)
+        self.top_resize_edge.hide()
+        self.bottom_resize_edge = DockVerticalResizeEdge(Qt.BottomEdge, self)
+        self.bottom_resize_edge.hide()
+        self.left_resize_edge = DockSideResizeEdge(Qt.LeftEdge, self)
+        self.right_resize_edge = DockSideResizeEdge(Qt.RightEdge, self)
+        self.left_resize_edge.hide()
+        self.right_resize_edge.hide()
+        self.environment_screen_overlay = DockEnvironmentScreenOverlay(self)
+
         self.scroll_area = QScrollArea()
         self.scroll_area.setObjectName("DockScrollArea")
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        root_layout.addWidget(self.scroll_area)
+        root_layout.addWidget(self.scroll_area, 1)
 
         self.scroll_content = QWidget()
         self.scroll_content.setObjectName("DockScrollContent")
@@ -161,16 +457,25 @@ class DockView(QWidget):
         self.btn_map_view.setCheckable(True)
         self.btn_map_view.clicked.connect(lambda: self.set_docked_view_mode("map"))
         for button in (self.btn_tree_view, self.btn_map_view):
-            apply_fixed_width(button, LIB_TAB_VIEW_BUTTON_WIDTH)
+            button.setMinimumWidth(LIB_TAB_VIEW_BUTTON_WIDTH)
+            button.setMaximumWidth(16777215)
             apply_fixed_height(button, LIB_TAB_VIEW_BUTTON_HEIGHT)
+            button.setStyleSheet(
+                f"QPushButton {{ padding: 0; border: none; min-height: {LIB_TAB_VIEW_BUTTON_HEIGHT}px; "
+                f"max-height: {LIB_TAB_VIEW_BUTTON_HEIGHT}px; }}"
+            )
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             button.setCursor(Qt.PointingHandCursor)
         self.view_group = QButtonGroup(self)
         self.view_group.setExclusive(True)
         self.view_group.addButton(self.btn_tree_view)
         self.view_group.addButton(self.btn_map_view)
-        view_row.addWidget(self.btn_tree_view)
-        view_row.addWidget(self.btn_map_view)
-        view_row.addStretch(1)
+        view_row.addWidget(self.btn_tree_view, 1, Qt.AlignVCenter)
+        view_row.addWidget(self.btn_map_view, 1, Qt.AlignVCenter)
+        self.type_picker = widgets.TypeToggle()
+        self.type_picker.set_expanding(True)
+        self.type_picker.typeChanged.connect(self._on_type_clicked)
+        view_row.addWidget(self.type_picker, 3, Qt.AlignVCenter)
         from gui.core.audio_player import SoundPreviewPlayer
 
         self._preview_player = SoundPreviewPlayer.instance()
@@ -182,13 +487,26 @@ class DockView(QWidget):
         self.btn_preview_stop.clicked.connect(lambda checked=False: self._preview_player.stop())
         self.btn_preview_export = DragOutIconButton(self._preview_player)
         self.btn_preview_export.setToolTip("Export current sample")
+        self.transport_shell = QFrame(self)
+        self.transport_shell.setObjectName("DockTransportShell")
+        transport_row = QHBoxLayout(self.transport_shell)
+        transport_row.setContentsMargins(scaled_px(10), scaled_px(4), scaled_px(10), scaled_px(4))
+        transport_row.setSpacing(scaled_px(14))
+        transport_row.addStretch(1)
         for button in (self.btn_preview_play, self.btn_preview_stop, self.btn_preview_export):
             button.setEnabled(False)
-            view_row.addWidget(button, 0, Qt.AlignVCenter)
+            transport_row.addWidget(button, 0, Qt.AlignVCenter)
+        transport_row.addStretch(1)
+        self._transport_hide_timer = QTimer(self)
+        self._transport_hide_timer.setSingleShot(True)
+        self._transport_hide_timer.setInterval(3000)
+        self._transport_hide_timer.timeout.connect(self._hide_inactive_transport)
+        self.transport_shell.hide()
         self._preview_player.stateChanged.connect(self._update_docked_play_icon)
         self.main_layout.addLayout(view_row)
 
         self.options_section = sw.CollapsibleSection("OPTIONS", use_scroll=False)
+        self.options_section.btn.setObjectName("DockOptionsButton")
         apply_style(self.options_section.btn, dock_options_button_style())
         
         opt_layout = self.options_section.content_layout
@@ -204,16 +522,14 @@ class DockView(QWidget):
         self.category_carousel.valueSelected.connect(self._on_category_selected)
         opt_layout.addWidget(self.category_carousel)
 
-        self.type_picker = widgets.TypeToggle()
-        self.type_picker.typeChanged.connect(self._on_type_clicked)
-        opt_layout.addWidget(self.type_picker, LIB_TAB_CONTENT_ZERO_MARGINS[0], Qt.AlignLeft)
-
         self.main_layout.addWidget(self.options_section)
 
         self.view_stack = QStackedWidget()
         self.view_stack.setMinimumHeight(DOCKED_TREE_PANEL_MIN_HEIGHT)
 
         self.view_tree = LibraryTreeView()
+        self._adaptive_tree_delegate = DockAdaptiveTreeDelegate(self.view_tree)
+        self.view_tree.setItemDelegate(self._adaptive_tree_delegate)
         self.view_tree.setModel(self.tree_model)
         apply_minimum_width(self.view_tree, LIB_TAB_CONTENT_ZERO_MARGINS[0])
         self.view_tree.setHeaderHidden(True)
@@ -234,15 +550,22 @@ class DockView(QWidget):
             self.tree_model.rebuildFinished.connect(self._force_single_tree_column)
         self.view_stack.addWidget(self.view_tree)
         self.main_layout.addWidget(self.view_stack, 1)
-        self.main_layout.addLayout(self._search_row)
+        self.search_shell = QFrame(self)
+        self.search_shell.setObjectName("DockSearchShell")
+        self.search_shell.setLayout(self._search_row)
+        self._search_row.setContentsMargins(
+            scaled_px(10), scaled_px(4), scaled_px(10), scaled_px(10)
+        )
+        root_layout.addWidget(self.transport_shell)
+        root_layout.addWidget(self.search_shell)
 
         self.set_docked_view_mode("tree", emit=False)
 
     def _selected_audio_path(self):
-        records = self.selected_records()
-        if not records:
+        index = self.view_tree.currentIndex()
+        record = self.view_tree.preview_record_for_index(index)
+        if record is None:
             return None
-        record = records[0]
         if str(getattr(record, "audio_type", "") or "") in {"Non-Audio Assets", "Utility"}:
             return None
         path = getattr(record, "source_path", None)
@@ -254,6 +577,12 @@ class DockView(QWidget):
         self.btn_preview_export.selected_path = path if available else None
         for button in (self.btn_preview_play, self.btn_preview_stop, self.btn_preview_export):
             button.setEnabled(available)
+        if available:
+            self._show_transport()
+            if not self._preview_player.is_playing():
+                self._schedule_transport_hide()
+        else:
+            self._schedule_transport_hide()
 
     def sync_transport_state(self) -> None:
         current_path = getattr(self._preview_player, "current_path", None)
@@ -291,6 +620,31 @@ class DockView(QWidget):
             and state == QMediaPlayer.PlaybackState.PlayingState
         )
         self.btn_preview_play.setIcon(QIcon(str(PAUSE_ICON if playing else PLAY_ICON)))
+        if playing:
+            self._show_transport()
+        else:
+            self._schedule_transport_hide()
+
+    def _show_transport(self) -> None:
+        self._transport_hide_timer.stop()
+        self.transport_shell.show()
+
+    def _schedule_transport_hide(self) -> None:
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        state = self._preview_player.get_state()
+        paused = state == QMediaPlayer.PausedState or (
+            hasattr(QMediaPlayer, "PlaybackState")
+            and state == QMediaPlayer.PlaybackState.PausedState
+        )
+        if paused:
+            self._show_transport()
+            return
+        self._transport_hide_timer.start()
+
+    def _hide_inactive_transport(self) -> None:
+        if not self._preview_player.is_playing():
+            self.transport_shell.hide()
 
     def _force_single_tree_column(self) -> None:
         from PySide6.QtWidgets import QHeaderView
@@ -378,6 +732,8 @@ class DockView(QWidget):
         from ..widgets.coherence_analyzer import CoherenceAnalyzerPage
 
         self.map_page = CoherenceAnalyzerPage(self, show_header=False, show_filters=False, show_zoom=False, default_zoom=4)
+        self.map_page.setObjectName("DockMapPage")
+        self.map_page.map_stage.setObjectName("DockMapStage")
         self.map_page.audioPreviewRequested.connect(self.audioPreviewRequested.emit)
         self.map_page.anchorRequested.connect(self.anchorRequested.emit)
         self.map_page.findRequested.connect(self.findRequested.emit)
@@ -388,6 +744,8 @@ class DockView(QWidget):
         self.view_stack.addWidget(self.map_page)
         self._apply_docked_map_square()
         self.map_page.refresh_theme()
+        if self._adaptive_palette is not None:
+            self.apply_adaptive_palette(self._adaptive_palette, animate=False)
         return self.map_page
 
     def set_docked_view_mode(self, mode: str, *, emit: bool = True) -> None:
@@ -492,10 +850,244 @@ class DockView(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if hasattr(self, "hover_title_strip"):
+            self._position_chrome()
         if self._view_mode == "map":
             self._apply_docked_map_square()
 
-    def refresh_theme(self) -> None:
+    def set_environment_scanning(self, scanning: bool) -> None:
+        self.environment_screen_overlay.set_scanning(bool(scanning))
+
+    def set_hover_menus(self, *menus) -> None:
+        self.hover_title_strip.set_menus(*menus)
+
+    def set_hover_title_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._chrome_enabled = enabled
+        window = self.window()
+        if enabled and self.hover_title_strip.parentWidget() is not window:
+            self.hover_title_strip.setParent(window)
+            self.top_resize_edge.setParent(window)
+            self.bottom_resize_edge.setParent(window)
+            self.left_resize_edge.setParent(window)
+            self.right_resize_edge.setParent(window)
+        self.top_resize_edge.setVisible(enabled)
+        self.bottom_resize_edge.setVisible(enabled)
+        self.left_resize_edge.setVisible(enabled)
+        self.right_resize_edge.setVisible(enabled)
+        self._set_chrome_visible(enabled)
+        self._position_chrome()
+
+    def _set_chrome_visible(self, visible: bool) -> None:
+        visible = bool(visible and self._chrome_enabled)
+        chrome_height = 28 if visible else 0
+        self.chrome_spacer.set_extent(chrome_height)
+        if visible == self._chrome_visible:
+            self.hover_title_strip.setVisible(visible)
+            self._position_chrome()
+            return
+        self._chrome_visible = visible
+        self.hover_title_strip.setFixedHeight(28)
+        self.hover_title_strip.setVisible(visible)
+        self._position_chrome()
+
+    def _position_chrome(self) -> None:
+        window = self.window()
+        if window is None:
+            return
+        self.hover_title_strip.setGeometry(QRect(0, 0, window.width(), 28))
+        self.top_resize_edge.setGeometry(0, 0, window.width(), 4)
+        self.bottom_resize_edge.setGeometry(0, max(0, window.height() - 4), window.width(), 4)
+        self.left_resize_edge.setGeometry(0, 28, 4, max(0, window.height() - 32))
+        self.right_resize_edge.setGeometry(max(0, window.width() - 4), 28, 4, max(0, window.height() - 32))
+        if self.hover_title_strip.isVisible():
+            self.hover_title_strip.raise_()
+        if self.top_resize_edge.isVisible():
+            self.top_resize_edge.raise_()
+        if self.bottom_resize_edge.isVisible():
+            self.bottom_resize_edge.raise_()
+        if self.left_resize_edge.isVisible():
+            self.left_resize_edge.raise_()
+        if self.right_resize_edge.isVisible():
+            self.right_resize_edge.raise_()
+
+    @staticmethod
+    def _adaptive_widget_style(palette) -> str:
+        return f"""
+            /* dock-adaptive */
+            QWidget#DockView {{ color: {palette.text}; background: {palette.base}; }}
+            QScrollArea#DockScrollArea, QScrollArea#DockScrollArea::viewport,
+            QWidget#DockScrollContent, QStackedWidget {{
+                color: {palette.text}; background: {palette.base}; border: none;
+            }}
+            QFrame#DockSearchShell {{ background: {palette.base}; border: none; }}
+            QWidget#DockMapPage, QFrame#DockMapStage {{ background: {palette.base}; border: none; }}
+            QLabel {{ color: {palette.text}; background: transparent; }}
+            QAbstractScrollArea, QAbstractScrollArea::viewport, QTreeView, QListView, QTableView {{
+                color: {palette.text}; background: transparent; border-color: {palette.border};
+                selection-background-color: {palette.selection}; selection-color: {palette.text};
+            }}
+            QTreeView::item:hover {{ background: {palette.hover}; color: {palette.text}; }}
+            QTreeView::item:selected, QTreeView::item:selected:active,
+            QTreeView::item:selected:!active {{ background: {palette.selection}; color: {palette.text}; }}
+            QLineEdit, QComboBox, QSpinBox {{
+                color: {palette.text}; background: {palette.raised}; border-color: {palette.border};
+                selection-background-color: {palette.selection};
+            }}
+            QMenu, QComboBox QAbstractItemView {{
+                color: {palette.text}; background: {palette.raised}; border-color: {palette.border};
+                selection-background-color: {palette.selection};
+            }}
+            QSlider::groove:horizontal {{ background: {palette.border}; }}
+            QSlider::handle:horizontal {{ background: {palette.accent}; }}
+            QScrollBar:vertical, QScrollBar:horizontal {{ background: {palette.scrollbar}; }}
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{ background: {palette.scrollbar_handle}; }}
+        """
+
+    def _apply_adaptive_palette_now(self, palette) -> None:
+        self._adaptive_palette = palette
+        self._adaptive_tree_delegate.palette = palette
+        self.setStyleSheet(dock_view_style() + self._adaptive_widget_style(palette))
+        widget_palette = QPalette(self.palette())
+        widget_palette.setColor(QPalette.Window, QColor(palette.base))
+        widget_palette.setColor(QPalette.Base, QColor(palette.base))
+        widget_palette.setColor(QPalette.AlternateBase, QColor(palette.raised))
+        widget_palette.setColor(QPalette.Button, QColor(palette.raised))
+        widget_palette.setColor(QPalette.Text, QColor(palette.text))
+        widget_palette.setColor(QPalette.WindowText, QColor(palette.text))
+        widget_palette.setColor(QPalette.ButtonText, QColor(palette.text))
+        widget_palette.setColor(QPalette.Highlight, QColor(palette.accent))
+        self.setPalette(widget_palette)
+        color_transform = lambda color, current=palette: transfer_palette_color(color, current)
+        for button in (
+            self.btn_preview_play,
+            self.btn_preview_stop,
+            self.btn_preview_export,
+        ):
+            if hasattr(button, "set_color_transform"):
+                button.set_color_transform(color_transform)
+        for button in (self.btn_tree_view, self.btn_map_view):
+            button.set_color_transform(None)
+            button.set_adaptive_colors(
+                palette.accent,
+                palette.hover,
+                palette.text,
+                palette.text,
+            )
+        self._apply_chrome_style(palette.panel, palette.text, palette.border, palette.hover)
+        self._set_native_border_color(self._adaptive_outer_border(palette.base))
+        self._apply_adaptive_component_styles(palette, color_transform)
+        self.view_tree.set_branch_color(palette.border)
+        self.view_tree.set_branch_color_transform(color_transform)
+        if self.map_page is not None:
+            self.map_page.map.set_adaptive_palette(palette, color_transform)
+
+    def _apply_adaptive_component_styles(self, palette, color_transform) -> None:
+        self.options_section.apply_adaptive_palette(palette)
+        for carousel in (self.filter_carousel, self.category_carousel):
+            carousel.apply_adaptive_palette(palette, color_transform)
+        self.type_picker.apply_adaptive_palette(palette)
+        self.btn_save_search.setStyleSheet(
+            f"QPushButton {{ color: {palette.text}; background: {palette.accent}; border: none; }}"
+            f"QPushButton:hover {{ background: {palette.accent_hover}; }}"
+            f"QPushButton:disabled {{ color: {palette.muted}; background: {palette.raised}; }}"
+        )
+        self.search_shell.setStyleSheet(f"background: {palette.base}; border: none;")
+        self.transport_shell.setStyleSheet(f"background: {palette.base}; border: none;")
+        self.view_tree.setStyleSheet(
+            f"QTreeView {{ color: {palette.text}; background: {palette.base}; border: none; "
+            f"selection-background-color: {palette.selection}; selection-color: {palette.text}; }}"
+            f"QTreeView::item:hover {{ background: {palette.hover}; color: {palette.text}; }}"
+            f"QTreeView::item:selected, QTreeView::item:selected:active, "
+            f"QTreeView::item:selected:!active {{ background: {palette.selection}; color: {palette.text}; }}"
+        )
+        if self.map_page is not None:
+            self.map_page.setStyleSheet(f"background: {palette.base}; border: none;")
+            self.map_page.map_stage.setStyleSheet(f"background: {palette.base}; border: none;")
+
+    def _apply_default_chrome_style(self) -> None:
+        self._apply_chrome_style(
+            ColorPalette.BG_MED,
+            ColorPalette.TEXT_MAIN,
+            ColorPalette.BORDER,
+            ColorPalette.BG_HOVER,
+        )
+
+    def _apply_chrome_style(self, panel: str, text: str, border: str, hover: str) -> None:
+        self.hover_title_strip.set_background_colors(panel, border)
+        self.hover_title_strip.set_foreground_color(text)
+        chrome_palette = QPalette(self.hover_title_strip.palette())
+        chrome_palette.setColor(QPalette.Window, QColor(panel))
+        chrome_palette.setColor(QPalette.WindowText, QColor(text))
+        self.hover_title_strip.setPalette(chrome_palette)
+        self.hover_title_strip.setAutoFillBackground(True)
+        self.hover_title_strip.setStyleSheet(
+            f"QWidget#DockHoverTitleStrip {{ background: transparent; color: {text}; border: none; }}"
+            f"QWidget#DockHoverTitleStrip QLabel, QWidget#DockHoverTitleStrip QToolButton {{ "
+            f"background: transparent; color: {text}; border: none; }}"
+            f"QWidget#DockHoverTitleStrip QToolButton:hover {{ background: {hover}; }}"
+        )
+
+    def _dispose_palette_overlay(self) -> None:
+        overlay = self._palette_overlay
+        animation = self._palette_overlay_animation
+        self._palette_overlay = None
+        self._palette_overlay_animation = None
+        if animation is not None:
+            try:
+                animation.stop()
+            except RuntimeError:
+                pass
+        if overlay is None:
+            return
+        try:
+            overlay.deleteLater()
+        except RuntimeError:
+            pass
+
+    def apply_adaptive_palette(self, palette, *, animate: bool = True) -> None:
+        snapshot = self.grab() if animate and self.isVisible() else None
+        self._apply_adaptive_palette_now(palette)
+        if snapshot is None or snapshot.isNull():
+            return
+        self._dispose_palette_overlay()
+        overlay = DockPaletteTransitionOverlay(snapshot, self)
+        overlay.setGeometry(self.rect())
+        overlay.show()
+        overlay.raise_()
+        animation = QPropertyAnimation(overlay, b"progress", self)
+        animation.setDuration(1200)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation.finished.connect(self._dispose_palette_overlay)
+        animation.start()
+        self._palette_overlay = overlay
+        self._palette_overlay_animation = animation
+
+    def clear_adaptive_palette(self) -> None:
+        self._dispose_palette_overlay()
+        self.set_environment_scanning(False)
+        self._adaptive_palette = None
+        self._adaptive_tree_delegate.palette = None
+        self._set_native_border_color(None)
+        self._apply_default_chrome_style()
+        for button in (
+            self.btn_tree_view,
+            self.btn_map_view,
+            self.btn_preview_play,
+            self.btn_preview_stop,
+            self.btn_preview_export,
+        ):
+            if hasattr(button, "set_color_transform"):
+                button.set_color_transform(None)
+        if self.map_page is not None:
+            self.map_page.map.clear_adaptive_palette()
+            self.map_page.refresh_theme()
+        self.view_tree.set_branch_color_transform(None)
+        self._apply_normal_theme()
+
+    def _apply_normal_theme(self) -> None:
         apply_style(self, dock_view_style())
         apply_style(self.btn_save_search, dock_save_search_button_style())
         apply_style(self.options_section.btn, dock_options_button_style())
@@ -506,3 +1098,47 @@ class DockView(QWidget):
         self.filter_carousel.refresh_theme()
         self.category_carousel.refresh_theme()
         self.type_picker.refresh_theme()
+
+    def _set_native_border_color(self, color: str | None) -> None:
+        if os.name != "nt" or os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return
+        try:
+            import ctypes
+
+            if color is None:
+                value = ctypes.c_uint32(0xFFFFFFFF)  # DWMWA_COLOR_DEFAULT
+            else:
+                parsed = QColor(color)
+                value = ctypes.c_uint32(
+                    parsed.red() | (parsed.green() << 8) | (parsed.blue() << 16)
+                )
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                int(self.window().winId()),
+                34,  # DWMWA_BORDER_COLOR
+                ctypes.byref(value),
+                ctypes.sizeof(value),
+            )
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+            pass
+
+    @staticmethod
+    def _adaptive_outer_border(background: str) -> str:
+        base = QColor(background)
+        if not base.isValid():
+            return background
+        target = QColor("#000000" if base.lightnessF() >= 0.5 else "#ffffff")
+        blend = 0.10
+        return QColor(
+            round(base.red() * (1.0 - blend) + target.red() * blend),
+            round(base.green() * (1.0 - blend) + target.green() * blend),
+            round(base.blue() * (1.0 - blend) + target.blue() * blend),
+        ).name()
+
+    def restore_native_border(self) -> None:
+        self._set_native_border_color(None)
+
+    def refresh_theme(self) -> None:
+        adaptive_palette = self._adaptive_palette
+        self._apply_normal_theme()
+        if adaptive_palette is not None:
+            self.apply_adaptive_palette(adaptive_palette, animate=False)

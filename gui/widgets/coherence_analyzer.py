@@ -4,7 +4,7 @@ import logging
 import math
 import time
 from collections import OrderedDict, defaultdict
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -75,6 +75,10 @@ class CoherenceMapWidget(QWidget):
         self._background_pixmap_cache: OrderedDict[tuple, QPixmap] = OrderedDict()
         self._points_pixmap_cache: OrderedDict[tuple, QPixmap] = OrderedDict()
         self._visible_ids_signature: tuple[int, int] | None = None
+        self._color_transform: Callable[[QColor], QColor] | None = None
+        self._background_override: QColor | None = None
+        self._adaptive_band_colors: tuple[QColor, QColor] | None = None
+        self._adaptive_muted: QColor | None = None
         self.setMinimumHeight(scaled_px(260))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -104,6 +108,36 @@ class CoherenceMapWidget(QWidget):
         )
         self._cached_points_pixmap = None
         self.update()
+
+    def set_color_transform(self, transform: Callable[[QColor], QColor] | None) -> None:
+        self._color_transform = transform
+        self._invalidate_cache(clear_history=True)
+        self.update()
+
+    def set_background_color(self, color: QColor | str | None) -> None:
+        self._background_override = QColor(color) if color is not None else None
+        self._invalidate_cache(clear_history=True)
+        self.update()
+
+    def set_adaptive_palette(self, palette, point_transform=None) -> None:
+        self._background_override = QColor(palette.base)
+        self._adaptive_band_colors = (QColor(palette.base), QColor(palette.raised))
+        self._adaptive_muted = QColor(palette.muted)
+        self._color_transform = point_transform
+        self._invalidate_cache(clear_history=True)
+        self.update()
+
+    def clear_adaptive_palette(self) -> None:
+        self._background_override = None
+        self._adaptive_band_colors = None
+        self._adaptive_muted = None
+        self._color_transform = None
+        self._invalidate_cache(clear_history=True)
+        self.update()
+
+    def _paint_color(self, color: QColor | str) -> QColor:
+        value = QColor(color)
+        return self._color_transform(value) if self._color_transform is not None else value
 
     def configure(self, *, points=None, audio_type=None, category=None, version=None) -> None:
         changed = False
@@ -344,10 +378,15 @@ class CoherenceMapWidget(QWidget):
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.Antialiasing)
-            painter.fillRect(self.rect(), make_qcolor(ColorPalette.BG_LIST))
+            background = (
+                self._background_override
+                if self._background_override is not None
+                else self._paint_color(make_qcolor(ColorPalette.BG_LIST))
+            )
+            painter.fillRect(self.rect(), background)
             rect = self.rect().adjusted(scaled_px(14), scaled_px(14), -scaled_px(14), -scaled_px(14))
             if not self._projected:
-                painter.setPen(make_qcolor(ColorPalette.TEXT_MUTED))
+                painter.setPen(self._adaptive_muted or self._paint_color(make_qcolor(ColorPalette.TEXT_MUTED)))
                 scope = f"{self._audio_type.lower()} " if self._audio_type else ""
                 painter.drawText(rect, Qt.AlignCenter, f"No {scope}sound-map points yet.")
                 return
@@ -398,7 +437,7 @@ class CoherenceMapWidget(QWidget):
             self._cached_points_pixmap = points_pixmap
 
             painter.drawPixmap(0, 0, points_pixmap)
-            painter.setPen(make_qcolor(ColorPalette.TEXT_MUTED))
+            painter.setPen(self._paint_color(make_qcolor(ColorPalette.TEXT_MUTED)))
         finally:
             painter.end()
 
@@ -410,6 +449,7 @@ class CoherenceMapWidget(QWidget):
             self._zoom_level,
             self.width(),
             self.height(),
+            self._background_override.name(QColor.HexArgb) if self._background_override is not None else None,
         )
 
     def _points_pixmap_key(self) -> tuple:
@@ -434,7 +474,9 @@ class CoherenceMapWidget(QWidget):
         from collections import defaultdict
         visible_ids = self._visible_record_ids
         
-        dimmed_color = make_qcolor(ColorPalette.TEXT_MUTED)
+        dimmed_color = QColor(
+            self._adaptive_muted or self._paint_color(make_qcolor(ColorPalette.TEXT_MUTED))
+        )
         dimmed_color.setAlpha(70)
         
         dimmed_points = []
@@ -456,7 +498,7 @@ class CoherenceMapWidget(QWidget):
                 
         rx_norm = scaled_px(1.7)
         for (cluster_id, category), positions in normal_by_cluster.items():
-            painter.setBrush(_cluster_color(cluster_id, category))
+            painter.setBrush(self._paint_color(_cluster_color(cluster_id, category)))
             for pos in positions:
                 painter.drawEllipse(pos, rx_norm, rx_norm)
 
@@ -468,7 +510,10 @@ class CoherenceMapWidget(QWidget):
         painter.setPen(Qt.NoPen)
         for layer in range(layer_count):
             inner, outer = coherence_projection._layer_band_bounds(layer, layer_count)
-            color = _alternating_window_band_color(layer, layer_count)
+            if self._adaptive_band_colors is not None:
+                color = self._adaptive_band_colors[(layer_count - layer) % 2]
+            else:
+                color = self._paint_color(_alternating_window_band_color(layer, layer_count))
             path = QPainterPath()
             steps = 96
             for step in range(steps + 1):

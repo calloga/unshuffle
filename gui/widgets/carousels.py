@@ -6,9 +6,7 @@ from PySide6.QtGui import QAction
 from .buttons import SidebarIconButton
 from ..utils.constants import (
     CAROUSEL_ARROW_ICON_SIZE,
-    CAROUSEL_BUTTON_HEIGHT,
     CAROUSEL_HEADER_SPACING,
-    CAROUSEL_ICON_BUTTON_WIDTH,
     CAROUSEL_ICON_HITBOX_WIDTH,
     CAROUSEL_LAYOUT_SPACING,
     CAROUSEL_ROW_HEIGHT,
@@ -52,6 +50,8 @@ class SidebarCarousel(QFrame):
         self.inactive_text = (inactive_text or "")
         self.compact = compact
         self.toggleable = toggleable
+        self._adaptive_palette = None
+        self._adaptive_color_transform = None
         apply_style(self, frame_plain_style())
 
         layout = QHBoxLayout(self) if self.compact else QVBoxLayout(self)
@@ -93,10 +93,15 @@ class SidebarCarousel(QFrame):
         self.value_row.installEventFilter(self)
         
         for btn in (self.btn_prev, self.btn_next):
-            apply_fixed_size(btn, CAROUSEL_ICON_BUTTON_WIDTH, CAROUSEL_BUTTON_HEIGHT)
+            apply_fixed_size(btn, CAROUSEL_ICON_HITBOX_WIDTH, CAROUSEL_ROW_HEIGHT)
+            btn.setStyleSheet(
+                f"QPushButton {{ padding: 0; border: none; "
+                f"min-width: {CAROUSEL_ICON_HITBOX_WIDTH}px; max-width: {CAROUSEL_ICON_HITBOX_WIDTH}px; "
+                f"min-height: {CAROUSEL_ROW_HEIGHT}px; max-height: {CAROUSEL_ROW_HEIGHT}px; }}"
+            )
             btn.setCursor(Qt.PointingHandCursor)
         
-        apply_fixed_height(self.btn_value, CAROUSEL_BUTTON_HEIGHT)
+        apply_fixed_height(self.btn_value, CAROUSEL_ROW_HEIGHT)
         self.btn_value.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_value.setCursor(Qt.PointingHandCursor)
         self.btn_value.installEventFilter(self)
@@ -132,6 +137,24 @@ class SidebarCarousel(QFrame):
         return super().eventFilter(obj, event)
 
     def _set_section_active_visual(self):
+        if self._adaptive_palette is not None:
+            palette = self._adaptive_palette
+            title_color = palette.accent if self.is_active else palette.muted
+            title_hover = palette.accent_hover if self.is_active else palette.text
+            apply_style(
+                self.btn_title,
+                f"QPushButton {{ color: {title_color}; font-weight: bold; font-size: 11px; "
+                f"letter-spacing: 1px; text-align: left; border: none; background: transparent; padding: 0; }}"
+                f"QPushButton:hover {{ color: {title_hover}; }}",
+            )
+            value_background = palette.selection if self.is_active else "transparent"
+            apply_style(
+                self.btn_value,
+                f"QPushButton {{ color: {palette.text}; background: {value_background}; border: none; "
+                f"border-radius: 4px; padding: 0 20px; text-align: left; font-size: 12px; "
+                f"font-weight: bold; }}QPushButton:hover {{ background: {palette.hover}; }}",
+            )
+            return
         if self.toggleable and self.is_active:
             apply_style(self.btn_title, carousel_title_style(True))
         else:
@@ -248,5 +271,23 @@ class SidebarCarousel(QFrame):
         self._refresh()
 
     def refresh_theme(self) -> None:
+        self._adaptive_palette = None
+        self._adaptive_color_transform = None
         apply_style(self.value_row, carousel_frame_style())
         self._set_section_active_visual()
+        self.btn_prev.set_color_transform(None)
+        self.btn_next.set_color_transform(None)
+
+    def apply_adaptive_palette(self, palette, color_transform) -> None:
+        self._adaptive_palette = palette
+        self._adaptive_color_transform = color_transform
+        apply_style(self, "QFrame { background: transparent; border: none; }")
+        apply_style(
+            self.value_row,
+            f"QFrame {{ background: {palette.raised}; border: none; border-radius: 4px; }}",
+        )
+        self._set_section_active_visual()
+        self.btn_prev.set_color_transform(None)
+        self.btn_next.set_color_transform(None)
+        self.btn_prev.set_adaptive_colors(None, palette.hover, palette.text, palette.text)
+        self.btn_next.set_adaptive_colors(None, palette.hover, palette.text, palette.text)

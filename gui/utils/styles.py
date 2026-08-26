@@ -520,7 +520,7 @@ def dock_save_search_button_style() -> str:
 def dock_options_button_style() -> str:
     return (
         f"QPushButton {{ text-align: center; color: {ColorPalette.TEXT_DIM}; font-weight: bold; "
-        f"font-size: {scaled_px(10)}px; letter-spacing: 1px; border-top: 1px solid {ColorPalette.BORDER}; "
+        f"font-size: {scaled_px(10)}px; letter-spacing: 1px; border: none; "
         f"background: {ColorPalette.TRANSPARENT}; padding: {scaled_px(8)}px 0; }}"
         f"QPushButton:hover {{ color: {ColorPalette.TEXT_MUTED}; background: {ColorPalette.BG_ACCENT}; }}"
     )

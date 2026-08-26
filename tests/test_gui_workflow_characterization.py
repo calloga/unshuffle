@@ -2023,6 +2023,42 @@ class MainWindowDebounceTests(unittest.TestCase):
 
         window._reset_page_history.assert_called_once_with()
 
+    def test_runtime_model_preserves_active_audio_type_filter(self):
+        from gui.main import window_runtime
+
+        model = SimpleNamespace(
+            sourceModel=mock.Mock(),
+            set_show_non_audio_assets=mock.Mock(),
+            set_show_duplicates=mock.Mock(),
+            set_audio_types=mock.Mock(),
+        )
+        window = SimpleNamespace(
+            model=None,
+            proxy_model=mock.Mock(),
+            search_controller=SimpleNamespace(model=None, proxy_model=None, _audio_types={"Oneshots"}),
+            acoustic_controller=SimpleNamespace(model=None, proxy_model=None),
+            drafting_controller=SimpleNamespace(
+                apply_table_edit=mock.Mock(),
+                apply_table_bulk_updates=mock.Mock(),
+            ),
+            library_tab=SimpleNamespace(set_proxy_model=mock.Mock()),
+            settings_controller=SimpleNamespace(
+                get_show_non_audio_assets=mock.Mock(return_value=False),
+                get_show_duplicates=mock.Mock(return_value=True),
+            ),
+            tagging_controller=None,
+            coherence_controller=None,
+            tree_organization_controller=None,
+            _reset_page_history=mock.Mock(),
+            _should_auto_check_coherence_on_start=mock.Mock(return_value=False),
+            _frontloading_startup=False,
+            _scan_finalizing=True,
+        )
+
+        window_runtime.apply_runtime_model(window, model)
+
+        model.set_audio_types.assert_called_once_with({"Oneshots"})
+
     def test_runtime_engine_does_not_query_stale_model_during_rescan(self):
         from gui.main import window_runtime
 
@@ -2184,10 +2220,22 @@ class MainWindowDebounceTests(unittest.TestCase):
             window.view_controller.toggle_docked(True)
             self.assertEqual(window.maximumWidth(), DOCKED_MAXIMUM_WIDTH)
             self.assertEqual(window.width(), DOCKED_WINDOW_WIDTH)
+            window.resize(min(DOCKED_MAXIMUM_WIDTH, DOCKED_WINDOW_WIDTH + 100), window.height())
+            self.assertGreater(window.width(), DOCKED_WINDOW_WIDTH)
+            window.resize(DOCKED_WINDOW_WIDTH, window.height())
             self.assertTrue(window.footer.btn_build.isHidden())
             self.assertEqual(window.footer.lbl_status.text(), "Ready")
             dock_view = window.dock_view
             self.assertEqual(dock_view.scroll_area.verticalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
+            self.assertIs(dock_view.search_shell.parentWidget(), dock_view)
+            self.assertIsNot(dock_view.search_shell.parentWidget(), dock_view.scroll_content)
+            window.resize(DOCKED_WINDOW_WIDTH, window.minimumHeight())
+            app.processEvents()
+            self.assertFalse(dock_view.search_shell.isHidden())
+            self.assertLessEqual(
+                dock_view.search_shell.geometry().bottom(),
+                dock_view.rect().bottom(),
+            )
             options_bottom = dock_view.options_section.y() + dock_view.options_section.height()
             self.assertLessEqual(options_bottom, dock_view.scroll_area.viewport().height())
             tree_height = window.height()
@@ -2253,6 +2301,161 @@ class MainWindowDebounceTests(unittest.TestCase):
             self.assertIs(window.stack.currentWidget(), window.dock_view)
             self.assertTrue(window.footer._docked_presentation)
             self.assertFalse(window.page_nav_bar.isVisible())
+        finally:
+            if getattr(window, "engine", None):
+                try:
+                    window.engine.close()
+                except Exception:
+                    pass
+            close_qt_window(window, app)
+
+    def test_adaptive_dock_restores_original_window_flags(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.core.dock_appearance import DockAdaptivePalette
+        from gui.core.dock_appearance import DOCK_MATCH_HOST_CONSENT_KEY, DOCK_MATCH_HOST_KEY
+        from gui.main.launcher import ModernApp
+
+        app = QApplication.instance() or QApplication([])
+        window = ModernApp(defer_startup_restore=True)
+        try:
+            original_flags = window.windowFlags()
+            settings = window.settings_controller.settings
+            settings.setValue(DOCK_MATCH_HOST_CONSENT_KEY, True)
+            settings.setValue(DOCK_MATCH_HOST_KEY, True)
+
+            window.show()
+            window.view_controller.toggle_docked(True)
+            app.processEvents()
+
+            self.assertTrue(window.windowFlags() & Qt.FramelessWindowHint)
+            self.assertTrue(window.windowFlags() & Qt.WindowStaysOnTopHint)
+            self.assertTrue(window.windowFlags() & Qt.NoDropShadowWindowHint)
+            self.assertEqual(window.dock_view.view_tree.indentation(), 10)
+            self.assertFalse(window.dock_view.view_tree.rootIsDecorated())
+            self.assertFalse(window.dock_view.view_tree.expandsOnDoubleClick())
+            self.assertIn(window.custom_menu_bar.act_docked, window.actions())
+            self.assertFalse(window.dock_view.hover_title_strip.isHidden())
+            self.assertEqual(
+                [button.text() for button in window.dock_view.hover_title_strip.menu_buttons],
+                ["Menus"],
+            )
+            overflow_menu = window.dock_view.hover_title_strip.menu_buttons[0].menu()
+            self.assertIsNotNone(overflow_menu)
+            self.assertEqual(
+                [action.text() for action in overflow_menu.actions()],
+                ["View", "Help"],
+            )
+            window.dock_view._set_chrome_visible(True)
+            self.assertIs(window.dock_view.hover_title_strip.parentWidget(), window)
+            self.assertEqual(window.dock_view.hover_title_strip.geometry().top(), 0)
+            self.assertEqual(window.dock_view.hover_title_strip.width(), window.width())
+            self.assertFalse(window.dock_view.hover_title_strip.isHidden())
+            self.assertEqual(window.dock_view.chrome_spacer.get_extent(), 28)
+            self.assertFalse(window.dock_view.bottom_resize_edge.isHidden())
+            self.assertFalse(window.dock_view.top_resize_edge.isHidden())
+            self.assertFalse(window.dock_view.left_resize_edge.isHidden())
+            self.assertFalse(window.dock_view.right_resize_edge.isHidden())
+            self.assertFalse(window.custom_menu_bar.isVisible())
+            window.dock_view.set_environment_scanning(True)
+            self.assertTrue(window.dock_view.environment_screen_overlay._timer.isActive())
+            self.assertFalse(window.dock_view.environment_screen_overlay.isHidden())
+            sweep = window.dock_view.environment_screen_overlay
+            sweep._timer.stop()
+            sweep._progress = 0.0
+            steps = 0
+            sweep._timer.start()
+            while sweep._timer.isActive() and steps < 60:
+                sweep._advance()
+                steps += 1
+            self.assertEqual(steps, 45)
+            self.assertGreaterEqual(sweep._progress, 1.0)
+            self.assertTrue(sweep.isHidden())
+            window.dock_view.set_environment_scanning(False)
+            self.assertFalse(window.dock_view.environment_screen_overlay._timer.isActive())
+            self.assertTrue(window.dock_view.environment_screen_overlay.isHidden())
+
+            window.dock_view.apply_adaptive_palette(
+                DockAdaptivePalette(
+                    base="#182028",
+                    darker="#101820",
+                    panel="#202a32",
+                    raised="#24303a",
+                    hover="#303c46",
+                    border="#3a4a55",
+                    accent="#32a6b5",
+                    accent_hover="#45b7c5",
+                    text="#f4f6f8",
+                    muted="#a0f4f6f8",
+                    selection="#285e68",
+                    scrollbar="#182028",
+                    scrollbar_handle="#3a4a55",
+                    source_theme="ash",
+                ),
+                animate=True,
+            )
+            self.assertIn("dock-adaptive", window.dock_view.styleSheet())
+            self.assertNotIn("dock-adaptive", window.dock_view.view_tree.styleSheet())
+            self.assertIn("#182028", window.dock_view.view_tree.styleSheet())
+            self.assertIn("#303c46", window.dock_view.view_tree.styleSheet())
+            self.assertIn("#285e68", window.dock_view.view_tree.styleSheet())
+            self.assertIn("#24303a", window.dock_view.filter_carousel.value_row.styleSheet())
+            self.assertIn("font-weight: bold", window.dock_view.filter_carousel.btn_value.styleSheet())
+            self.assertNotIn("border-top", window.dock_view.options_section.btn.styleSheet())
+            self.assertIn("#32a6b5", window.dock_view.type_picker.btn_all.styleSheet())
+            self.assertEqual(window.dock_view.btn_tree_view._adaptive_active.name(), "#32a6b5")
+            self.assertEqual(window.dock_view.btn_map_view._adaptive_unchecked_icon.name(), "#f4f6f8")
+            self.assertEqual(window.dock_view.hover_title_strip._background_color.name(), "#202a32")
+            self.assertEqual(window.dock_view._adaptive_outer_border("#f0f0e0"), "#d8d8ca")
+            self.assertEqual(window.dock_view._adaptive_outer_border("#182028"), "#2f363e")
+            close_button = window.dock_view.hover_title_strip.window_buttons[-1][0]
+            close_pixmap = close_button.icon().pixmap(close_button.iconSize()).toImage()
+            self.assertTrue(any(
+                close_pixmap.pixelColor(x, y).alpha() > 200
+                and close_pixmap.pixelColor(x, y).name() == "#f4f6f8"
+                for y in range(close_pixmap.height())
+                for x in range(close_pixmap.width())
+            ))
+            window.dock_view.apply_adaptive_palette(
+                DockAdaptivePalette(
+                    base="#f4f3d8",
+                    darker="#e4e3cb",
+                    panel="#eeedd2",
+                    raised="#dedeca",
+                    hover="#d5ddc8",
+                    border="#dcdcc2",
+                    accent="#4d9188",
+                    accent_hover="#438078",
+                    text="#101216",
+                    muted="#6d7174",
+                    selection="#cfe1d4",
+                    scrollbar="#f4f3d8",
+                    scrollbar_handle="#c0c0aa",
+                    source_theme="pearl",
+                ),
+                animate=False,
+            )
+            close_button = window.dock_view.hover_title_strip.window_buttons[-1][0]
+            close_pixmap = close_button.icon().pixmap(close_button.iconSize()).toImage()
+            self.assertTrue(any(
+                close_pixmap.pixelColor(x, y).alpha() > 200
+                and close_pixmap.pixelColor(x, y).name() == "#101216"
+                for y in range(close_pixmap.height())
+                for x in range(close_pixmap.width())
+            ))
+            window.dock_view.filter_carousel.set_options([("Test", "test")])
+            window.dock_view.filter_carousel.set_active_values({"test"})
+            self.assertIn("#4d9188", window.dock_view.filter_carousel.btn_title.styleSheet())
+
+            window.view_controller.toggle_docked(False)
+
+            self.assertEqual(window.windowFlags(), original_flags)
+            self.assertFalse(window.dock_view.hover_title_strip.isVisible())
+            self.assertFalse(window.dock_view.bottom_resize_edge.isVisible())
+            self.assertFalse(window.dock_view.top_resize_edge.isVisible())
+            self.assertFalse(window.dock_view.left_resize_edge.isVisible())
+            self.assertFalse(window.dock_view.right_resize_edge.isVisible())
+            self.assertFalse(window.custom_menu_bar.isHidden())
         finally:
             if getattr(window, "engine", None):
                 try:
@@ -2530,6 +2733,44 @@ class MainWindowDebounceTests(unittest.TestCase):
             finally:
                 if reopened_db is not None and reopened_db is not stale_db:
                     reopened_db.close()
+
+    def test_engine_change_rebinds_closed_session_store_before_profile_sync(self):
+        from gui.core.staging_session_store import StagingSessionStore
+        from gui.main import window_search
+        from gui.models.db_staging_table import DbBackedStagingTableModel
+        from gui.utils.ui_helpers import on_engine_changed
+        from unshuffle.persistence import UnshuffleDB
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "staging.db"
+            stale_db = UnshuffleDB(db_path)
+            stale_db.register_session("session", Path("D:/Samples"), Path(temp_dir), "pending")
+            stale_db.add_staging_records_bulk(
+                "session",
+                [
+                    (
+                        0, "D:/Samples/Pack/kick.wav", "kick.wav", "Pack", "Kicks", "", "Oneshots",
+                        "", "0.9", 0.5, "hash", "fast", "[]", "{}", None, None, None, None, None, None, 0,
+                    )
+                ],
+            )
+            model = DbBackedStagingTableModel(StagingSessionStore(stale_db, "session"))
+            stale_db.close()
+            live_db = UnshuffleDB(db_path)
+            app = SimpleNamespace(model=model, session_store=model.store, engine=None)
+            app.set_runtime_context = lambda *, engine: setattr(app, "engine", engine)
+            app.current_records = lambda: window_search.current_records(app)
+            app.tree_organization_controller = SimpleNamespace(
+                _sync_active_profile=lambda: app.session_store.group_counts(["category"], None)
+            )
+
+            try:
+                on_engine_changed(app, SimpleNamespace(db=live_db))
+
+                self.assertIs(app.session_store.db, live_db)
+                self.assertIs(model.store.db, live_db)
+            finally:
+                live_db.close()
 
     def test_current_page_is_not_persisted_before_settings_restore(self):
         from gui.main import window as window_module
@@ -3750,7 +3991,10 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         parent = QObject()
         controller = WorkflowController(None, mock.Mock(), mock.Mock(), parent)
         controller.app = app
-        controller._engine = SimpleNamespace(session_source_roots=[Path("D:/Samples")])
+        controller._engine = SimpleNamespace(
+            session_id="active-session",
+            session_source_roots=[Path("D:/Samples")],
+        )
         controller.clear_build_handover_state = mock.Mock()
 
         with mock.patch.object(controller, "start_scan", return_value=True) as start_scan_mock:
@@ -3761,6 +4005,8 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
             append=False,
             require_clear_draft=False,
             finalize_options={"restore_previous_session_on_cancel": True},
+            session_phase="Refreshing Session",
+            resume_session_id="active-session",
         )
 
     def test_finalize_scan_data_from_signal_drops_cancel_only_restore_option(self):
@@ -4761,6 +5007,20 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
                     )
                 ],
             )
+            global_db.upsert_coherence_results(session_id, [SimpleNamespace(
+                record_id="1",
+                category="Kicks",
+                subcategory="",
+                coherence_status="coherent",
+                coherence_score=0.95,
+                cluster_id="cluster-1",
+                is_outlier=False,
+                review_reason="",
+                suggested_alternate_category="",
+                suggested_alternate_subcategory="",
+                nearest_neighbor_summary={},
+                anchor_fit_status="matched",
+            )])
 
             local_db.register_session(session_id, source, target, "old")
             local_db.set_session_sources(session_id, [source])
@@ -4796,6 +5056,10 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
             self.assertTrue(exported)
             self.assertEqual(local_db.foreign_key_violations(), [])
             self.assertEqual(len(local_db.get_staging_records(session_id)), 1)
+            self.assertEqual(
+                [row["record_id"] for row in local_db.list_coherence_results(session_id)],
+                ["1"],
+            )
             session = local_db.get_session(session_id)
             self.assertIsNotNone(session)
             if session is not None:
@@ -4886,8 +5150,11 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
             self.assertTrue(imported)
             get_item.assert_called_once()
             self.assertEqual(engine.session_id, "old-session")
-            args = app.workflow_controller.handle_scan_finished.call_args.args
-            self.assertEqual([record.source_path for record in args[0]], [old_source])
+            args, kwargs = app.workflow_controller.finalize_scan_data.call_args
+            self.assertEqual(args[0], [])
+            self.assertFalse(args[1])
+            self.assertEqual(args[2]["total_scanned"], 1)
+            self.assertFalse(kwargs["persist_staging"])
             self.assertEqual(
                 [Path(row["source_path"]) for row in global_db.get_staging_records("old-session")],
                 [old_source],
@@ -4992,11 +5259,41 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
                     os.path.normcase(str(export_root)),
                 )
             self.assertEqual([Path(row["source_path"]) for row in global_db.get_staging_records(session_id)], [source])
-            app.workflow_controller.handle_scan_finished.assert_called_once()
+            app.workflow_controller.finalize_scan_data.assert_called_once()
+            args, kwargs = app.workflow_controller.finalize_scan_data.call_args
+            self.assertEqual(args[0], [])
+            self.assertFalse(args[1])
+            self.assertEqual(args[2]["total_scanned"], 1)
+            self.assertFalse(kwargs["persist_staging"])
         finally:
             local_db.close()
             global_db.close()
             tmp.cleanup()
+
+    def test_portable_import_remaps_preserved_and_duplicate_shadow_paths(self):
+        from gui.core.data_manager import remap_imported_staging_row
+
+        old_root = "D:/Old Library"
+        new_root = Path("E:/Portable Library")
+        row = {
+            "source_path": f"{old_root}/Pack/kick.wav",
+            "preserved_root": f"{old_root}/Pack",
+            "evidence_json": json.dumps({
+                "duplicate_shadow": {
+                    "duplicate_of_path": f"{old_root}/Canonical/kick.wav",
+                }
+            }),
+        }
+
+        remapped = remap_imported_staging_row(row, {old_root: new_root})
+        evidence = json.loads(remapped["evidence_json"])
+
+        self.assertEqual(Path(remapped["source_path"]), new_root / "Pack" / "kick.wav")
+        self.assertEqual(Path(remapped["preserved_root"]), new_root / "Pack")
+        self.assertEqual(
+            Path(evidence["duplicate_shadow"]["duplicate_of_path"]),
+            new_root / "Canonical" / "kick.wav",
+        )
 
     def test_load_staging_session_uses_background_loader_result(self):
         from gui.main.actions.session import load_staging_session

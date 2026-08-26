@@ -2,7 +2,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
-import sys
+import sys  # Kept as an observable platform hook for compatibility.
 import threading
 from collections import Counter
 from collections.abc import Iterator
@@ -43,9 +43,19 @@ from ...persistence import (
 )
 
 DEFAULT_EXTRACTOR_WORKERS = 8
-MACOS_EXTRACTOR_WORKERS = 2
 DEFAULT_EXTRACTOR_BATCH_SIZE = 512
 CACHE_UPDATE_BATCH_SIZE = 256
+
+
+def _safe_extractor_cap(requested: int = DEFAULT_EXTRACTOR_WORKERS) -> int:
+    cap = min(max(1, int(requested)), DEFAULT_EXTRACTOR_WORKERS, os.cpu_count() or 1)
+    try:
+        global_cap = int(os.environ.get("UNSHUFFLE_MAX_SCAN_WORKERS", "0"))
+    except ValueError:
+        global_cap = 0
+    if global_cap > 0:
+        cap = min(cap, global_cap)
+    return max(1, cap)
 
 
 def _extractor_worker_count(total: int) -> int:
@@ -56,9 +66,11 @@ def _extractor_worker_count(total: int) -> int:
     except ValueError:
         override = 0
     if override > 0:
-        return max(1, min(override, total))
-    platform_cap = MACOS_EXTRACTOR_WORKERS if sys.platform == "darwin" else DEFAULT_EXTRACTOR_WORKERS
-    return min(platform_cap, max_scan_workers(total, pool_cap=platform_cap))
+        unsafe = os.environ.get("UNSHUFFLE_UNSAFE_EXTRACTOR_WORKERS", "").strip() == "1"
+        if unsafe:
+            return max(1, min(override, total))
+        return max(1, min(_safe_extractor_cap(override), total))
+    return max(1, min(_safe_extractor_cap(), total))
 
 
 def _extractor_process_limit() -> int:
@@ -67,8 +79,11 @@ def _extractor_process_limit() -> int:
     except ValueError:
         override = 0
     if override > 0:
-        return max(1, override)
-    return MACOS_EXTRACTOR_WORKERS if sys.platform == "darwin" else DEFAULT_EXTRACTOR_WORKERS
+        unsafe = os.environ.get("UNSHUFFLE_UNSAFE_EXTRACTOR_WORKERS", "").strip() == "1"
+        if unsafe:
+            return max(1, override)
+        return _safe_extractor_cap(override)
+    return _safe_extractor_cap()
 
 
 def _extractor_batch_size(total: int) -> int:
@@ -780,6 +795,9 @@ def run_plan(
         supported = SimilarityEngine.SUPPORTED_EXTS
         cached_feature_vectors: Dict[str, bytes] = {}
         cached_analysis_failures: Dict[str, str] = {}
+        supported_audio_count = 0
+        cache_vector_hits = 0
+        cache_failure_hits = 0
         if db and hasattr(db, "get_feature_vectors_bulk"):
             cached_feature_vectors = db.get_feature_vectors_bulk(
                 [node.hash for node in expensive_audio_nodes if node.hash]
@@ -792,10 +810,12 @@ def run_plan(
         for node in expensive_audio_nodes:
             if not node.extension or node.extension.lower() not in supported:
                 continue
+            supported_audio_count += 1
 
             if db:
                 cached_failure = cached_analysis_failures.get(node.hash) if node.hash else None
                 if cached_failure:
+                    cache_failure_hits += 1
                     analysis_failure_tags[node.path] = cached_failure
                     analysis_statuses[node.path] = cached_failure
                     continue
@@ -804,6 +824,7 @@ def run_plan(
                     cached = db.get_feature_vector(node.hash)
                 cached_vector = SimilarityEngine.vector_from_blob(cached)
                 if cached and cached_vector:
+                    cache_vector_hits += 1
                     feature_vectors[node.path] = cached
                     feature_values[node.path] = vector_to_feature_values(cached_vector)
                     vector_duration = _duration_from_vector(cached_vector)
@@ -819,13 +840,24 @@ def run_plan(
             queued_extract_keys[extract_key] = node.path
             to_extract.append(node.path)
 
+        duplicate_extractions_skipped = sum(len(paths) for paths in extract_dependents.values())
+        logger.info(
+            "Audio feature analysis plan: supported=%s cache_vector_hits=%s cache_failure_hits=%s "
+            "unique_extractions=%s duplicate_extractions_skipped=%s",
+            supported_audio_count,
+            cache_vector_hits,
+            cache_failure_hits,
+            len(to_extract),
+            duplicate_extractions_skipped,
+        )
+
         if to_extract:
             logger.info(
                 "Audio feature analysis extracting %s/%s supported audio files; %s reused from cache; %s duplicate extraction(s) skipped",
                 len(to_extract),
                 len(expensive_audio_nodes),
                 len(feature_vectors),
-                sum(len(paths) for paths in extract_dependents.values()),
+                duplicate_extractions_skipped,
             )
             batch_size = _extractor_batch_size(len(to_extract))
             batch_count = (len(to_extract) + batch_size - 1) // batch_size

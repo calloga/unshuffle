@@ -83,6 +83,7 @@ def test_bulk_feature_extraction_parses_jsonl_success_and_failure(tmp_path: Path
     engine = SimilarityEngine(extractor_path=str(extractor))
 
     rows = [
+        {"type": "heartbeat", "path": str(good)},
         {
             "path": str(good),
             "ok": True,

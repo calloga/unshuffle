@@ -30,13 +30,15 @@ def hash_scan_items(
         message=f"Checking hash cache for {pending_total} files.",
         update_every=100,
     )
-    hash_progress = PhaseProgress(
-        progress_callback,
-        "Hashing",
-        total=max(1, total),
-        message=f"Fast hashing {pending_total} files.",
-        update_every=25,
-    )
+    hash_progress = None
+    if pending_total > 0:
+        hash_progress = PhaseProgress(
+            progress_callback,
+            "Hashing",
+            total=max(1, total),
+            message=f"Fast hashing {pending_total} files.",
+            update_every=25,
+        )
 
     for batch in db.iter_scan_items(
         scan_id,
@@ -72,7 +74,8 @@ def hash_scan_items(
                 ):
                     updates.append((item[0], fast_hash, fast_hash, "fast_new"))
                     completed += 1
-                    hash_progress.emit(min(total, completed))
+                    if hash_progress is not None:
+                        hash_progress.emit(min(total, completed))
         completed += len(batch) - len(unresolved)
         db.update_scan_item_hashes(scan_id, updates, batch_size=HASH_BATCH_SIZE)
         if interrupted():
@@ -111,7 +114,8 @@ def hash_scan_items(
             return
     db.finalize_fast_hashes(scan_id)
     db.update_scan_run(scan_id, phase="structure", completed_count=db.count_scan_items(scan_id))
-    hash_progress.emit(max(1, total), force=True)
+    if hash_progress is not None:
+        hash_progress.emit(max(1, total), force=True)
     if promotion_total:
         promotion_progress.emit(promotion_total, force=True)
 

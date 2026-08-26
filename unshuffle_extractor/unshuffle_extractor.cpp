@@ -11,6 +11,9 @@
 #include "stb_vorbis.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -18,9 +21,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <stdio.h>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -149,10 +154,34 @@ int extract_batch_jsonl(const std::wstring &manifest_path, std::ostream &out) {
 
     std::ostringstream payload;
     std::ostringstream errors;
+    std::atomic<bool> finished(false);
+    std::condition_variable heartbeat_condition;
+    std::mutex heartbeat_mutex;
+    std::mutex output_mutex;
+    std::thread heartbeat([&]() {
+      std::unique_lock<std::mutex> heartbeat_lock(heartbeat_mutex);
+      while (!heartbeat_condition.wait_for(
+          heartbeat_lock, std::chrono::seconds(2), [&]() { return finished.load(); })) {
+        std::lock_guard<std::mutex> lock(output_mutex);
+        out << "{\"type\":\"heartbeat\",\"path\":\"" << json_escape(line)
+            << "\"}" << std::endl;
+      }
+    });
     std::streambuf *old_cerr = std::cerr.rdbuf(errors.rdbuf());
-    int rc = extract_file_json(utf8_to_utf16(line), payload);
+    int rc = 1;
+    try {
+      rc = extract_file_json(utf8_to_utf16(line), payload);
+    } catch (const std::exception &error) {
+      errors << "Extractor exception: " << error.what() << "\n";
+    } catch (...) {
+      errors << "Unknown extractor exception\n";
+    }
     std::cerr.rdbuf(old_cerr);
+    finished.store(true);
+    heartbeat_condition.notify_all();
+    heartbeat.join();
 
+    std::lock_guard<std::mutex> lock(output_mutex);
     out << "{\"path\":\"" << json_escape(line) << "\",\"ok\":";
     if (rc == 0) {
       std::string payload_text = payload.str();

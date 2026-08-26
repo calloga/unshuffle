@@ -120,6 +120,53 @@ class ThemeManagerTests(unittest.TestCase):
             widget.deleteLater()
             app.processEvents()
 
+    def test_coherence_map_color_transform_clears_only_render_pixmaps(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.coherence_analyzer import CoherenceMapWidget
+
+        app = QApplication.instance() or QApplication([])
+        widget = CoherenceMapWidget()
+        try:
+            widget._projection_cache[("projection",)] = object()
+            widget._background_pixmap_cache[("paint",)] = object()
+            widget._points_pixmap_cache[("paint",)] = object()
+
+            widget.set_color_transform(lambda _color: QColor("#123456"))
+
+            self.assertIn(("projection",), widget._projection_cache)
+            self.assertFalse(widget._background_pixmap_cache)
+            self.assertFalse(widget._points_pixmap_cache)
+            self.assertEqual(widget._paint_color(QColor("#ffffff")), QColor("#123456"))
+        finally:
+            widget.deleteLater()
+            app.processEvents()
+
+    def test_coherence_map_adaptive_palette_uses_direct_background_and_band_colors(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.core.dock_appearance import DockAdaptivePalette
+        from gui.widgets.coherence_analyzer import CoherenceMapWidget
+
+        app = QApplication.instance() or QApplication([])
+        widget = CoherenceMapWidget()
+        palette = DockAdaptivePalette(
+            base="#181818", darker="#101010", panel="#202020", raised="#292929",
+            hover="#303030", border="#383838", accent="#4388ee", accent_hover="#5599ff",
+            text="#f2f2f2", muted="#a0a0a0", selection="#334455", scrollbar="#181818",
+            scrollbar_handle="#404040", source_theme="ash",
+        )
+        try:
+            widget.set_adaptive_palette(palette, lambda color: color)
+
+            self.assertEqual(widget._background_override, QColor("#181818"))
+            self.assertEqual(widget._adaptive_band_colors, (QColor("#181818"), QColor("#292929")))
+            self.assertEqual(widget._adaptive_muted, QColor("#a0a0a0"))
+        finally:
+            widget.deleteLater()
+            app.processEvents()
+
     def test_theme_manager_tracks_requested_and_effective_theme_keys(self):
         manager = ThemeManager()
 
@@ -445,10 +492,12 @@ class ViewThemeMenuTests(unittest.TestCase):
             library_view_actions = [action.text() for action in bar.menu_library_views.actions() if action.text()]
             self.assertIn("Switch View Mode (Table/Tree/Map)", library_view_actions)
             self.assertIn("Set Current View as Default", library_view_actions)
-            self.assertIn("Docked Mode", library_view_actions)
+            self.assertIn("Docked", library_view_actions)
             self.assertIn("Table", library_view_actions)
             self.assertIn("Tree", library_view_actions)
             self.assertIn("Map", library_view_actions)
+            docked_actions = [action.text() for action in bar.menu_view_docked.actions() if action.text()]
+            self.assertEqual(docked_actions, ["Docked Mode", "Match Dock to Background"])
 
             bar.set_docked_checked(True)
             visible_library_view_actions = [
@@ -457,7 +506,7 @@ class ViewThemeMenuTests(unittest.TestCase):
                 if action.text() and action.isVisible()
             ]
             self.assertIn("Switch View Mode (Table/Tree/Map)", visible_library_view_actions)
-            self.assertIn("Docked Mode", visible_library_view_actions)
+            self.assertIn("Docked", visible_library_view_actions)
             self.assertNotIn("Set Current View as Default", visible_library_view_actions)
             self.assertFalse(bar.menu_view_table.menuAction().isVisible())
             self.assertFalse(bar.menu_view_tree.menuAction().isVisible())
@@ -468,29 +517,34 @@ class ViewThemeMenuTests(unittest.TestCase):
             self.assertIn("Show Startup Launcher", preference_actions)
             self.assertNotIn("Minimize Startup Scans to Tray", preference_actions)
             self.assertIn("Show Non-Audio Assets", preference_actions)
+            self.assertNotIn("Match Dock to Background", preference_actions)
             self.assertIn("Zoom", preference_actions)
             self.assertIn("Theme", preference_actions)
 
             toggle_requested = mock.Mock()
             docked_requested = mock.Mock()
             non_audio_requested = mock.Mock()
+            dock_background_requested = mock.Mock()
             theme_requested = mock.Mock()
             zoom_requested = mock.Mock()
             bar.toggleViewRequested.connect(toggle_requested)
             bar.toggleDockedRequested.connect(docked_requested)
             bar.showNonAudioAssetsRequested.connect(non_audio_requested)
+            bar.dockMatchHostRequested.connect(dock_background_requested)
             bar.themeRequested.connect(theme_requested)
             bar.zoomRequested.connect(zoom_requested)
 
             bar.act_toggle_view.trigger()
             bar.act_docked.trigger()
             bar.act_show_non_audio.trigger()
+            bar.act_match_dock_host.trigger()
             bar.zoom_actions[110].trigger()
             bar.theme_actions[ASH_THEME_KEY].trigger()
 
             toggle_requested.assert_called_once_with()
             docked_requested.assert_called_once_with(True)
             non_audio_requested.assert_called_once_with(True)
+            dock_background_requested.assert_called_once_with(True)
             zoom_requested.assert_called_once_with(110)
             theme_requested.assert_called_once_with(ASH_THEME_KEY)
         finally:

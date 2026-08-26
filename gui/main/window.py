@@ -109,6 +109,9 @@ class ModernApp(QMainWindow):
         self._build_page_signature = None
 
         self._setup_ui()
+        from ..core.dock_appearance import DockAppearanceController
+        self.dock_appearance_controller = DockAppearanceController(self)
+        self.dock_view.undockRequested.connect(lambda: self.view_controller.toggle_docked(False))
         apply_minimum_width(self, WINDOW_MIN_WIDTH)
         apply_minimum_height(self, WINDOW_MIN_HEIGHT)
         self.library_tab.set_proxy_model(self.proxy_model)
@@ -174,6 +177,11 @@ class ModernApp(QMainWindow):
         self.custom_menu_bar = ModernMenuBar(self)
         self.custom_menu_bar.setNativeMenuBar(False)
         self.setMenuBar(self.custom_menu_bar)
+        self.addAction(self.custom_menu_bar.act_docked)
+        self.dock_view.set_hover_menus(
+            self.custom_menu_bar.menu_view,
+            self.custom_menu_bar.menu_help,
+        )
         self.system_controller = SystemController(self, self.system_page)
         self.history_page.undoRequested.connect(lambda session: self._confirm_history_undo(session))
         self.history_page.clearRequested.connect(self._clear_history_page)

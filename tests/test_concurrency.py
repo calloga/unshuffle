@@ -8,10 +8,11 @@ from unshuffle.core.concurrency import bounded_map, max_scan_workers
 
 
 class ConcurrencyTests(unittest.TestCase):
-    def test_max_scan_workers_defaults_to_four_on_macos(self):
+    def test_max_scan_workers_uses_same_cpu_aware_cap_on_macos(self):
         with mock.patch("unshuffle.core.concurrency.sys.platform", "darwin"), \
+             mock.patch("os.cpu_count", return_value=16), \
              mock.patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(max_scan_workers(20), 4)
+            self.assertEqual(max_scan_workers(20), 8)
             self.assertEqual(max_scan_workers(3), 3)
 
     def test_max_scan_workers_honors_global_env_override(self):
@@ -100,5 +101,4 @@ class ConcurrencyTests(unittest.TestCase):
         self.assertEqual(len(futures), 3)
         self.assertTrue(futures[0].done() and not futures[0].cancelled())
         self.assertTrue(futures[2].cancelled())
-
 

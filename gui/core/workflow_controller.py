@@ -208,6 +208,8 @@ class WorkflowController(QObject):
         *,
         require_clear_draft: bool = True,
         finalize_options: dict | None = None,
+        session_phase: str | None = None,
+        resume_session_id: str | None = None,
     ):
         self.app._scan_finalizing = True
         self._pending_finalize_options = dict(finalize_options or {})
@@ -243,14 +245,19 @@ class WorkflowController(QObject):
                     logging.exception("Failed to close previous engine.")
             
             try:
-                resume_session_id = ""
-                if not append:
-                    resume_session_id = workflow_scan_start.compatible_resumable_session_id(
+                selected_session_id = str(resume_session_id or "").strip()
+                if not append and not selected_session_id:
+                    selected_session_id = workflow_scan_start.compatible_resumable_session_id(
                         Path(target),
                         [Path(source) for source in sources],
                     )
-                if resume_session_id:
-                    self.set_engine(create_workflow_bridge(Path(target), session_id=resume_session_id))
+                if selected_session_id:
+                    logging.info(
+                        "%s existing session %s.",
+                        "Refreshing" if session_phase == "Refreshing Session" else "Resuming",
+                        selected_session_id,
+                    )
+                    self.set_engine(create_workflow_bridge(Path(target), session_id=selected_session_id))
                 else:
                     self.set_engine(create_workflow_bridge(Path(target)))
             except Exception as e:
@@ -289,6 +296,7 @@ class WorkflowController(QObject):
             existing_hashes=existing_hashes,
             lib_hashes=lib_hashes,
             current_records=current_records,
+            session_phase=session_phase,
         )
         if not started:
             self._pending_finalize_options = {}
@@ -308,12 +316,19 @@ class WorkflowController(QObject):
             
         if not roots:
             return
+
+        # A refresh updates the active staged session. Keeping its ID lets each
+        # root reuse its completed scan manifest when the filesystem signature
+        # is unchanged, while discovery still rebuilds changed roots normally.
+        active_session_id = str(getattr(self._engine, "session_id", "") or "").strip()
             
         self.start_scan(
             [str(root) for root in roots],
             append=False,
             require_clear_draft=False,
             finalize_options={"restore_previous_session_on_cancel": True},
+            session_phase="Refreshing Session",
+            resume_session_id=active_session_id or None,
         )
 
     def detach_source_root(self, root: Path) -> list[Path]:

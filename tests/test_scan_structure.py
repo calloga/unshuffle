@@ -83,3 +83,53 @@ def test_db_structural_analysis_matches_legacy_graph_fields(tmp_path):
             assert row["structure_state"] == "done"
     finally:
         db.close()
+
+
+def test_completed_db_structure_is_reused_without_writes(tmp_path):
+    source = tmp_path / "source"
+    sample = source / "Pack" / "Kicks" / "kick.wav"
+    sample.parent.mkdir(parents=True)
+    sample.write_bytes(b"sample")
+
+    db = UnshuffleDB(tmp_path / "structure-reuse.db")
+    try:
+        db.create_scan_run(
+            scan_id="scan",
+            session_id="session",
+            target_root=tmp_path / "target",
+            roots=[source],
+        )
+        discover_to_scan_store(db, "scan", source)
+        analyze_scan_structure(db, "scan")
+        before = [
+            tuple(row)
+            for row in db.conn.execute(
+                """
+                SELECT directory_id, structure_state, role_flags, pack_weight,
+                       weight_evidence_json, token_blob, descendant_token_blob
+                FROM scan_directories WHERE scan_id = ? ORDER BY directory_id
+                """,
+                ("scan",),
+            )
+        ]
+        progress = []
+
+        with mock.patch.object(db, "write_transaction", wraps=db.write_transaction) as transaction:
+            analyze_scan_structure(db, "scan", progress_callback=progress.append)
+
+        transaction.assert_not_called()
+        assert progress == []
+        after = [
+            tuple(row)
+            for row in db.conn.execute(
+                """
+                SELECT directory_id, structure_state, role_flags, pack_weight,
+                       weight_evidence_json, token_blob, descendant_token_blob
+                FROM scan_directories WHERE scan_id = ? ORDER BY directory_id
+                """,
+                ("scan",),
+            )
+        ]
+        assert after == before
+    finally:
+        db.close()

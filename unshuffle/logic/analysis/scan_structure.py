@@ -24,6 +24,7 @@ from ...core.constants import (
     WINNER_BONUS_MULT,
 )
 from ...logic.classification import is_category_alias, tokenize
+from ...core.progress import PhaseProgress
 
 
 ROLE_LEAF = 1 << 0
@@ -64,9 +65,31 @@ def _decode_evidence(value: Any) -> dict[str, float]:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def analyze_scan_structure(db, scan_id: str) -> None:
+def analyze_scan_structure(db, scan_id: str, *, progress_callback=None) -> None:
     """Compute graph-equivalent directory state without hydrating file nodes."""
     conn = db.conn
+    structure_counts = conn.execute(
+        """
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN COALESCE(structure_state, '') != 'done' THEN 1 ELSE 0 END) AS pending
+        FROM scan_directories
+        WHERE scan_id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+    directory_total = int(structure_counts[0] or 0) if structure_counts is not None else 0
+    pending_total = int(structure_counts[1] or 0) if structure_counts is not None else 0
+    if directory_total > 0 and pending_total == 0:
+        return
+
+    progress = PhaseProgress(
+        progress_callback,
+        "Discovering Samples",
+        total=max(1, directory_total),
+        message="Analyzing library structure...",
+        update_every=100,
+    )
+    progress.emit(0, force=True)
     with db.write_transaction():
         conn.execute(
             """
@@ -96,7 +119,7 @@ def analyze_scan_structure(db, scan_id: str) -> None:
         """,
         (scan_id,),
     )
-    for row in directory_rows:
+    for index, row in enumerate(directory_rows, 1):
         directory_id = int(row[0])
         parent_id = row[1]
         name = str(row[3] or "")
@@ -207,8 +230,10 @@ def analyze_scan_structure(db, scan_id: str) -> None:
                     directory_id,
                 ),
             )
+        progress.emit(index)
 
     _calculate_weights(db, scan_id)
+    progress.emit(max(1, directory_total), force=True)
 
 
 def _calculate_weights(db, scan_id: str) -> None:

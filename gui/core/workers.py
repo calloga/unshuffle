@@ -124,7 +124,19 @@ class ScanWorker(QThread):
     finished = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, engine, sources, acoustic_index=False, skip_expensive_hashes=None, min_confidence=None, append=False, existing_hashes=None, lib_hashes=None, current_records=None):
+    def __init__(
+        self,
+        engine,
+        sources,
+        acoustic_index=False,
+        skip_expensive_hashes=None,
+        min_confidence=None,
+        append=False,
+        existing_hashes=None,
+        lib_hashes=None,
+        current_records=None,
+        session_phase=None,
+    ):
         super().__init__()
         self.engine = engine
         self.sources = sources
@@ -132,6 +144,9 @@ class ScanWorker(QThread):
         self.min_confidence = min_confidence
         self.skip_expensive_hashes = set(skip_expensive_hashes or ())
         self.append = append
+        self.session_phase = session_phase or (
+            "Updating Session" if append else "Creating Session"
+        )
         self.existing_hashes = existing_hashes
         self.lib_hashes = set(lib_hashes or ())
         self.current_records = current_records or ()
@@ -244,12 +259,11 @@ class ScanWorker(QThread):
                 db_conn = get_db(self.engine.target_dir)
                 owns_db_conn = True
             try:
-                session_phase = "Updating Session" if self.append else "Creating Session"
                 session_progress = PhaseProgress(
                     self.engine.progress_callback,
-                    session_phase,
+                    self.session_phase,
                     total=6,
-                    message=f"{session_phase}...",
+                    message=f"{self.session_phase}...",
                     update_every=1,
                 )
                 session_progress.emit(0, force=True)

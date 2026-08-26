@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import sys
+import sys  # Kept as an observable platform hook for compatibility.
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Executor, Future, wait
 from typing import TypeVar
@@ -20,9 +20,6 @@ def max_scan_workers(total: int, *, pool_cap: int = DEFAULT_SCAN_WORKER_CAP) -> 
     env_cap = _read_env_int("UNSHUFFLE_MAX_SCAN_WORKERS")
     if env_cap is not None and env_cap > 0:
         return max(1, min(env_cap, total))
-
-    if sys.platform == "darwin":
-        return max(1, min(LOW_RESOURCE_SCAN_WORKERS, total))
 
     return max(1, min(os.cpu_count() or 1, pool_cap, total))
 

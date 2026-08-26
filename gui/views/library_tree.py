@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle, QTreeView, QAbstractItemView, QApplication, QLabel, QMessageBox
 from PySide6.QtCore import Qt, Signal, QUrl, QMimeData, QPoint, QSortFilterProxyModel, QItemSelectionModel, QTimer
-from PySide6.QtGui import QDrag, QPixmap
+from PySide6.QtGui import QBrush, QColor, QDrag, QPainter, QPen, QPixmap
 from unshuffle.core.constants import MAX_SYNC_FOLDER_EXPORT_RECORDS
 from gui.models.library_tree import (
     FIELDS_ROLE,
@@ -23,6 +23,7 @@ from gui.models.library_tree import (
     SOURCE_NODE_TYPE_ROLE,
 )
 from gui.utils.styles import (
+    ColorPalette,
     apply_style,
     menu_style,
     tree_drop_hint_style,
@@ -64,8 +65,11 @@ class LibraryTreeView(QTreeView):
         super().__init__(parent)
         self.setHeaderHidden(False)
         self.setItemDelegate(NoFocusRectDelegate(self))
-        self.setIndentation(20)
+        # Compact branch geometry preserves useful label width in narrow docked mode.
+        self.setIndentation(10)
+        self.setRootIsDecorated(False)
         self.setUniformRowHeights(True)
+        self.setExpandsOnDoubleClick(False)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragEnabled(True)
@@ -82,6 +86,7 @@ class LibraryTreeView(QTreeView):
         self.drop_hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.drop_hint.hide()
         self.doubleClicked.connect(self._on_double_clicked)
+        self.clicked.connect(self._on_single_clicked)
         self.expanded.connect(self._populate_on_expand)
         self._export_temp_dirs = []
         self._drag_in_progress = False
@@ -91,9 +96,46 @@ class LibraryTreeView(QTreeView):
         self._drag_scroll_timer.setInterval(40)
         self._drag_scroll_timer.timeout.connect(self._scroll_during_drag)
         self._read_only_discovery = False
+        self._branch_color_transform = None
         self.header().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._apply_theme_styles()
         self.setColumnWidth(0, 800)
+
+    def drawBranches(self, painter: QPainter, rect, index) -> None:
+        """Draw compact hierarchy guides without platform disclosure arrows."""
+        if not index.isValid():
+            return
+        if not index.parent().isValid():
+            return
+        item_rect = self.visualRect(index)
+        if not item_rect.isValid():
+            return
+        indentation = self.indentation()
+        branch_x = item_rect.left() - max(4, indentation // 2)
+        center_y = item_rect.center().y()
+        foreground = index.parent().data(Qt.ForegroundRole)
+        color = foreground.color() if isinstance(foreground, QBrush) else QColor(foreground)
+        if not color.isValid():
+            color = QColor(getattr(self, "_branch_color", ColorPalette.BORDER))
+        if callable(self._branch_color_transform):
+            color = self._branch_color_transform(color)
+        color.setAlpha(145)
+        painter.save()
+        painter.setPen(QPen(color, 1))
+        painter.drawLine(branch_x, item_rect.top(), branch_x, center_y)
+        painter.drawLine(branch_x, center_y, item_rect.left() - 1, center_y)
+        if index.row() < index.model().rowCount(index.parent()) - 1:
+            painter.drawLine(branch_x, center_y, branch_x, item_rect.bottom())
+
+        ancestor = index.parent()
+        ancestor_x = branch_x - indentation
+        while ancestor.isValid():
+            parent = ancestor.parent()
+            if ancestor.row() < ancestor.model().rowCount(parent) - 1:
+                painter.drawLine(ancestor_x, item_rect.top(), ancestor_x, item_rect.bottom())
+            ancestor = parent
+            ancestor_x -= indentation
+        painter.restore()
 
     def _apply_theme_styles(self) -> None:
         apply_style(self.drop_hint, tree_drop_hint_style())
@@ -101,7 +143,16 @@ class LibraryTreeView(QTreeView):
         apply_style(self.header(), tree_header_style())
 
     def refresh_theme(self) -> None:
+        self._branch_color = ColorPalette.BORDER
         self._apply_theme_styles()
+        self.viewport().update()
+
+    def set_branch_color(self, color: str) -> None:
+        self._branch_color = color
+        self.viewport().update()
+
+    def set_branch_color_transform(self, transform) -> None:
+        self._branch_color_transform = transform
         self.viewport().update()
     def _apply_header_settings(self):
         from PySide6.QtWidgets import QHeaderView
@@ -356,8 +407,15 @@ class LibraryTreeView(QTreeView):
         return [QUrl.fromLocalFile(str(r.source_path.absolute())) for r in self._records_for_source_indexes(selected_indexes)]
 
     def _on_double_clicked(self, index):
+        if index.isValid() and self.model() is not None and self.model().hasChildren(index):
+            self.setExpanded(index, True)
+            return
         rec = self._source_index(index).data(Qt.UserRole)
         if rec: self.play_requested.emit(rec)
+
+    def _on_single_clicked(self, index):
+        if index.isValid() and self.model() is not None and self.model().hasChildren(index):
+            self.setExpanded(index, not self.isExpanded(index))
 
     def setModel(self, model):
         old_model = self.model()

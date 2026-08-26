@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel
 from PySide6.QtCore import QSize, Signal
+from PySide6.QtGui import QColor, QPalette
 from ..utils.styles import apply_style, scaled_px, vibe_anchor_bar_style, vibe_anchor_label_style
 from .buttons import AnimatedIconButton
 from .sliders import ModernKnob
@@ -113,3 +114,20 @@ class VibeAnchorBar(QFrame):
         for button in (self.btn_close, self.btn_sim, self.btn_diff):
             if hasattr(button, "refresh_theme"):
                 button.refresh_theme()
+            button.set_color_transform(None)
+        self.slider.set_color_transform(None)
+
+    def apply_adaptive_palette(self, palette, color_transform) -> None:
+        self.setStyleSheet(
+            f"QFrame {{ background: {palette.darker}; border-top: 1px solid {palette.border}; }}"
+            f"QLabel {{ color: {palette.muted}; background: transparent; border: none; }}"
+            f"QPushButton {{ background: transparent; border: none; }}"
+            f"QPushButton:hover {{ background: {palette.hover}; }}"
+        )
+        widget_palette = QPalette(self.palette())
+        widget_palette.setColor(QPalette.Window, QColor(palette.darker))
+        widget_palette.setColor(QPalette.WindowText, QColor(palette.text))
+        self.setPalette(widget_palette)
+        self.slider.set_color_transform(color_transform)
+        for button in (self.btn_close, self.btn_sim, self.btn_diff):
+            button.set_color_transform(color_transform)

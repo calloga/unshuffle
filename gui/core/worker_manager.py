@@ -33,7 +33,19 @@ class WorkerManager(QObject):
             self.worker = None
             return False
 
-    def start_scan(self, engine, sources, acoustic_index=False, append=False, skip_expensive_hashes=None, min_confidence=None, existing_hashes=None, lib_hashes=None, current_records=None):
+    def start_scan(
+        self,
+        engine,
+        sources,
+        acoustic_index=False,
+        append=False,
+        skip_expensive_hashes=None,
+        min_confidence=None,
+        existing_hashes=None,
+        lib_hashes=None,
+        current_records=None,
+        session_phase=None,
+    ):
         if self.is_busy(): return False
         self.engine = engine
         if self.engine:
@@ -52,6 +64,7 @@ class WorkerManager(QObject):
                 existing_hashes=existing_hashes,
                 lib_hashes=lib_hashes,
                 current_records=current_records,
+                session_phase=session_phase,
             )
 
             self.worker.progress.connect(self.progress.emit)

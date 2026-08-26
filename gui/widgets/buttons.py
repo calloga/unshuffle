@@ -55,6 +55,7 @@ class AnimatedIconButton(QPushButton):
         self.icon_size = icon_size
         self._uses_theme_color = color is None
         self.color = color or make_qcolor(ColorPalette.TEXT_GRAY)
+        self._color_transform = None
         
         apply_fixed_size_q(self, icon_size + QSize(8, 8))
         self.setCursor(Qt.PointingHandCursor)
@@ -115,11 +116,12 @@ class AnimatedIconButton(QPushButton):
         has_dynamic_icon = not self.icon().isNull()
         icon_key = self.icon().cacheKey() if has_dynamic_icon else self.icon_path
 
+        paint_color = self._paint_color(self.color)
         cache_key = (
             icon_key,
             self.icon_size.width(),
             self.icon_size.height(),
-            self.color.name() if self.color else "default",
+            paint_color.name(QColor.HexArgb) if paint_color else "default",
         )
         if cache_key in self._shared_icon_cache:
             return self._shared_icon_cache[cache_key]
@@ -137,18 +139,26 @@ class AnimatedIconButton(QPushButton):
             
         pixmap = pixmap.scaled(self.icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation).copy()
         
-        if self.color:
+        if paint_color:
             image = pixmap.toImage()
             painter = QPainter(image)
             try:
                 painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-                painter.fillRect(image.rect(), self.color)
+                painter.fillRect(image.rect(), paint_color)
             finally:
                 painter.end()
             pixmap = QPixmap.fromImage(image)
             
         self._shared_icon_cache[cache_key] = pixmap
         return pixmap
+
+    def _paint_color(self, color: QColor) -> QColor:
+        transform = self._color_transform
+        return transform(color) if callable(transform) else QColor(color)
+
+    def set_color_transform(self, transform) -> None:
+        self._color_transform = transform
+        self.update()
 
     def changeEvent(self, event):
         if event.type() == event.Type.EnabledChange:
@@ -180,6 +190,28 @@ class SidebarIconButton(AnimatedIconButton):
         self._overlay = make_qcolor(ColorPalette.TEXT_LIGHT)
         self._overlay.setAlpha(0)
         self._active = sidebar_icon_active_color()
+        self._adaptive_active: QColor | None = None
+        self._adaptive_hover: QColor | None = None
+        self._adaptive_checked_icon: QColor | None = None
+        self._adaptive_unchecked_icon: QColor | None = None
+
+    def set_adaptive_colors(
+        self,
+        active: str | QColor | None,
+        hover: str | QColor | None,
+        checked_icon: str | QColor | None = None,
+        unchecked_icon: str | QColor | None = None,
+    ) -> None:
+        self._adaptive_active = QColor(active) if active is not None else None
+        self._adaptive_hover = QColor(hover) if hover is not None else None
+        self._adaptive_checked_icon = QColor(checked_icon) if checked_icon is not None else None
+        self._adaptive_unchecked_icon = QColor(unchecked_icon) if unchecked_icon is not None else None
+        self.update()
+
+    def refresh_theme(self) -> None:
+        super().refresh_theme()
+        self._active = sidebar_icon_active_color()
+        self.set_adaptive_colors(None, None)
 
     def paintEvent(self, event):
         paint_icon = False
@@ -190,20 +222,27 @@ class SidebarIconButton(AnimatedIconButton):
             rect = self.rect()
 
             if self.isChecked():
-                painter.setBrush(QBrush(self._active))
+                active = self._adaptive_active or self._paint_color(self._active)
+                painter.setBrush(QBrush(active))
                 painter.setPen(Qt.NoPen)
                 painter.drawRoundedRect(rect, radius, radius)
             elif self.underMouse():
-                painter.setBrush(QBrush(sidebar_icon_hover_color()))
+                hover = self._adaptive_hover or self._paint_color(sidebar_icon_hover_color())
+                painter.setBrush(QBrush(hover))
                 painter.setPen(Qt.NoPen)
                 painter.drawRoundedRect(rect, radius, radius)
             elif self._overlay.alpha() > 0:
-                painter.setBrush(QBrush(self._overlay))
+                painter.setBrush(QBrush(self._paint_color(self._overlay)))
                 painter.setPen(Qt.NoPen)
                 painter.drawRoundedRect(rect, radius, radius)
 
             if self.icon() and not self.icon().isNull() or self.icon_path:
-                target_color = sidebar_icon_text_active() if self.isChecked() else sidebar_icon_default_color()
+                if self.isChecked() and self._adaptive_checked_icon is not None:
+                    target_color = self._adaptive_checked_icon
+                elif not self.isChecked() and self._adaptive_unchecked_icon is not None:
+                    target_color = self._adaptive_unchecked_icon
+                else:
+                    target_color = sidebar_icon_text_active() if self.isChecked() else sidebar_icon_default_color()
                 if self.color != target_color:
                     self.color = target_color
                 paint_icon = True
@@ -219,7 +258,9 @@ class SidebarIconButton(AnimatedIconButton):
                 font.setBold(True)
                 painter.setFont(font)
                 painter.setPen(
-                    sidebar_icon_text_active() if self.isChecked() else sidebar_icon_text_inactive()
+                    self._paint_color(
+                        sidebar_icon_text_active() if self.isChecked() else sidebar_icon_text_inactive()
+                    )
                 )
                 tr = painter.fontMetrics().boundingRect(self.text_label)
                 painter.drawText(int(-tr.width() / 2), int(tr.height() / 4), self.text_label)

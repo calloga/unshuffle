@@ -945,10 +945,24 @@ class PersistenceTests(unittest.TestCase):
         }, clear=True):
             self.assertEqual(_extractor_worker_count(20), 2)
 
+        with mock.patch.dict("os.environ", {
+            "UNSHUFFLE_EXTRACTOR_WORKERS": "8",
+            "UNSHUFFLE_MAX_SCAN_WORKERS": "4",
+        }, clear=True):
+            self.assertEqual(_extractor_worker_count(20), 4)
+
+        with mock.patch.dict("os.environ", {
+            "UNSHUFFLE_EXTRACTOR_WORKERS": "8",
+            "UNSHUFFLE_MAX_SCAN_WORKERS": "4",
+            "UNSHUFFLE_UNSAFE_EXTRACTOR_WORKERS": "1",
+        }, clear=True):
+            self.assertEqual(_extractor_worker_count(20), 8)
+
         with mock.patch("unshuffle.core.concurrency.sys.platform", "darwin"), \
              mock.patch("unshuffle.logic.planning.service.sys.platform", "darwin"), \
+             mock.patch("os.cpu_count", return_value=64), \
              mock.patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(_extractor_worker_count(20), 2)
+            self.assertEqual(_extractor_worker_count(20), 8)
 
         with mock.patch.dict("os.environ", {"UNSHUFFLE_EXTRACTOR_WORKERS": "invalid"}, clear=True), \
              mock.patch("unshuffle.core.concurrency.sys.platform", "linux"), \

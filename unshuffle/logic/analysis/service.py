@@ -660,7 +660,11 @@ def build_node_graph(root_path: Path, context: AnalysisContext) -> LibNode:
             analyze_scan_structure,
         )
 
-        analyze_scan_structure(context.db, context.scan_id)
+        analyze_scan_structure(
+            context.db,
+            context.scan_id,
+            progress_callback=context.progress_callback,
+        )
         for batch in context.db.iter_scan_directories(context.scan_id, batch_size=1000):
             for row in batch:
                 node = context.nodes.get(Path(row["normalized_path"]))

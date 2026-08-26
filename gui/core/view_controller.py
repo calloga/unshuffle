@@ -36,6 +36,7 @@ class ViewController(QObject):
         self._pending_duplicate_map_prewarm = False
         self._tree_prewarm_scheduled = False
         self._tree_build_signature = None
+        self._normal_window_flags = None
 
     def apply_current_sort_state(self, *, force: bool = False):
         """Applies sidebar sort using source-model ordering, then refreshes views."""
@@ -310,15 +311,19 @@ class ViewController(QObject):
         if getattr(self.app, "footer", None) and hasattr(self.app.footer, "set_docked_presentation"):
             self.app.footer.set_docked_presentation(checked)
         
-        for menu in (self.app.custom_menu_bar.menu_library, 
-                     self.app.custom_menu_bar.menu_build, 
-                     self.app.custom_menu_bar.menu_selection, 
-                     self.app.custom_menu_bar.menu_system,
-                     self.app.custom_menu_bar.menu_history):
-            menu.menuAction().setVisible(not checked)
+        if checked:
+            self.app.custom_menu_bar.hide()
             
         if checked:
-            self.app.setWindowFlags(self.app.windowFlags() | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
+            if self._normal_window_flags is None:
+                self._normal_window_flags = self.app.windowFlags()
+            dock_flags = self._normal_window_flags | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint
+            dock_appearance = getattr(self.app, "dock_appearance_controller", None)
+            adaptive_dock = bool(dock_appearance is not None and dock_appearance.is_enabled())
+            if adaptive_dock:
+                dock_flags |= Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
+            self.app.setWindowFlags(dock_flags)
+            self.app.dock_view.set_hover_title_enabled(adaptive_dock)
             self.app.stack.setCurrentWidget(self.app.dock_view)
      
             text = self.app.library_tab.edit_search.text()
@@ -345,8 +350,20 @@ class ViewController(QObject):
                 self.prewarm_docked_map(delay_ms=0)
             if hasattr(self.app.dock_view, "sync_transport_state"):
                 self.app.dock_view.sync_transport_state()
+            if adaptive_dock:
+                dock_appearance.apply_cached()
+                dock_appearance.schedule()
         else:
-            self.app.setWindowFlags((self.app.windowFlags() & ~Qt.WindowStaysOnTopHint) | Qt.WindowCloseButtonHint)
+            dock_appearance = getattr(self.app, "dock_appearance_controller", None)
+            if dock_appearance is not None:
+                dock_appearance.suspend()
+            normal_flags = self._normal_window_flags
+            if normal_flags is None:
+                normal_flags = self.app.windowFlags() & ~Qt.WindowStaysOnTopHint & ~Qt.FramelessWindowHint
+                normal_flags |= Qt.WindowCloseButtonHint
+            self.app.setWindowFlags(normal_flags)
+            self._normal_window_flags = None
+            self.app.dock_view.set_hover_title_enabled(False)
             self.app.stack.setCurrentWidget(self.app.library_tab)
         
             text = self.app.dock_view.edit_search.text()
@@ -370,6 +387,11 @@ class ViewController(QObject):
             
         if not getattr(self.app, "_defer_window_show", False):
             self.app.show()
+        if checked:
+            dock_appearance = getattr(self.app, "dock_appearance_controller", None)
+            if dock_appearance is not None and dock_appearance.is_enabled():
+                self.app.dock_view.set_hover_title_enabled(True)
+        self.app.custom_menu_bar.setVisible(not checked)
         if checked and hasattr(self.app.dock_view, "sync_transport_state"):
             QTimer.singleShot(0, self.app.dock_view.sync_transport_state)
         if hasattr(self.app, "_apply_native_window_theme"):

@@ -29,6 +29,7 @@ class ModernMenuBar(QMenuBar):
     tableColumnVisibilityRequested = Signal(int, bool)
     showNonAudioAssetsRequested = Signal(bool)
     showDuplicatesRequested = Signal(bool)
+    dockMatchHostRequested = Signal(bool)
     libraryRequested = Signal()
     systemRequested = Signal()
     historyRequested = Signal()
@@ -91,11 +92,20 @@ class ModernMenuBar(QMenuBar):
         self.menu_library_views.addAction(self.act_save_view)
 
         self._library_views_save_separator = self.menu_library_views.addSeparator()
+        self.menu_view_docked = self.menu_library_views.addMenu("Docked")
         self.act_docked = QAction("Docked Mode", self)
         self.act_docked.setCheckable(True)
         self.act_docked.setShortcut("Ctrl+D")
         self.act_docked.triggered.connect(lambda checked: self.toggleDockedRequested.emit(checked))
-        self.menu_library_views.addAction(self.act_docked)
+        self.menu_view_docked.addAction(self.act_docked)
+
+        self.act_match_dock_host = QAction("Match Dock to Background", self)
+        self.act_match_dock_host.setCheckable(True)
+        self.act_match_dock_host.setChecked(False)
+        self.act_match_dock_host.triggered.connect(
+            lambda checked=False: self.dockMatchHostRequested.emit(self.act_match_dock_host.isChecked())
+        )
+        self.menu_view_docked.addAction(self.act_match_dock_host)
 
         self._library_views_mode_separator = self.menu_library_views.addSeparator()
         

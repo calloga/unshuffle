@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections.abc import Callable, Iterator
@@ -80,6 +81,9 @@ class SimilarityEngine:
     DEFAULT_WEIGHTS = DEFAULT_DISTANCE_WEIGHTS.copy()
     FEATURE_VECTOR_SIZE = FEATURE_VECTOR_SIZE
     EXTRACT_TIMEOUT_SECONDS = 15
+    BATCH_STARTUP_ALLOWANCE_SECONDS = 30
+    BATCH_PER_FILE_ALLOWANCE_SECONDS = 30
+    BATCH_MAX_SECONDS = 4 * 60 * 60
     FALLBACK_EXTRACTOR_WORKERS = 4
     EXTRACTOR_PATH_ENV = "UNSHUFFLE_EXTRACTOR_PATH"
     SUPPORTED_EXTS = AUDIO_EXTS - {".mid", ".midi", ".aas"}
@@ -341,9 +345,21 @@ class SimilarityEngine:
         error_reader.start()
         stdout_lines: list[str] = []
         try:
+            manifest_count = sum(1 for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip())
+        except OSError:
+            manifest_count = 1
+        wall_timeout = min(
+            self.BATCH_MAX_SECONDS,
+            self.BATCH_STARTUP_ALLOWANCE_SECONDS + max(1, manifest_count) * self.BATCH_PER_FILE_ALLOWANCE_SECONDS,
+        )
+        started_at = time.monotonic()
+        try:
             while True:
+                elapsed = time.monotonic() - started_at
+                if elapsed >= wall_timeout:
+                    raise subprocess.TimeoutExpired(process.args, wall_timeout)
                 try:
-                    line = output.get(timeout=self.EXTRACT_TIMEOUT_SECONDS)
+                    line = output.get(timeout=min(self.EXTRACT_TIMEOUT_SECONDS, max(0.05, wall_timeout - elapsed)))
                 except queue.Empty as exc:
                     raise subprocess.TimeoutExpired(
                         process.args,
@@ -351,9 +367,18 @@ class SimilarityEngine:
                     ) from exc
                 if line is None:
                     break
+                if line.startswith('{"type":"heartbeat"'):
+                    continue
                 stdout_lines.append(line)
             returncode = process.wait(timeout=self.EXTRACT_TIMEOUT_SECONDS)
             error_reader.join(timeout=1)
+            logging.info(
+                "C++ extractor batch completed: files=%s elapsed=%.2fs rate=%.2f files/s returncode=%s",
+                manifest_count,
+                time.monotonic() - started_at,
+                manifest_count / max(0.001, time.monotonic() - started_at),
+                returncode,
+            )
             return subprocess.CompletedProcess(
                 process.args,
                 returncode,
@@ -393,6 +418,7 @@ class SimilarityEngine:
         """Retry a failed batch without multiplying timeout by every file serially."""
         if not pending:
             return results
+        started_at = time.monotonic()
         workers = max(1, min(self.FALLBACK_EXTRACTOR_WORKERS, len(pending)))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="unshuffle-extractor-retry") as executor:
             futures = {executor.submit(self.extract_feature_payload, path): path for path in pending}
@@ -409,6 +435,13 @@ class SimilarityEngine:
                     results[path] = self._cache_negative_and_return_none(path, str(exc))
                 finally:
                     self._report_extraction_complete(path)
+        logging.info(
+            "C++ extractor fallback completed: files=%s workers=%s elapsed=%.2fs rate=%.2f files/s",
+            len(pending),
+            workers,
+            time.monotonic() - started_at,
+            len(pending) / max(0.001, time.monotonic() - started_at),
+        )
         return results
 
     def _payload_from_extractor_data(self, file_path: Path, data: dict) -> Optional[FeaturePayload]:
@@ -581,6 +614,8 @@ class SimilarityEngine:
                 if not line.strip():
                     continue
                 row = json.loads(line)
+                if row.get("type") == "heartbeat":
+                    continue
                 path_text = row.get("path")
                 if not isinstance(path_text, str):
                     raise ValueError("batch row missing path")

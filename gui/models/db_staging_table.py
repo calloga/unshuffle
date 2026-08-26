@@ -623,7 +623,10 @@ class DbBackedStagingTableModel(QAbstractTableModel):
         self.refresh_index()
 
     def set_audio_types(self, types: set[str] | None):
-        self.audio_types = set(types) if types is not None else None
+        normalized = set(types) if types is not None else None
+        if self.audio_types == normalized:
+            return
+        self.audio_types = normalized
         self.refresh_index()
 
     def set_show_non_audio_assets(self, show: bool):

@@ -142,6 +142,7 @@ def setup_global_actions(app):
     app.custom_menu_bar.treeOrganizationEditRequested.connect(app.tree_organization_controller.open_editor)
     app.custom_menu_bar.showNonAudioAssetsRequested.connect(lambda checked: _set_show_non_audio_assets(app, checked))
     app.custom_menu_bar.showDuplicatesRequested.connect(lambda checked: _set_show_duplicates(app, checked))
+    app.custom_menu_bar.dockMatchHostRequested.connect(lambda checked: _set_dock_match_host(app, checked))
     app.custom_menu_bar.toggleDockedRequested.connect(app.view_controller.toggle_docked)
     app.custom_menu_bar.undoRequested.connect(app.undo_stack.undo)
     app.custom_menu_bar.redoRequested.connect(app.undo_stack.redo)
@@ -163,6 +164,7 @@ def setup_global_actions(app):
     _set_show_non_audio_assets(app, app.settings_controller.get_show_non_audio_assets())
     app.custom_menu_bar.act_show_duplicates.setChecked(app.settings_controller.get_show_duplicates())
     _set_show_duplicates(app, app.settings_controller.get_show_duplicates())
+    app.custom_menu_bar.act_match_dock_host.setChecked(app.settings_controller.get_dock_match_host())
     app.system_page.runCoherenceRequested.connect(lambda: app.coherence_controller.start_coherence_audit(force=True, mode="manual"))
     app.system_page.continuousRefinementRequested.connect(app.coherence_controller.start_continuous_refinement)
     app.system_page.autoCheckCoherenceChanged.connect(app.settings_controller.set_auto_check_coherence_on_start)
@@ -373,6 +375,11 @@ def on_worker_finished(app, worker_type, res):
 
 def on_engine_changed(app, engine):
     app.set_runtime_context(engine=engine)
+    model = getattr(app, "model", None)
+    if model is not None and getattr(model, "store", None) is not None:
+        current_records = getattr(app, "current_records", None)
+        if callable(current_records):
+            current_records()
     if getattr(app, "tree_organization_controller", None):
         app.tree_organization_controller._sync_active_profile()
 
@@ -468,3 +475,14 @@ def _set_show_duplicates(app, checked: bool) -> None:
     if getattr(app, "proxy_model", None) is not None and hasattr(app.proxy_model, "set_show_duplicates"):
         app.proxy_model.set_show_duplicates(bool(checked))
     app.view_controller.update_library_views(tree_delay_ms=0)
+
+
+def _set_dock_match_host(app, checked: bool) -> None:
+    accepted = app.dock_appearance_controller.set_enabled(bool(checked))
+    app.settings_controller.set_dock_match_host(accepted)
+    app.custom_menu_bar.act_match_dock_host.blockSignals(True)
+    app.custom_menu_bar.act_match_dock_host.setChecked(accepted)
+    app.custom_menu_bar.act_match_dock_host.blockSignals(False)
+    if app.stack.currentWidget() is app.dock_view:
+        app.view_controller.toggle_docked(False)
+        app.view_controller.toggle_docked(True)

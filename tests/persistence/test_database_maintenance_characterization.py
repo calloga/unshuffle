@@ -150,6 +150,23 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
         self.assertEqual(len(inserted[2]), 1)
         self.assertEqual(inserted[2][0][0], 10)
 
+    def test_scan_worker_uses_operation_specific_session_phase(self):
+        engine = mock.Mock()
+
+        fresh = ScanWorker(engine, [Path("D:/Source")])
+        append = ScanWorker(engine, [Path("D:/Added")], append=True)
+        refresh = ScanWorker(
+            engine,
+            [Path("D:/Source")],
+            append=False,
+            session_phase="Refreshing Session",
+        )
+
+        self.assertEqual(fresh.session_phase, "Creating Session")
+        self.assertEqual(append.session_phase, "Updating Session")
+        self.assertEqual(refresh.session_phase, "Refreshing Session")
+        self.assertFalse(refresh.append)
+
     def test_startup_restore_prunes_before_loading_and_uses_newest_fallback(self):
         calls = []
         payloads = []

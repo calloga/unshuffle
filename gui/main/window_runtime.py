@@ -57,6 +57,11 @@ def apply_runtime_model(window, model) -> None:
             proxy_model.set_show_non_audio_assets(settings_controller.get_show_non_audio_assets())
         if hasattr(proxy_model, "set_show_duplicates") and hasattr(settings_controller, "get_show_duplicates"):
             proxy_model.set_show_duplicates(settings_controller.get_show_duplicates())
+    active_audio_types = getattr(getattr(window, "search_controller", None), "_audio_types", None)
+    if proxy_model is not None and hasattr(proxy_model, "set_audio_types"):
+        proxy_model.set_audio_types(
+            None if active_audio_types is None else set(active_audio_types)
+        )
     window.search_controller.model = model
     window.acoustic_controller.model = model
     store = getattr(model, "store", None) if model is not None else None

@@ -21,6 +21,15 @@ class ModernKnob(QWidget):
         self._last_pos = None
         self._fine_tune_factor = 1.0
         self._symmetric = True
+        self._color_transform = None
+
+    def _paint_color(self, color: QColor) -> QColor:
+        transform = self._color_transform
+        return transform(color) if callable(transform) else QColor(color)
+
+    def set_color_transform(self, transform) -> None:
+        self._color_transform = transform
+        self.update()
         
     def setSymmetric(self, s):
         self._symmetric = s
@@ -84,10 +93,10 @@ class ModernKnob(QWidget):
             painter.translate(width / 2, height / 2)
 
             painter.setPen(Qt.NoPen)
-            painter.setBrush(make_qcolor(ColorPalette.BG_DARKER))
+            painter.setBrush(self._paint_color(make_qcolor(ColorPalette.BG_DARKER)))
             painter.drawEllipse(QRectF(-side/2, -side/2, side, side))
 
-            painter.setPen(QPen(make_qcolor(ColorPalette.BORDER), 1.5))
+            painter.setPen(QPen(self._paint_color(make_qcolor(ColorPalette.BORDER)), 1.5))
             painter.setBrush(Qt.NoBrush)
             painter.drawEllipse(QRectF(-side/2 + 1, -side/2 + 1, side - 2, side - 2))
 
@@ -95,13 +104,13 @@ class ModernKnob(QWidget):
 
             if self._symmetric:
                 angle_span = 135 * (abs(val) / 100.0)
-                painter.setPen(QPen(make_qcolor(ColorPalette.PRIMARY_LIGHT), 3.5, Qt.SolidLine, Qt.RoundCap))
+                painter.setPen(QPen(self._paint_color(make_qcolor(ColorPalette.PRIMARY_LIGHT)), 3.5, Qt.SolidLine, Qt.RoundCap))
                 if val > 0:
                     painter.drawArc(QRectF(-side/2 + 4, -side/2 + 4, side - 8, side - 8), 90 * 16, int(-angle_span * 16))
                 elif val < 0:
                     painter.drawArc(QRectF(-side/2 + 4, -side/2 + 4, side - 8, side - 8), 90 * 16, int(angle_span * 16))
 
-                painter.setBrush(make_qcolor(ColorPalette.BORDER_INPUT))
+                painter.setBrush(self._paint_color(make_qcolor(ColorPalette.BORDER_INPUT)))
                 painter.setPen(Qt.NoPen)
                 painter.drawEllipse(QPoint(0, int(-side / 2 - 2)), 2, 2)
 
@@ -112,12 +121,12 @@ class ModernKnob(QWidget):
                 percent = (val - self._min) / range_span
 
                 draw_span = 270 * percent
-                painter.setPen(QPen(make_qcolor(ColorPalette.PRIMARY_LIGHT), 3.5, Qt.SolidLine, Qt.RoundCap))
+                painter.setPen(QPen(self._paint_color(make_qcolor(ColorPalette.PRIMARY_LIGHT)), 3.5, Qt.SolidLine, Qt.RoundCap))
                 painter.drawArc(QRectF(-side/2 + 4, -side/2 + 4, side - 8, side - 8), 225 * 16, int(-draw_span * 16))
 
                 painter.rotate(-135 + (270 * percent))
 
-            painter.setPen(QPen(make_qcolor(ColorPalette.TEXT_MAIN), 2, Qt.SolidLine, Qt.RoundCap))
+            painter.setPen(QPen(self._paint_color(make_qcolor(ColorPalette.TEXT_MAIN)), 2, Qt.SolidLine, Qt.RoundCap))
             painter.drawLine(0, int(-side / 2 + 4), 0, int(-side / 2 + 10))
         finally:
             painter.end()

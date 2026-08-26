@@ -1,5 +1,5 @@
 from PySide6.QtCore import QSize, Signal
-from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QPushButton
+from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QPushButton, QSizePolicy
 
 from gui.utils.constants import (
     TYPE_TOGGLE_BOX_MARGINS,
@@ -32,6 +32,7 @@ class TypeToggle(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("TypeToggleBox")
+        self._expanding = False
         apply_style(self, type_toggle_box_style())
 
         layout = QHBoxLayout(self)
@@ -62,6 +63,26 @@ class TypeToggle(QFrame):
         layout.addWidget(self.btn_all)
         self.refresh_theme()
 
+    def set_expanding(self, expanding: bool) -> None:
+        self._expanding = bool(expanding)
+        self.setSizePolicy(
+            QSizePolicy.Expanding if self._expanding else QSizePolicy.Fixed,
+            QSizePolicy.Fixed,
+        )
+        self._apply_button_geometry()
+
+    def _apply_button_geometry(self) -> None:
+        height = scaled_px(TYPE_TOGGLE_BUTTON_HEIGHT)
+        width = scaled_px(TYPE_TOGGLE_BUTTON_WIDTH)
+        for button in (self.btn_oneshots, self.btn_loops, self.btn_all):
+            button.setFixedHeight(height)
+            if self._expanding:
+                button.setMinimumWidth(0)
+                button.setMaximumWidth(16777215)
+                button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            else:
+                apply_fixed_size_q(button, QSize(width, height))
+
     def _emit_change(self, _btn=None):
         self.typeChanged.emit(
             self.btn_oneshots.isChecked(),
@@ -88,7 +109,30 @@ class TypeToggle(QFrame):
         apply_style(self.btn_oneshots, type_toggle_button_style(12, bold=True))
         apply_style(self.btn_loops, type_toggle_button_style(16, bold=False))
         apply_style(self.btn_all, type_toggle_button_style(11, bold=True))
-        size = QSize(scaled_px(TYPE_TOGGLE_BUTTON_WIDTH), scaled_px(TYPE_TOGGLE_BUTTON_HEIGHT))
-        apply_fixed_size_q(self.btn_oneshots, size)
-        apply_fixed_size_q(self.btn_loops, size)
-        apply_fixed_size_q(self.btn_all, size)
+        self._apply_button_geometry()
+
+    def apply_adaptive_palette(self, palette) -> None:
+        radius = scaled_px(12)
+        button_radius = scaled_px(7)
+        apply_style(
+            self,
+            f"QFrame#TypeToggleBox {{ background: {palette.darker}; border: none; "
+            f"border-radius: {radius}px; }}",
+        )
+        for button, font_size, bold in (
+            (self.btn_oneshots, 12, True),
+            (self.btn_loops, 16, False),
+            (self.btn_all, 11, True),
+        ):
+            weight = "font-weight: bold;" if bold else ""
+            apply_style(
+                button,
+                f"QPushButton {{ {weight} font-size: {scaled_px(font_size)}px; "
+                f"color: {palette.text}; background: {palette.darker}; border: none; "
+                f"padding: 0; min-height: {scaled_px(TYPE_TOGGLE_BUTTON_HEIGHT)}px; "
+                f"max-height: {scaled_px(TYPE_TOGGLE_BUTTON_HEIGHT)}px; "
+                f"border-radius: {button_radius}px; }}"
+                f"QPushButton:hover {{ background: {palette.hover}; }}"
+                f"QPushButton:checked {{ color: {palette.text}; background: {palette.accent}; }}",
+            )
+        self._apply_button_geometry()

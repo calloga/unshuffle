@@ -1,6 +1,7 @@
 import logging
 import csv
 import json
+import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from PySide6.QtCore import QUrl
@@ -9,11 +10,76 @@ from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
 from unshuffle.bridge.persistence_bridge import PersistenceBridge
 from unshuffle.core import PlanRecord, parse_tags, plan_records_from_staging_rows
+from unshuffle.core.features import CURRENT_EXTRACTOR_VERSION, CURRENT_FEATURE_SCHEMA, CURRENT_FEATURE_SPACE_VERSION
 from unshuffle.persistence.exports import export_staging_plan_csv
 
 from ..utils.constants import StagingColumn, STAGING_HEADERS
 
 SESSION_METADATA_SAVED_FILTERS_KEY = "saved_filters"
+SESSION_METADATA_PORTABLE_MANIFEST_KEY = "portable_session_manifest"
+PORTABLE_SESSION_FORMAT_VERSION = 2
+PORTABLE_SESSION_TABLES = ("coherence_results", "refinement_candidates", "anchor_profiles")
+
+
+def staging_row_tuple(row: dict) -> tuple:
+    return (
+        row.get("row_id"), row.get("source_path"), row.get("sample_name"), row.get("pack"),
+        row.get("category"), row.get("subcategory"), row.get("audio_type"), row.get("tags"),
+        row.get("confidence"), row.get("duration"), row.get("hash"), row.get("fast_hash"),
+        row.get("pack_candidates"), row.get("evidence_json"),
+        row.get("feature_vector", row.get("acoustic_vector")), row.get("feature_space_version"),
+        row.get("feature_schema_json"), row.get("analysis_status"), row.get("analysis_tags_json"),
+        row.get("preserved_root"), row.get("is_preserved"),
+    )
+
+
+def remap_imported_staging_row(row: dict, source_remaps: dict[str, Path]) -> dict:
+    remapped = dict(row)
+    remapped["source_path"] = str(remap_imported_source_path(row.get("source_path"), source_remaps))
+    preserved_root = str(row.get("preserved_root") or "").strip()
+    if preserved_root:
+        remapped["preserved_root"] = str(remap_imported_source_path(preserved_root, source_remaps))
+    evidence_text = row.get("evidence_json")
+    try:
+        evidence = json.loads(evidence_text) if isinstance(evidence_text, str) else dict(evidence_text or {})
+    except (TypeError, ValueError, json.JSONDecodeError):
+        evidence = None
+    if isinstance(evidence, dict):
+        shadow = evidence.get("duplicate_shadow")
+        if isinstance(shadow, dict) and shadow.get("duplicate_of_path"):
+            shadow["duplicate_of_path"] = str(remap_imported_source_path(shadow["duplicate_of_path"], source_remaps))
+            remapped["evidence_json"] = json.dumps(evidence)
+    return remapped
+
+
+def copy_portable_session_table(source_conn, destination_conn, table: str, session_id: str, *, batch_size: int = 1000) -> int:
+    if table not in PORTABLE_SESSION_TABLES:
+        raise ValueError(f"Unsupported portable session table: {table}")
+    columns = [
+        str(row[1])
+        for row in source_conn.execute(f"PRAGMA table_info({table})")
+        if str(row[1]) != "id"
+    ]
+    if not columns:
+        return 0
+    column_sql = ", ".join(columns)
+    placeholders = ", ".join("?" for _ in columns)
+    cursor = source_conn.execute(
+        f"SELECT {column_sql} FROM {table} WHERE session_id = ?",
+        (session_id,),
+    )
+    copied = 0
+    with destination_conn:
+        destination_conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (session_id,))
+        while True:
+            rows = cursor.fetchmany(max(1, int(batch_size)))
+            if not rows:
+                return copied
+            destination_conn.executemany(
+                f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})",
+                [tuple(row) for row in rows],
+            )
+            copied += len(rows)
 
 class DataManager:
     """
@@ -240,6 +306,11 @@ class DataManager:
             QMessageBox.warning(parent_widget or self.app, "Export Session", "No active staging session is loaded.")
             return False
 
+        drafting = getattr(self.app, "drafting_controller", None)
+        if drafting is not None and drafting.has_changes():
+            if not drafting.confirm_clear_pending_draft("export this session"):
+                return False
+
         global_db = self.bridge._get_db()
         session_id = str(self.bridge.session_id or "")
         if not session_id:
@@ -309,66 +380,54 @@ class DataManager:
                     SESSION_METADATA_SAVED_FILTERS_KEY,
                     json.dumps(saved_filters),
                 )
+                active_profile = getattr(getattr(self.app, "tree_organization_controller", None), "active_profile", None)
+                profile_payload = None
+                to_dict = getattr(active_profile, "to_dict", None)
+                if callable(to_dict):
+                    candidate = to_dict()
+                    if isinstance(candidate, dict):
+                        profile_payload = candidate
+                local_db.set_session_metadata(
+                    session_id,
+                    SESSION_METADATA_PORTABLE_MANIFEST_KEY,
+                    json.dumps({
+                        "format_version": PORTABLE_SESSION_FORMAT_VERSION,
+                        "active_tree_profile": profile_payload,
+                    }),
+                )
 
             # 3. Copy Session Sources
             local_db.set_session_sources(session_id, [Path(s) for s in sources if s])
 
             # 4. Copy Staging Records
-            staging = global_db.get_staging_records(session_id)
-            records_to_insert = []
-            for r in staging:
-                records_to_insert.append((
-                    r.get("row_id"),
-                    r.get("source_path"),
-                    r.get("sample_name"),
-                    r.get("pack"),
-                    r.get("category"),
-                    r.get("subcategory"),
-                    r.get("audio_type"),
-                    r.get("tags"),
-                    r.get("confidence"),
-                    r.get("duration"),
-                    r.get("hash"),
-                    r.get("fast_hash"),
-                    r.get("pack_candidates"),
-                    r.get("evidence_json"),
-                    r.get("feature_vector", r.get("acoustic_vector")),
-                    r.get("feature_space_version"),
-                    r.get("feature_schema_json"),
-                    r.get("analysis_status"),
-                    r.get("analysis_tags_json"),
-                    r.get("preserved_root"),
-                    r.get("is_preserved"),
-                ))
-            if records_to_insert:
-                local_db.add_staging_records_bulk(session_id, records_to_insert)
+            local_db.add_staging_records_iter(
+                session_id,
+                (
+                    staging_row_tuple(row)
+                    for batch in global_db.iter_staging_records(session_id, batch_size=1000)
+                    for row in batch
+                ),
+                batch_size=1000,
+            )
 
-            # 5. Copy Coherence Results
+            # 5-7. Copy coherence metadata without materializing complete result sets.
             try:
-                results = global_db.list_coherence_results(session_id)
-                if results:
-                    local_db.upsert_coherence_results(session_id, results)
+                for table in PORTABLE_SESSION_TABLES:
+                    copy_portable_session_table(global_db.conn, local_db.conn, table, session_id)
             except Exception:
-                pass
+                logging.exception("Failed to export coherence session metadata.")
 
-            # 6. Copy Refinement Candidates
+            # 8. Copy review decisions scoped to this session without loading all paths.
             try:
-                refinements = global_db.list_refinement_candidates(session_id)
-                if refinements:
-                    local_db.upsert_refinement_candidates(session_id, refinements)
+                for batch in global_db.iter_staging_records(session_id, batch_size=800):
+                    decisions = global_db.list_coherence_review_decisions(
+                        [str(row.get("source_path") or "") for row in batch],
+                        [str(row.get("hash") or "") for row in batch],
+                    )
+                    if decisions:
+                        local_db.upsert_coherence_review_decisions(session_id, decisions)
             except Exception:
-                pass
-
-            # 7. Copy Anchor Candidates
-            try:
-                anchors = global_db.list_anchor_candidates(session_id)
-                if anchors:
-                    if hasattr(local_db, "upsert_anchor_profile_rows"):
-                        local_db.upsert_anchor_profile_rows(session_id, anchors)
-                    else:
-                        local_db.upsert_anchor_candidates(session_id, anchors)
-            except Exception:
-                pass
+                logging.exception("Failed to export coherence review decisions.")
 
             self._show_session_export_success(local_db_path, sources, parent_widget=parent_widget)
             return True
@@ -421,9 +480,11 @@ class DataManager:
                 self.app.footer.set_status("Importing session records...")
                 self.app.footer.log("<b>Staging Session:</b> reading and copying sidecar database...")
             
-            # Load staging records
-            staging_records = local_db.get_staging_records(session_id)
-            if not staging_records:
+            total_staging = int(local_db.conn.execute(
+                "SELECT COUNT(*) FROM staging_records WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0])
+            if total_staging <= 0:
                 QMessageBox.warning(parent_widget or self.app, "Import Session", "No staging records found in the sidecar database.")
                 return False
 
@@ -437,33 +498,28 @@ class DataManager:
                 if str(source or "").strip()
             ]
 
-            # Filter staging records by physical presence of their source files
-            records_to_load = []
+            # Validate physical presence without materializing the session.
+            importable_count = 0
             skipped_count = 0
-            for r in staging_records:
-                source_path = r.get("source_path")
-                if not source_path or not str(source_path).strip():
-                    continue 
-                
-                # Filter out any hidden system lock/db files inside system metadata directories
-                normalized_path_str = str(source_path).replace("\\", "/")
-                if "/.unshuffle/" in normalized_path_str or "/do_not_delete_unshuffle/" in normalized_path_str.lower():
-                    continue
-                
-                path = remap_imported_source_path(source_path, source_remaps)
-                if path.exists():
-                    remapped_row = dict(r)
-                    remapped_row["source_path"] = str(path)
-                    records_to_load.append(remapped_row)
-                else:
-                    logging.warning(f"Session import skipped missing file: {source_path} -> {path}")
-                    skipped_count += 1
+            for batch in local_db.iter_staging_records(session_id, batch_size=1000):
+                for row in batch:
+                    source_path = str(row.get("source_path") or "").strip()
+                    normalized = source_path.replace("\\", "/").lower()
+                    if not source_path or "/.unshuffle/" in normalized or "/do_not_delete_unshuffle/" in normalized:
+                        skipped_count += 1
+                        continue
+                    path = remap_imported_source_path(source_path, source_remaps)
+                    if path.exists():
+                        importable_count += 1
+                    else:
+                        logging.warning("Session import skipped missing file: %s -> %s", source_path, path)
+                        skipped_count += 1
 
-            if not records_to_load:
+            if importable_count <= 0:
                 QMessageBox.warning(
                     parent_widget or self.app,
                     "Import Session",
-                    f"All {len(staging_records)} files in this session are unmounted or missing on this system. Cannot import."
+                    f"All {total_staging} files in this session are unmounted or missing on this system. Cannot import."
                 )
                 return False
 
@@ -471,7 +527,7 @@ class DataManager:
                 QMessageBox.information(
                     parent_widget or self.app,
                     "Import Session",
-                    f"Importing session: {skipped_count} out of {len(staging_records)} files are missing on this system and were skipped."
+                    f"Importing session: {skipped_count} out of {total_staging} files are missing on this system and were skipped."
                 )
 
             # Wires/restores session into this computer's global database.
@@ -510,63 +566,86 @@ class DataManager:
             # 2. Register Session Sources
             global_db.set_session_sources(session_id, remapped_sources)
 
-            # 3. Add Staging Records
-            records_to_insert = []
-            for r in records_to_load:
-                records_to_insert.append((
-                    r.get("row_id"),
-                    r.get("source_path"),
-                    r.get("sample_name"),
-                    r.get("pack"),
-                    r.get("category"),
-                    r.get("subcategory"),
-                    r.get("audio_type"),
-                    r.get("tags"),
-                    r.get("confidence"),
-                    r.get("duration"),
-                    r.get("hash"),
-                    r.get("fast_hash"),
-                    r.get("pack_candidates"),
-                    r.get("evidence_json"),
-                    r.get("feature_vector", r.get("acoustic_vector")),
-                    r.get("feature_space_version"),
-                    r.get("feature_schema_json"),
-                    r.get("analysis_status"),
-                    r.get("analysis_tags_json"),
-                    r.get("preserved_root"),
-                    r.get("is_preserved"),
-                ))
-            global_db.add_staging_records_bulk(session_id, records_to_insert)
-            imported_record_ids = imported_staging_record_ids(records_to_load)
+            # 3. Stream staging records into the destination database.
+            def imported_rows():
+                for batch in local_db.iter_staging_records(session_id, batch_size=1000):
+                    for row in batch:
+                        source_path = str(row.get("source_path") or "").strip()
+                        normalized = source_path.replace("\\", "/").lower()
+                        if not source_path or "/.unshuffle/" in normalized or "/do_not_delete_unshuffle/" in normalized:
+                            continue
+                        remapped = remap_imported_staging_row(row, source_remaps)
+                        if Path(remapped["source_path"]).exists():
+                            yield staging_row_tuple(remapped)
 
-            # 4. Copy Coherence Results
-            try:
-                results = local_db.list_coherence_results(session_id)
-                results_filtered = filter_imported_metadata_rows(results, imported_record_ids)
-                if results_filtered:
-                    global_db.upsert_coherence_results(session_id, results_filtered)
-            except Exception:
-                logging.exception("Failed to import coherence results metadata.")
+            global_db.add_staging_records_iter(session_id, imported_rows(), batch_size=1000)
+            # Seed the scoped analysis cache from trusted exported staging metadata.
+            cache_rows = []
+            for batch in global_db.iter_staging_records(session_id, batch_size=500):
+                for row in batch:
+                    file_hash = str(row.get("hash") or "").strip()
+                    source_path = Path(str(row.get("source_path") or ""))
+                    if not file_hash or not source_path.exists():
+                        continue
+                    try:
+                        stat = source_path.stat()
+                    except OSError:
+                        continue
+                    cache_rows.append((
+                        file_hash,
+                        source_path,
+                        int(stat.st_size),
+                        float(stat.st_mtime),
+                        row.get("feature_vector", row.get("acoustic_vector")),
+                        row.get("feature_space_version") or CURRENT_FEATURE_SPACE_VERSION,
+                        CURRENT_EXTRACTOR_VERSION,
+                        row.get("feature_schema_json") or json.dumps(list(CURRENT_FEATURE_SCHEMA)),
+                        row.get("analysis_status") or "ok",
+                        row.get("analysis_tags_json") or "[]",
+                        row.get("fast_hash"),
+                    ))
+                    if len(cache_rows) >= 256:
+                        global_db.update_cache_bulk(cache_rows)
+                        cache_rows.clear()
+            if cache_rows:
+                global_db.update_cache_bulk(cache_rows)
 
-            # 5. Copy Refinement Candidates
+            # 4-6. Restore coherence metadata in bounded batches.
             try:
-                refinements = local_db.list_refinement_candidates(session_id)
-                refinements_filtered = filter_imported_metadata_rows(refinements, imported_record_ids)
-                if refinements_filtered:
-                    global_db.upsert_refinement_candidates(session_id, refinements_filtered)
+                for table in PORTABLE_SESSION_TABLES:
+                    copy_portable_session_table(local_db.conn, global_db.conn, table, session_id)
+                with global_db.write_transaction():
+                    for table in ("coherence_results", "refinement_candidates"):
+                        global_db.conn.execute(
+                            f"""
+                            DELETE FROM {table}
+                            WHERE session_id = ?
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM staging_records AS staging
+                                  WHERE staging.session_id = {table}.session_id
+                                    AND CAST(staging.row_id AS TEXT) = CAST({table}.record_id AS TEXT)
+                              )
+                            """,
+                            (session_id,),
+                        )
             except Exception:
-                logging.exception("Failed to import refinement candidate metadata.")
+                logging.exception("Failed to import coherence session metadata.")
 
-            # 6. Copy Anchor Candidates
+            # 7. Restore review decisions and remap their source paths.
             try:
-                anchors = local_db.list_anchor_candidates(session_id)
-                if anchors:
-                    if hasattr(global_db, "upsert_anchor_profile_rows"):
-                        global_db.upsert_anchor_profile_rows(session_id, anchors)
-                    else:
-                        global_db.upsert_anchor_candidates(session_id, anchors)
+                for batch in local_db.iter_staging_records(session_id, batch_size=800):
+                    decisions = local_db.list_coherence_review_decisions(
+                        [str(row.get("source_path") or "") for row in batch],
+                        [str(row.get("hash") or "") for row in batch],
+                    )
+                    for decision in decisions:
+                        decision["source_path"] = str(
+                            remap_imported_source_path(decision.get("source_path"), source_remaps)
+                        )
+                    if decisions:
+                        global_db.upsert_coherence_review_decisions(session_id, decisions)
             except Exception:
-                pass
+                logging.exception("Failed to import coherence review decisions.")
 
             # Update engine session ID
             if self.engine:
@@ -595,15 +674,52 @@ class DataManager:
                         if filter_controller is not None and hasattr(filter_controller, "refresh_dock_filters"):
                             filter_controller.refresh_dock_filters()
 
+                portable_json = local_db.get_session_metadata(session_id, SESSION_METADATA_PORTABLE_MANIFEST_KEY)
+                if portable_json:
+                    try:
+                        portable = json.loads(portable_json)
+                        profile_payload = portable.get("active_tree_profile") if isinstance(portable, dict) else None
+                        if isinstance(profile_payload, dict):
+                            from unshuffle.logic.tree_organization.models import TreeOrganizationProfile
+
+                            tree_controller = getattr(self.app, "tree_organization_controller", None)
+                            repository = getattr(tree_controller, "repository", None)
+                            if tree_controller is not None and repository is not None:
+                                imported_profile = TreeOrganizationProfile.from_dict(profile_payload)
+                                existing = repository.get_profile(imported_profile.id)
+                                if existing is not None and existing.to_dict() != imported_profile.to_dict():
+                                    profile_payload = dict(profile_payload)
+                                    profile_payload["id"] = f"profile_{uuid.uuid4().hex[:12]}"
+                                    profile_payload["name"] = f"{imported_profile.name} (Imported)"
+                                    imported_profile = TreeOrganizationProfile.from_dict(profile_payload)
+                                saved_profile = existing or repository.save_profile(imported_profile)
+                                tree_controller.active_profile = saved_profile
+                                tree_controller._persist_active_profile_id(saved_profile.id)
+                                tree_controller._sync_active_profile(refresh=False)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        logging.exception("Failed to restore portable library structure metadata.")
+
             # Clear active drafts
             drafting = getattr(self.app, "drafting_controller", None)
             if drafting is not None:
                 drafting.clear()
 
-            # Reconstruct PlanRecord elements and feed to the workbench
-            plan = self.reconstruct_plan_records(records_to_load)
-            self.app.workflow_controller.handle_scan_finished(plan, False, None)
-            self.app.footer.log(f"<b>Staging Session:</b> imported {len(plan)} records successfully.")
+            # Attach the DB-backed session model directly; do not hydrate every record.
+            stats = {
+                "total_scanned": importable_count,
+                "added_count": importable_count,
+                "lib_dupe_count": 0,
+                "session_dupe_count": 0,
+                "total_dupe_count": 0,
+            }
+            self.app.workflow_controller.finalize_scan_data(
+                [],
+                False,
+                stats,
+                show_summary=False,
+                persist_staging=False,
+            )
+            self.app.footer.log(f"<b>Staging Session:</b> imported {importable_count} records successfully.")
             return True
         except Exception as e:
             logging.exception("Failed to import staging session")

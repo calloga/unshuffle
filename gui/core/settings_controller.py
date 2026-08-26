@@ -37,6 +37,7 @@ STARTUP_LAUNCHER_LAST_CHOICE_KEY = "startup_launcher_last_choice_json"
 HIGH_PERFORMANCE_SCAN_KEY = "high_performance_scan"
 SHOW_DUPLICATES_KEY = "show_duplicates"
 SHOW_NON_AUDIO_ASSETS_KEY = "show_non_audio_assets"
+DOCK_MATCH_HOST_KEY = "dock_match_host"
 
 
 def create_app_settings() -> QSettings:
@@ -385,3 +386,9 @@ class SettingsController(QObject):
 
     def set_show_duplicates(self, enabled: bool) -> None:
         self.settings.setValue(SHOW_DUPLICATES_KEY, bool(enabled))
+
+    def get_dock_match_host(self) -> bool:
+        return self.settings.value(DOCK_MATCH_HOST_KEY, False, type=bool)
+
+    def set_dock_match_host(self, enabled: bool) -> None:
+        self.settings.setValue(DOCK_MATCH_HOST_KEY, bool(enabled))

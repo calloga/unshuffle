@@ -615,6 +615,36 @@ def test_interrupted_hash_batch_persists_progress_and_resumes_pending_only(tmp_p
         db.close()
 
 
+def test_hash_scan_items_does_not_emit_empty_hashing_phase(tmp_path):
+    from unshuffle.logic.analysis.scan_discovery import discover_to_scan_store
+    from unshuffle.logic.analysis.scan_hashing import hash_scan_items
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "sample.wav").write_bytes(b"sample")
+    db = UnshuffleDB(tmp_path / "empty-hashing-progress.db")
+    try:
+        db.create_scan_run(
+            scan_id="scan",
+            session_id="session",
+            target_root=tmp_path / "target",
+            roots=[source],
+        )
+        discover_to_scan_store(db, "scan", source)
+        with mock.patch(
+            "unshuffle.logic.analysis.scan_hashing.get_fast_hash",
+            return_value="segmd5-v1:" + "1" * 32,
+        ):
+            hash_scan_items(db, "scan")
+
+        progress = []
+        hash_scan_items(db, "scan", progress_callback=progress.append)
+
+        assert not any(payload.get("phase") == "Hashing" for payload in progress)
+    finally:
+        db.close()
+
+
 def test_discovery_flushes_parent_directories_before_large_file_batches(tmp_path):
     from unshuffle.logic.analysis.scan_discovery import discover_to_scan_store
 

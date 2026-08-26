@@ -89,5 +89,14 @@ class CollapsibleSection(QWidget):
         if self.use_scroll and hasattr(self, "content_scroll"):
             apply_style(self.content_scroll, section_scroll_style())
 
+    def apply_adaptive_palette(self, palette) -> None:
+        apply_style(
+            self.btn,
+            f"QPushButton {{ text-align: center; color: {palette.muted}; font-weight: bold; "
+            f"font-size: 11px; letter-spacing: 1px; border: none; "
+            f"background: transparent; padding: 8px 0; }}"
+            f"QPushButton:hover {{ color: {palette.text}; background: {palette.hover}; }}",
+        )
+
     def add_content_widget(self, widget: QWidget) -> None:
         self.content_layout.addWidget(widget)
