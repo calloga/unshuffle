@@ -48,6 +48,17 @@ class ThemeNormalizationTests(unittest.TestCase):
 
 
 class ThemeManagerTests(unittest.TestCase):
+    @staticmethod
+    def _adaptive_palette():
+        from gui.core.dock_appearance import DockAdaptivePalette
+
+        return DockAdaptivePalette(
+            base="#181818", darker="#101010", panel="#202020", raised="#292929",
+            hover="#303030", border="#383838", accent="#4388ee", accent_hover="#5599ff",
+            text="#f2f2f2", muted="#a0a0a0", selection="#334455", scrollbar="#181818",
+            scrollbar_handle="#404040", source_theme=ASH_THEME_KEY,
+        )
+
     def test_menu_button_style_can_inherit_a_point_sized_font(self):
         from gui.utils.styles import workspace_sidebar_button_style
 
@@ -179,6 +190,23 @@ class ThemeManagerTests(unittest.TestCase):
         manager.sync_system_theme(None)
         self.assertEqual(manager.requested_theme_key, SYSTEM_THEME_KEY)
         self.assertEqual(manager.state.effective_key, ASH_THEME_KEY)
+
+    def test_dock_camo_does_not_rebuild_global_theme(self):
+        from gui.core.dock_appearance import DockAppearanceController
+
+        dock = mock.Mock()
+        app = mock.Mock()
+        app.dock_view = dock
+        app.stack.currentWidget.return_value = dock
+        controller = type(
+            "Controller",
+            (),
+            {"app": app, "_current_palette": None, "_apply_vibe_palette": lambda *_args: None},
+        )()
+
+        DockAppearanceController._apply_palette(controller, self._adaptive_palette(), animate=False)
+
+        dock.apply_adaptive_palette.assert_called_once()
 
     def test_dialog_buttons_use_dialog_specific_sizing_and_theme_tokens(self):
         manager = ThemeManager()
@@ -498,7 +526,7 @@ class ViewThemeMenuTests(unittest.TestCase):
             self.assertIn("Tree", library_view_actions)
             self.assertIn("Map", library_view_actions)
             docked_actions = [action.text() for action in bar.menu_view_docked.actions() if action.text()]
-            self.assertEqual(docked_actions, ["Docked Mode", "Match Dock to Background"])
+            self.assertEqual(docked_actions, ["Docked Mode", "Match Background When Docked"])
 
             bar.set_docked_checked(True)
             visible_library_view_actions = [

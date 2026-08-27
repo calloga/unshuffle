@@ -320,11 +320,9 @@ class ViewController(QObject):
                 self._normal_window_flags = self.app.windowFlags()
             dock_flags = self._normal_window_flags | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint
             dock_appearance = getattr(self.app, "dock_appearance_controller", None)
-            adaptive_dock = bool(dock_appearance is not None and dock_appearance.is_enabled())
-            if adaptive_dock:
-                dock_flags |= Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
+            dock_flags |= Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
             self.app.setWindowFlags(dock_flags)
-            self.app.dock_view.set_hover_title_enabled(adaptive_dock)
+            self.app.dock_view.set_hover_title_enabled(True)
             self.app.stack.setCurrentWidget(self.app.dock_view)
      
             text = self.app.library_tab.edit_search.text()
@@ -351,13 +349,8 @@ class ViewController(QObject):
                 self.prewarm_docked_map(delay_ms=0)
             if hasattr(self.app.dock_view, "sync_transport_state"):
                 self.app.dock_view.sync_transport_state()
-            if adaptive_dock:
-                dock_appearance.apply_cached()
-                dock_appearance.schedule()
         else:
             dock_appearance = getattr(self.app, "dock_appearance_controller", None)
-            if dock_appearance is not None:
-                dock_appearance.suspend()
             normal_flags = self._normal_window_flags
             if normal_flags is None:
                 normal_flags = self.app.windowFlags() & ~Qt.WindowStaysOnTopHint & ~Qt.FramelessWindowHint
@@ -388,10 +381,11 @@ class ViewController(QObject):
             
         if not getattr(self.app, "_defer_window_show", False):
             self.app.show()
+        dock_appearance = getattr(self.app, "dock_appearance_controller", None)
+        if dock_appearance is not None:
+            QTimer.singleShot(0, dock_appearance.context_changed)
         if checked:
-            dock_appearance = getattr(self.app, "dock_appearance_controller", None)
-            if dock_appearance is not None and dock_appearance.is_enabled():
-                self.app.dock_view.set_hover_title_enabled(True)
+            self.app.dock_view.set_hover_title_enabled(True)
         self.app.custom_menu_bar.setVisible(not checked)
         if checked and hasattr(self.app.dock_view, "sync_transport_state"):
             QTimer.singleShot(0, self.app.dock_view.sync_transport_state)

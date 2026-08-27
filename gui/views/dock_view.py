@@ -51,7 +51,7 @@ from ..widgets.buttons import SidebarIconButton
 from ..widgets import AnimatedIconButton
 from ..widgets.preview_control_bar import DragOutIconButton
 from ..utils.constants import PAUSE_ICON, PLAY_ICON, STOP_ICON
-from ..core.dock_appearance import transfer_palette_color
+from ..core.dock_appearance import DockAdaptivePalette, transfer_palette_color
 
 
 class DockHoverTitleStrip(QWidget):
@@ -207,7 +207,7 @@ class DockEnvironmentScreenOverlay(QWidget):
 
     def __init__(self, dock_view):
         super().__init__(
-            dock_view.window(),
+            None,
             Qt.Tool
             | Qt.FramelessWindowHint
             | Qt.WindowStaysOnTopHint
@@ -222,11 +222,21 @@ class DockEnvironmentScreenOverlay(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(32)
         self._timer.timeout.connect(self._advance)
+        dock_view.destroyed.connect(self.deleteLater)
         self.hide()
 
     def set_scanning(self, scanning: bool) -> None:
         if scanning:
             window = self.dock_view.window()
+            if (
+                window is None
+                or not window.isVisible()
+                or getattr(window, "_defer_window_show", False)
+                or getattr(window, "_frontloading_startup", False)
+            ):
+                self._timer.stop()
+                self.hide()
+                return
             screen = window.screen() if window is not None else None
             if screen is None:
                 return
@@ -362,6 +372,7 @@ class DockView(QWidget):
         self._chrome_enabled = False
         self._chrome_visible = False
         self._setup_ui()
+        self._apply_normal_theme()
         self.setMinimumSize(DOCKED_MINIMUM_WIDTH, DOCKED_MINIMUM_HEIGHT)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -743,9 +754,10 @@ class DockView(QWidget):
         self.map_page.audio_reserve.setMaximumHeight(0)
         self.view_stack.addWidget(self.map_page)
         self._apply_docked_map_square()
-        self.map_page.refresh_theme()
         if self._adaptive_palette is not None:
             self.apply_adaptive_palette(self._adaptive_palette, animate=False)
+        else:
+            self._apply_normal_theme()
         return self.map_page
 
     def set_docked_view_mode(self, mode: str, *, emit: bool = True) -> None:
@@ -944,9 +956,28 @@ class DockView(QWidget):
             QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{ background: {palette.scrollbar_handle}; }}
         """
 
-    def _apply_adaptive_palette_now(self, palette) -> None:
-        self._adaptive_palette = palette
-        self._adaptive_tree_delegate.palette = palette
+    @staticmethod
+    def _normal_dock_palette() -> DockAdaptivePalette:
+        """Expose the active app theme through the dock's canonical palette shape."""
+        return DockAdaptivePalette(
+            base=ColorPalette.BG_DARK,
+            darker=ColorPalette.BG_DARKER,
+            panel=ColorPalette.BG_MED,
+            raised=ColorPalette.BG_LIGHT,
+            hover=ColorPalette.BG_HOVER,
+            border=ColorPalette.BORDER,
+            accent=ColorPalette.PRIMARY,
+            accent_hover=ColorPalette.PRIMARY_HOVER,
+            text=ColorPalette.TEXT_MAIN,
+            muted=ColorPalette.TEXT_DIM,
+            selection=ColorPalette.SELECTION,
+            scrollbar=ColorPalette.BG_SCROLLBAR,
+            scrollbar_handle=ColorPalette.BG_SCROLLBAR_HANDLE,
+            source_theme="app-theme",
+        )
+
+    def _apply_canonical_dock_styles(self, palette, color_transform=None) -> None:
+        """Apply the shared dock presentation independently of camouflage state."""
         self.setStyleSheet(dock_view_style() + self._adaptive_widget_style(palette))
         widget_palette = QPalette(self.palette())
         widget_palette.setColor(QPalette.Window, QColor(palette.base))
@@ -958,7 +989,6 @@ class DockView(QWidget):
         widget_palette.setColor(QPalette.ButtonText, QColor(palette.text))
         widget_palette.setColor(QPalette.Highlight, QColor(palette.accent))
         self.setPalette(widget_palette)
-        color_transform = lambda color, current=palette: transfer_palette_color(color, current)
         for button in (
             self.btn_preview_play,
             self.btn_preview_stop,
@@ -977,6 +1007,12 @@ class DockView(QWidget):
         self._apply_chrome_style(palette.panel, palette.text, palette.border, palette.hover)
         self._set_native_border_color(self._adaptive_outer_border(palette.base))
         self._apply_adaptive_component_styles(palette, color_transform)
+
+    def _apply_adaptive_palette_now(self, palette) -> None:
+        self._adaptive_palette = palette
+        self._adaptive_tree_delegate.palette = palette
+        color_transform = lambda color, current=palette: transfer_palette_color(color, current)
+        self._apply_canonical_dock_styles(palette, color_transform)
         self.view_tree.set_branch_color(palette.border)
         self.view_tree.set_branch_color_transform(color_transform)
         if self.map_page is not None:
@@ -1088,22 +1124,32 @@ class DockView(QWidget):
         self._apply_normal_theme()
 
     def _apply_normal_theme(self) -> None:
-        apply_style(self, dock_view_style())
-        apply_style(self.btn_save_search, dock_save_search_button_style())
-        apply_style(self.options_section.btn, dock_options_button_style())
-        self._refresh_view_mode_buttons()
+        palette = self._normal_dock_palette()
+        self._adaptive_tree_delegate.palette = None
         self.view_tree.refresh_theme()
         if self.map_page is not None:
+            self.map_page.map.clear_adaptive_palette()
             self.map_page.refresh_theme()
-        self.filter_carousel.refresh_theme()
-        self.category_carousel.refresh_theme()
-        self.type_picker.refresh_theme()
+
+        # Generic theme refreshes may replace child stylesheets, so install the
+        # dock's canonical presentation last in both normal and camouflage modes.
+        self._apply_canonical_dock_styles(palette)
+        self.view_tree.set_branch_color(ColorPalette.BORDER)
+        self.view_tree.set_branch_color_transform(None)
+        if self.map_page is not None:
+            self.map_page.setStyleSheet(f"background: {palette.base}; border: none;")
+            self.map_page.map_stage.setStyleSheet(f"background: {palette.base}; border: none;")
 
     def _set_native_border_color(self, color: str | None) -> None:
         if os.name != "nt" or os.environ.get("QT_QPA_PLATFORM") == "offscreen":
             return
         try:
             import ctypes
+
+            window = self.window()
+            handle = window.windowHandle()
+            if handle is None:
+                return
 
             if color is None:
                 value = ctypes.c_uint32(0xFFFFFFFF)  # DWMWA_COLOR_DEFAULT
@@ -1113,7 +1159,7 @@ class DockView(QWidget):
                     parsed.red() | (parsed.green() << 8) | (parsed.blue() << 16)
                 )
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                int(self.window().winId()),
+                int(handle.winId()),
                 34,  # DWMWA_BORDER_COLOR
                 ctypes.byref(value),
                 ctypes.sizeof(value),

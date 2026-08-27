@@ -483,6 +483,3 @@ def _set_dock_match_host(app, checked: bool) -> None:
     app.custom_menu_bar.act_match_dock_host.blockSignals(True)
     app.custom_menu_bar.act_match_dock_host.setChecked(accepted)
     app.custom_menu_bar.act_match_dock_host.blockSignals(False)
-    if app.stack.currentWidget() is app.dock_view:
-        app.view_controller.toggle_docked(False)
-        app.view_controller.toggle_docked(True)

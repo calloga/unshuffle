@@ -2311,6 +2311,7 @@ class MainWindowDebounceTests(unittest.TestCase):
 
     def test_adaptive_dock_restores_original_window_flags(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtGui import QColor
         from PySide6.QtWidgets import QApplication
         from gui.core.dock_appearance import DockAdaptivePalette
         from gui.core.dock_appearance import DOCK_MATCH_HOST_CONSENT_KEY, DOCK_MATCH_HOST_KEY
@@ -2319,14 +2320,23 @@ class MainWindowDebounceTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         window = ModernApp(defer_startup_restore=True)
         try:
+            self.assertFalse(window.stack.testAttribute(Qt.WA_NativeWindow))
+            self.assertFalse(window.dock_view.testAttribute(Qt.WA_NativeWindow))
             original_flags = window.windowFlags()
             settings = window.settings_controller.settings
             settings.setValue(DOCK_MATCH_HOST_CONSENT_KEY, True)
             settings.setValue(DOCK_MATCH_HOST_KEY, True)
 
+            window.dock_view.set_environment_scanning(True)
+            self.assertFalse(window.dock_view.environment_screen_overlay._timer.isActive())
+            self.assertTrue(window.dock_view.environment_screen_overlay.isHidden())
+
+            window._defer_window_show = False
             window.show()
+            self.assertFalse(window.stack.testAttribute(Qt.WA_NativeWindow))
             window.view_controller.toggle_docked(True)
             app.processEvents()
+            self.assertFalse(window.stack.testAttribute(Qt.WA_NativeWindow))
 
             self.assertTrue(window.windowFlags() & Qt.FramelessWindowHint)
             self.assertTrue(window.windowFlags() & Qt.WindowStaysOnTopHint)
@@ -2357,6 +2367,10 @@ class MainWindowDebounceTests(unittest.TestCase):
             self.assertFalse(window.dock_view.left_resize_edge.isHidden())
             self.assertFalse(window.dock_view.right_resize_edge.isHidden())
             self.assertFalse(window.custom_menu_bar.isVisible())
+            initial_palette = window.dock_view._normal_dock_palette()
+            self.assertIn(initial_palette.base, window.dock_view.view_tree.styleSheet())
+            self.assertIn(initial_palette.raised, window.dock_view.filter_carousel.value_row.styleSheet())
+            self.assertNotIn("border-top", window.dock_view.options_section.btn.styleSheet())
             window.dock_view.set_environment_scanning(True)
             self.assertTrue(window.dock_view.environment_screen_overlay._timer.isActive())
             self.assertFalse(window.dock_view.environment_screen_overlay.isHidden())
@@ -2447,7 +2461,30 @@ class MainWindowDebounceTests(unittest.TestCase):
             window.dock_view.filter_carousel.set_active_values({"test"})
             self.assertIn("#4d9188", window.dock_view.filter_carousel.btn_title.styleSheet())
 
+            window.dock_view.clear_adaptive_palette()
+            normal_palette = window.dock_view._normal_dock_palette()
+            self.assertIsNone(window.dock_view._adaptive_palette)
+            self.assertIn(normal_palette.base, window.dock_view.view_tree.styleSheet())
+            self.assertIn(normal_palette.hover, window.dock_view.view_tree.styleSheet())
+            self.assertIn(normal_palette.raised, window.dock_view.filter_carousel.value_row.styleSheet())
+            self.assertIn("font-weight: bold", window.dock_view.filter_carousel.btn_value.styleSheet())
+            self.assertNotIn("border-top", window.dock_view.options_section.btn.styleSheet())
+            self.assertIn(normal_palette.accent, window.dock_view.type_picker.btn_all.styleSheet())
+            self.assertEqual(
+                window.dock_view.btn_tree_view._adaptive_active.name(),
+                QColor(normal_palette.accent).name(),
+            )
+            self.assertEqual(
+                window.dock_view.btn_map_view._adaptive_unchecked_icon.name(),
+                QColor(normal_palette.text).name(),
+            )
+            self.assertIsNone(window.dock_view._adaptive_tree_delegate.palette)
+            map_page = window.dock_view.ensure_map_page()
+            self.assertIsNone(map_page.map._adaptive_band_colors)
+            self.assertIn(normal_palette.base, map_page.styleSheet())
+
             window.view_controller.toggle_docked(False)
+            self.assertFalse(window.stack.testAttribute(Qt.WA_NativeWindow))
 
             self.assertEqual(window.windowFlags(), original_flags)
             self.assertFalse(window.dock_view.hover_title_strip.isVisible())
@@ -2456,6 +2493,19 @@ class MainWindowDebounceTests(unittest.TestCase):
             self.assertFalse(window.dock_view.left_resize_edge.isVisible())
             self.assertFalse(window.dock_view.right_resize_edge.isVisible())
             self.assertFalse(window.custom_menu_bar.isHidden())
+
+            settings.setValue(DOCK_MATCH_HOST_KEY, False)
+            window.view_controller.toggle_docked(True)
+            app.processEvents()
+            self.assertTrue(window.windowFlags() & Qt.FramelessWindowHint)
+            self.assertTrue(window.windowFlags() & Qt.NoDropShadowWindowHint)
+            self.assertFalse(window.dock_view.hover_title_strip.isHidden())
+            self.assertEqual(
+                [button.text() for button in window.dock_view.hover_title_strip.menu_buttons],
+                ["Menus"],
+            )
+            self.assertNotIn("Unshuffle", window.dock_view.hover_title_strip.menu_buttons[0].text())
+            window.view_controller.toggle_docked(False)
         finally:
             if getattr(window, "engine", None):
                 try:
@@ -5751,6 +5801,58 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         page.refresh_from_app.assert_called_once()
         page.prewarm_library_projections.assert_called_once_with()
         page.set_library_filters.assert_called_once_with("", "", None)
+
+    def test_large_confidence_filter_returns_capped_visible_ids_for_map(self):
+        from gui.widgets.library_tab import LibraryTab
+
+        class _Index:
+            def __init__(self, row):
+                self._row = row
+
+            def isValid(self):
+                return True
+
+            def row(self):
+                return self._row
+
+        class _Model:
+            def rowCount(self):
+                return 12000
+
+            def record_id(self, row):
+                return row + 100
+
+        class _Proxy:
+            matched_ids = None
+            column_filters = {}
+            audio_types = None
+            _norm_path_filters = []
+            similarity_active = False
+            confidence_min = 0.25
+            confidence_max = 1.0
+
+            def __init__(self):
+                self._model = _Model()
+
+            def sourceModel(self):
+                return self._model
+
+            def rowCount(self):
+                return 12000
+
+            def index(self, row, _column):
+                return _Index(row)
+
+            def mapToSource(self, index):
+                return index
+
+        holder = type("Holder", (), {"proxy_model": _Proxy()})()
+        visible = LibraryTab._visible_record_ids_from_proxy(holder, limit=10000)
+
+        self.assertIsNotNone(visible)
+        self.assertEqual(len(visible), 10000)
+        self.assertIn("100", visible)
+        self.assertIn("10099", visible)
 
     def test_refresh_library_map_does_not_show_loader_for_warm_page(self):
         from gui.core.view_controller import ViewController

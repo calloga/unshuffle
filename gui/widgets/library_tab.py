@@ -821,7 +821,17 @@ class LibraryTab(QWidget):
             matched_ids = getattr(proxy, "matched_ids", None)
             if matched_ids is not None and len(matched_ids) <= effective_limit:
                 return {str(row_id) for row_id in matched_ids}
-            return None
+            has_filters = bool(
+                matched_ids is not None
+                or getattr(proxy, "column_filters", None)
+                or getattr(proxy, "audio_types", None) is not None
+                or getattr(proxy, "_norm_path_filters", None)
+                or getattr(proxy, "similarity_active", False)
+                or getattr(proxy, "confidence_min", 0.0) > 0.0
+                or getattr(proxy, "confidence_max", 1.0) < 1.0
+            )
+            if not has_filters:
+                return None
         if hasattr(model, "rowCount") and row_count == model.rowCount():
             matched_ids = getattr(proxy, "matched_ids", None)
             has_filters = bool(

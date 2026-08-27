@@ -99,7 +99,7 @@ class ModernMenuBar(QMenuBar):
         self.act_docked.triggered.connect(lambda checked: self.toggleDockedRequested.emit(checked))
         self.menu_view_docked.addAction(self.act_docked)
 
-        self.act_match_dock_host = QAction("Match Dock to Background", self)
+        self.act_match_dock_host = QAction("Match Background When Docked", self)
         self.act_match_dock_host.setCheckable(True)
         self.act_match_dock_host.setChecked(False)
         self.act_match_dock_host.triggered.connect(

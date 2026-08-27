@@ -278,7 +278,7 @@ def _grab_windows_host_region(app, screen, geometry: QRect) -> QImage | None:
 
 
 class DockAppearanceController(QObject):
-    """Applies a local, opt-in palette sampled from the host beneath the dock."""
+    """Applies the opt-in Camo palette sampled from beneath the app window."""
 
     def __init__(self, app) -> None:
         super().__init__(app)
@@ -299,44 +299,83 @@ class DockAppearanceController(QObject):
         self._pending_palette: DockAdaptivePalette | None = None
         self._movement_scan_pending = False
         self._last_capture_source = "none"
+        self._current_palette: DockAdaptivePalette | None = None
         app.dock_view.environment_screen_overlay.sweepFinished.connect(self._apply_pending_palette)
         app.installEventFilter(self)
 
     def is_enabled(self) -> bool:
+        return self.is_camo_active()
+
+    def is_auto_enabled(self) -> bool:
         return self.settings.value(DOCK_MATCH_HOST_KEY, False, type=bool)
+
+    def is_camo_active(self) -> bool:
+        docked = self.app.stack.currentWidget() is self.app.dock_view
+        return self.is_auto_enabled() and docked
+
+    def ensure_consent(self) -> bool:
+        if self.settings.value(DOCK_MATCH_HOST_CONSENT_KEY, False, type=bool):
+            return True
+        answer = QMessageBox.question(
+            self.app,
+            "Enable Camo",
+            "Allow Unshuffle to sample screen colors beneath its window?\n\n"
+            "Only a derived color palette is kept. Screenshots are never saved or transmitted.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+        self.settings.setValue(DOCK_MATCH_HOST_CONSENT_KEY, True)
+        return True
 
     def set_enabled(self, enabled: bool) -> bool:
         enabled = bool(enabled)
-        if enabled and not self.settings.value(DOCK_MATCH_HOST_CONSENT_KEY, False, type=bool):
-            answer = QMessageBox.question(
-                self.app,
-                "Match Dock to Background",
-                "Allow Unshuffle to sample nearby screen colors while docked?\n\n"
-                "Only a derived color palette is kept. Screenshots are never saved or transmitted.",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if answer != QMessageBox.Yes:
-                return False
-            self.settings.setValue(DOCK_MATCH_HOST_CONSENT_KEY, True)
+        if enabled and not self.ensure_consent():
+            return False
         self.settings.setValue(DOCK_MATCH_HOST_KEY, enabled)
-        if enabled:
+        if self.is_camo_active():
+            self.apply_cached()
+            self.schedule()
+        elif not enabled:
+            self._deactivate_temporary_camo()
+        return enabled
+
+    def theme_changed(self) -> None:
+        if self.is_camo_active():
             self.apply_cached()
             self.schedule()
         else:
+            self._deactivate_temporary_camo()
+
+    def context_changed(self) -> None:
+        self.theme_changed()
+
+    def _deactivate_temporary_camo(self) -> None:
+        if not self.is_camo_active():
             self._stop_timers()
             self.app.dock_view.set_environment_scanning(False)
             self.app.dock_view.clear_adaptive_palette()
             self._restore_vibe_theme()
-        return enabled
 
     def eventFilter(self, watched, event) -> bool:
-        if watched is self.app and event.type() in (QEvent.Move, QEvent.Resize):
-            self.schedule()
+        if watched is self.app:
+            if event.type() in (QEvent.Move, QEvent.Resize, QEvent.Show):
+                QTimer.singleShot(0, self.schedule)
+            elif event.type() == QEvent.Hide:
+                self._stop_timers()
+                self.app.dock_view.set_environment_scanning(False)
         return False
 
+    def _window_is_presented(self) -> bool:
+        return bool(
+            self.app.isVisible()
+            and not getattr(self.app, "_defer_window_show", False)
+            and not getattr(self.app, "_frontloading_startup", False)
+        )
+
     def schedule(self) -> None:
-        if self.is_enabled() and self.app.stack.currentWidget() is self.app.dock_view:
+        if self.is_camo_active() and self._window_is_presented():
             self.app.dock_view.set_environment_scanning(False)
             self._scan_timer.stop()
             self._periodic_timer.stop()
@@ -357,8 +396,15 @@ class DockAppearanceController(QObject):
     def apply_cached(self) -> None:
         palette = DockAdaptivePalette.from_json(self.settings.value(DOCK_MATCH_HOST_PALETTE_KEY, ""))
         if palette is not None:
-            self.app.dock_view.apply_adaptive_palette(palette, animate=False)
-            self._apply_vibe_palette(palette)
+            self._apply_palette(palette, animate=False)
+
+    def _apply_palette(self, palette: DockAdaptivePalette, *, animate: bool) -> None:
+        self._current_palette = palette
+        if self.app.stack.currentWidget() is self.app.dock_view:
+            self.app.dock_view.apply_adaptive_palette(palette, animate=animate)
+        else:
+            self.app.dock_view.clear_adaptive_palette()
+        self._apply_vibe_palette(palette)
 
     def _apply_vibe_palette(self, palette: DockAdaptivePalette) -> None:
         vibe_bar = getattr(self.app, "vibe_bar", None)
@@ -379,25 +425,20 @@ class DockAppearanceController(QObject):
         self._pending_palette = None
         if (
             palette is None
-            or not self.is_enabled()
-            or self.app.stack.currentWidget() is not self.app.dock_view
+            or not self.is_camo_active()
         ):
             self.app.dock_view.set_environment_scanning(False)
             return
         self.settings.setValue(DOCK_MATCH_HOST_PALETTE_KEY, json.dumps(asdict(palette)))
-        self.app.dock_view.apply_adaptive_palette(palette, animate=True)
-        self._apply_vibe_palette(palette)
+        self._apply_palette(palette, animate=True)
         self.app.dock_view.set_environment_scanning(False)
         self._periodic_timer.start()
 
     def suspend(self) -> None:
-        self._stop_timers()
-        self.app.dock_view.set_environment_scanning(False)
-        self.app.dock_view.restore_native_border()
-        self._restore_vibe_theme()
+        self.context_changed()
 
     def refresh(self) -> None:
-        if not self.is_enabled() or self.app.stack.currentWidget() is not self.app.dock_view:
+        if not self.is_camo_active() or not self._window_is_presented():
             self.app.dock_view.set_environment_scanning(False)
             self._stop_timers()
             return
@@ -443,7 +484,7 @@ class DockAppearanceController(QObject):
             if palette is None:
                 self._last_capture_source = "unavailable"
                 return
-            current = getattr(self.app.dock_view, "_adaptive_palette", None)
+            current = self._current_palette
             threshold = 0.000005 if movement_scan else 0.00008
             changed = (
                 current is None
@@ -468,7 +509,7 @@ class DockAppearanceController(QObject):
                 self.app.dock_view.set_environment_scanning(False)
             if (
                 not self._scan_timer.isActive()
-                and self.is_enabled()
-                and self.app.stack.currentWidget() is self.app.dock_view
+                and self.is_camo_active()
+                and self._window_is_presented()
             ):
                 self._periodic_timer.start()

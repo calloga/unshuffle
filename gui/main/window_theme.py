@@ -26,8 +26,15 @@ def apply_theme(window, theme_key: str) -> None:
             window.custom_menu_bar.set_theme_checked(window.theme_manager.requested_theme_key)
     finally:
         window.setUpdatesEnabled(previous_updates)
-    apply_native_window_theme(window)
+    # Calling winId() before the main window is shown forces Qt to create the
+    # complete native child hierarchy at its provisional geometry. The show
+    # event filter applies the native frame once the window actually exists.
+    if window.isVisible():
+        apply_native_window_theme(window)
     window.update()
+    appearance = getattr(window, "dock_appearance_controller", None)
+    if appearance is not None:
+        appearance.theme_changed()
 
 
 def apply_theme_stylesheet(window, qss: str, app: object | None) -> None:
@@ -71,12 +78,19 @@ def apply_zoom(window, zoom_percent: int) -> None:
 
 def refresh_theme_bindings(window, *, visible_only: bool = False) -> None:
     refreshed = set()
+    dock_view = getattr(window, "dock_view", None)
     for widget in window.findChildren(QWidget):
+        if widget is dock_view:
+            continue
         if visible_only and not widget.isVisibleTo(window):
             continue
         refresh = getattr(widget, "refresh_theme", None)
         if callable(refresh) and id(widget) not in refreshed:
             refreshed.add(id(widget))
+            refresh()
+    if dock_view is not None and (not visible_only or dock_view.isVisibleTo(window)):
+        refresh = getattr(dock_view, "refresh_theme", None)
+        if callable(refresh):
             refresh()
     window._style_page_nav_bar()
     if getattr(window, "library_tab", None):
@@ -135,7 +149,7 @@ def apply_native_window_theme(window, widget: QWidget | None = None) -> None:
                 b = parsed.blue()
             return r | (g << 8) | (b << 16)
 
-        dark_mode = ctypes.c_int(1)
+        dark_mode = ctypes.c_int(1 if colors.is_dark else 0)
         dwmapi.DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE,
