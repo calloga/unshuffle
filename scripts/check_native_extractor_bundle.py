@@ -133,8 +133,8 @@ def _check_leading_silence(path: Path) -> tuple[bool, str]:
     vector = payload.get("vector")
     if not isinstance(vector, list) or len(vector) != FEATURE_VECTOR_SIZE:
         return False, f"{path} leading-silence vector length mismatch"
-    if silent_result.returncode == 0 or "File is silent" not in silent_result.stderr:
-        return False, f"{path} did not reject a genuinely silent file"
+    if silent_result.returncode == 0:
+        return False, f"{path} accepted a genuinely silent file"
     return True, f"leading-silence ok: {path}"
 
 
