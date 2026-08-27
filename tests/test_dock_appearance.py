@@ -1,11 +1,16 @@
+import os
 import json
+from unittest import mock
 
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPalette, QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
 from gui.core.dock_appearance import (
     DockAdaptivePalette,
+    _contrast_ratio,
     _is_blank_host_capture,
     _sample_image_colors,
+    contrast_safe_palette_color,
     palette_from_colors,
     transfer_palette_color,
 )
@@ -92,6 +97,80 @@ def test_transfer_palette_color_preserves_alpha_and_moves_theme_color():
 
     assert shifted != source
     assert shifted.alpha() == 99
+
+
+def _light_palette() -> DockAdaptivePalette:
+    return DockAdaptivePalette(
+        base="#f4f3d8",
+        darker="#e4e3cb",
+        panel="#eeedd2",
+        raised="#dedeca",
+        hover="#d5ddc8",
+        border="#dcdcc2",
+        accent="#4d9188",
+        accent_hover="#438078",
+        text="#101216",
+        muted="#6d7174",
+        selection="#cfe1d4",
+        scrollbar="#f4f3d8",
+        scrollbar_handle="#c0c0aa",
+        source_theme="pearl",
+    )
+
+
+def test_semantic_palette_color_meets_text_contrast_on_light_surfaces():
+    palette = _light_palette()
+
+    adjusted = contrast_safe_palette_color(
+        QColor("#00ffff"),
+        palette,
+        backgrounds=(palette.base, palette.hover),
+    )
+
+    assert _contrast_ratio(adjusted, QColor(palette.base)) >= 4.5
+    assert _contrast_ratio(adjusted, QColor(palette.hover)) >= 4.5
+    assert adjusted != QColor(palette.text)
+
+
+def test_semantic_palette_color_keeps_readable_dark_surface_color():
+    palette = palette_from_colors([QColor("#202830")] * 20)
+    assert palette is not None
+    source = QColor("#55d8c5")
+
+    shifted = transfer_palette_color(source, palette)
+    adjusted = contrast_safe_palette_color(source, palette)
+
+    assert _contrast_ratio(shifted, QColor(palette.base)) >= 4.5
+    assert adjusted == shifted
+
+
+def test_adaptive_tree_delegate_contrasts_normal_and_selected_text_separately():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from gui.views.dock_view import DockAdaptiveTreeDelegate
+
+    app = QApplication.instance() or QApplication([])
+    model = QStandardItemModel()
+    item = QStandardItem("Kicks")
+    item.setForeground(QColor("#00ffff"))
+    model.appendRow(item)
+    option = QStyleOptionViewItem()
+    option.palette = app.palette()
+    delegate = DockAdaptiveTreeDelegate()
+    delegate.palette = _light_palette()
+
+    with mock.patch(
+        "gui.views.dock_view.contrast_safe_palette_color",
+        wraps=contrast_safe_palette_color,
+    ) as adjust_color:
+        delegate.initStyleOption(option, model.index(0, 0))
+        delegate.initStyleOption(option, model.index(0, 0))
+
+    assert _contrast_ratio(option.palette.color(QPalette.Text), QColor(delegate.palette.base)) >= 4.5
+    assert _contrast_ratio(
+        option.palette.color(QPalette.HighlightedText),
+        QColor(delegate.palette.selection),
+    ) >= 4.5
+    assert adjust_color.call_count == 2
 
 
 def test_image_sampling_uses_pixels_across_the_captured_host_region():

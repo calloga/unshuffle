@@ -151,6 +151,54 @@ def _contrast_ratio(first: QColor, second: QColor) -> float:
     return (lighter + 0.05) / (darker + 0.05)
 
 
+def contrast_safe_palette_color(
+    color: QColor | str,
+    palette: DockAdaptivePalette,
+    *,
+    backgrounds: tuple[QColor | str, ...] | None = None,
+    minimum_ratio: float = 4.5,
+) -> QColor:
+    """Transfer a semantic color while keeping it readable on dock surfaces."""
+    shifted = transfer_palette_color(color, palette)
+    surfaces = tuple(QColor(value) for value in (backgrounds or (palette.base,)))
+    surfaces = tuple(surface for surface in surfaces if surface.isValid())
+    if not shifted.isValid() or not surfaces:
+        return shifted
+
+    minimum_ratio = max(1.0, float(minimum_ratio))
+
+    def readable(candidate: QColor) -> bool:
+        return all(_contrast_ratio(candidate, surface) >= minimum_ratio for surface in surfaces)
+
+    if readable(shifted):
+        return shifted
+
+    fallback = QColor(palette.text)
+    if not fallback.isValid():
+        fallback = QColor("#101216") if QColor(palette.base).lightnessF() > 0.52 else QColor("#f3f5f7")
+    fallback.setAlpha(shifted.alpha())
+    shifted_lab = _oklab(shifted)
+    fallback_lab = _oklab(fallback)
+    for step in range(1, 65):
+        amount = step / 64.0
+        candidate = _from_oklab(
+            shifted_lab[0] + (fallback_lab[0] - shifted_lab[0]) * amount,
+            shifted_lab[1] + (fallback_lab[1] - shifted_lab[1]) * amount,
+            shifted_lab[2] + (fallback_lab[2] - shifted_lab[2]) * amount,
+            shifted.alpha(),
+        )
+        if readable(candidate):
+            return candidate
+
+    opaque_choices = (QColor("#101216"), QColor("#f3f5f7"))
+    safest = max(
+        opaque_choices,
+        key=lambda candidate: min(_contrast_ratio(candidate, surface) for surface in surfaces),
+    )
+    safest.setAlpha(shifted.alpha())
+    return safest
+
+
 def _color_name(color: QColor) -> str:
     return color.name(QColor.HexArgb) if color.alpha() < 255 else color.name()
 

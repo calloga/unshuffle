@@ -51,7 +51,11 @@ from ..widgets.buttons import SidebarIconButton
 from ..widgets import AnimatedIconButton
 from ..widgets.preview_control_bar import DragOutIconButton
 from ..utils.constants import PAUSE_ICON, PLAY_ICON, STOP_ICON
-from ..core.dock_appearance import DockAdaptivePalette, transfer_palette_color
+from ..core.dock_appearance import (
+    DockAdaptivePalette,
+    contrast_safe_palette_color,
+    transfer_palette_color,
+)
 
 
 class DockHoverTitleStrip(QWidget):
@@ -313,7 +317,19 @@ class DockPaletteTransitionOverlay(QWidget):
 class DockAdaptiveTreeDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.palette = None
+        self._palette = None
+        self._color_cache: dict[int, tuple[QColor, QColor]] = {}
+
+    @property
+    def palette(self):
+        return self._palette
+
+    @palette.setter
+    def palette(self, value) -> None:
+        if value == self._palette:
+            return
+        self._palette = value
+        self._color_cache.clear()
 
     def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:
         super().initStyleOption(option, index)
@@ -323,9 +339,25 @@ class DockAdaptiveTreeDelegate(QStyledItemDelegate):
         color = foreground.color() if isinstance(foreground, QBrush) else foreground
         if not isinstance(color, QColor):
             color = option.palette.color(QPalette.Text)
-        shifted = transfer_palette_color(color, self.palette)
-        option.palette.setColor(QPalette.Text, shifted)
-        option.palette.setColor(QPalette.HighlightedText, shifted)
+        cache_key = int(color.rgba())
+        cached = self._color_cache.get(cache_key)
+        if cached is None:
+            cached = (
+                contrast_safe_palette_color(
+                    color,
+                    self.palette,
+                    backgrounds=(self.palette.base, self.palette.hover),
+                ),
+                contrast_safe_palette_color(
+                    color,
+                    self.palette,
+                    backgrounds=(self.palette.selection,),
+                ),
+            )
+            self._color_cache[cache_key] = cached
+        normal, selected = cached
+        option.palette.setColor(QPalette.Text, normal)
+        option.palette.setColor(QPalette.HighlightedText, selected)
 
     def paint(self, painter, option, index) -> None:
         option.state &= ~QStyle.State_HasFocus
@@ -1012,9 +1044,25 @@ class DockView(QWidget):
         self._adaptive_palette = palette
         self._adaptive_tree_delegate.palette = palette
         color_transform = lambda color, current=palette: transfer_palette_color(color, current)
+        branch_color_cache: dict[int, QColor] = {}
+
+        def branch_color_transform(color, current=palette):
+            source = QColor(color)
+            cache_key = int(source.rgba())
+            adjusted = branch_color_cache.get(cache_key)
+            if adjusted is None:
+                adjusted = contrast_safe_palette_color(
+                    source,
+                    current,
+                    backgrounds=(current.base,),
+                    minimum_ratio=3.0,
+                )
+                branch_color_cache[cache_key] = adjusted
+            return adjusted
+
         self._apply_canonical_dock_styles(palette, color_transform)
         self.view_tree.set_branch_color(palette.border)
-        self.view_tree.set_branch_color_transform(color_transform)
+        self.view_tree.set_branch_color_transform(branch_color_transform)
         if self.map_page is not None:
             self.map_page.map.set_adaptive_palette(palette, color_transform)
 
