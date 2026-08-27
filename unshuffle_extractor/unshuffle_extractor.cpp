@@ -26,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -288,7 +289,8 @@ std::wstring windows_quote_arg(const std::wstring &value) {
 }
 
 bool decode_with_ffmpeg_windows(const fs::path &path,
-                                std::vector<float> &mono_samples) {
+                                std::vector<float> &mono_samples,
+                                bool trim_leading_silence) {
   SECURITY_ATTRIBUTES security_attrs;
   security_attrs.nLength = sizeof(SECURITY_ATTRIBUTES);
   security_attrs.bInheritHandle = TRUE;
@@ -311,6 +313,9 @@ bool decode_with_ffmpeg_windows(const fs::path &path,
   std::wstring command =
       windows_quote_arg(ffmpeg) + L" -v error -nostdin -i " +
       windows_quote_arg(path.wstring()) +
+      (trim_leading_silence
+           ? L" -af silenceremove=start_periods=1:start_threshold=0.00001"
+           : L"") +
       L" -t 20 -ac 1 -ar 44100 -f f32le pipe:1";
 
   STARTUPINFOW startup_info;
@@ -368,15 +373,19 @@ bool decode_with_ffmpeg_windows(const fs::path &path,
 #endif
 
 bool decode_with_ffmpeg(const fs::path &path, std::vector<float> &mono_samples,
-                        int &sampleRate, int &channels) {
+                        int &sampleRate, int &channels,
+                        bool trim_leading_silence = false) {
   sampleRate = 44100;
   channels = 1;
 #ifdef _WIN32
-  return decode_with_ffmpeg_windows(path, mono_samples);
+  return decode_with_ffmpeg_windows(path, mono_samples, trim_leading_silence);
 #else
   std::string command = shell_quote(find_ffmpeg_executable()) +
                         " -v error -nostdin -i " +
                         shell_quote(path_to_utf8(path)) +
+                        (trim_leading_silence
+                             ? " -af silenceremove=start_periods=1:start_threshold=0.00001"
+                             : "") +
                         " -t 20 -ac 1 -ar 44100 -f f32le pipe:1";
   FILE *pipe = popen(command.c_str(), "r");
   if (!pipe) {
@@ -405,7 +414,10 @@ bool decode_with_ffmpeg(const fs::path &path, std::vector<float> &mono_samples,
 #endif
 }
 
-int health_check(std::vector<float> &samples) {
+constexpr int HEALTH_OK = 0;
+constexpr int HEALTH_SILENT = 4;
+
+int health_check(std::vector<float> &samples, bool report_silence = true) {
   if (samples.empty()) {
     std::cerr << "File is empty\n";
     return 1;
@@ -426,8 +438,9 @@ int health_check(std::vector<float> &samples) {
 
   float rms_val = rms / (float)samples.size();
   if (rms_val < 1e-10f) {
-    std::cerr << "File is silent (RMS: " << rms_val << ")\n";
-    return 1;
+    if (report_silence)
+      std::cerr << "File is silent (RMS: " << rms_val << ")\n";
+    return HEALTH_SILENT;
   }
 
   if (samples.size() < 512) {
@@ -435,7 +448,7 @@ int health_check(std::vector<float> &samples) {
     return 1;
   }
 
-  return 0;
+  return HEALTH_OK;
 }
 
 int main(int argc, char *argv[]) {
@@ -525,7 +538,8 @@ int extract_file_json(const std::wstring &wfilepath, std::ostream &out) {
       ends_with(lower_path, ".alac");
 
   if (force_ffmpeg) {
-    if (!decode_with_ffmpeg(fs::path(wpath), mono_samples, sampleRate, channels))
+    if (!decode_with_ffmpeg(fs::path(wpath), mono_samples, sampleRate, channels,
+                            true))
       return 1;
   } else if (ends_with(lower_path, ".mp3")) {
     drmp3 mp3;
@@ -665,9 +679,25 @@ int extract_file_json(const std::wstring &wfilepath, std::ostream &out) {
     }
   }
 
-  int health = health_check(mono_samples);
-  if (health != 0)
-    return health;
+  int health = health_check(mono_samples, false);
+  if (health != HEALTH_OK && health != HEALTH_SILENT)
+    return 1;
+
+  if (health == HEALTH_SILENT && !force_ffmpeg) {
+    std::vector<float> trimmed_samples;
+    int trimmed_sample_rate = 0;
+    int trimmed_channels = 0;
+    if (decode_with_ffmpeg(fs::path(wpath), trimmed_samples,
+                           trimmed_sample_rate, trimmed_channels, true)) {
+      mono_samples = std::move(trimmed_samples);
+      sampleRate = trimmed_sample_rate;
+      channels = trimmed_channels;
+    }
+  }
+
+  health = health_check(mono_samples);
+  if (health != HEALTH_OK)
+    return 1;
 
   Audio_features features = compute_features(mono_samples, sampleRate);
 

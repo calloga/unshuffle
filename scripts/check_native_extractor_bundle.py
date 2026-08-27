@@ -68,22 +68,74 @@ def _check_binary(path: Path, *, execute: bool = True) -> tuple[bool, str]:
     schema_ok, schema_message = _check_schema_smoke(path)
     if not schema_ok:
         return False, schema_message
-    return True, f"ok: {path} ({version}; schema smoke passed)"
+    silence_ok, silence_message = _check_leading_silence(path)
+    if not silence_ok:
+        return False, silence_message
+    return True, f"ok: {path} ({version}; schema and leading-silence smokes passed)"
 
 
-def _write_probe_wav(path: Path) -> None:
+def _write_probe_wav(
+    path: Path,
+    *,
+    leading_silence_seconds: float = 0.0,
+    include_tone: bool = True,
+) -> None:
     sample_rate = 44100
     duration_seconds = 0.25
     frame_count = int(sample_rate * duration_seconds)
+    silent_frame_count = int(sample_rate * leading_silence_seconds)
     with wave.open(str(path), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
         frames = bytearray()
-        for idx in range(frame_count):
-            value = int(12000 * math.sin(2.0 * math.pi * 440.0 * (idx / sample_rate)))
-            frames.extend(pack("<h", value))
+        frames.extend(pack("<h", 0) * silent_frame_count)
+        if include_tone:
+            for idx in range(frame_count):
+                value = int(12000 * math.sin(2.0 * math.pi * 440.0 * (idx / sample_rate)))
+                frames.extend(pack("<h", value))
         handle.writeframes(bytes(frames))
+
+
+def _check_leading_silence(path: Path) -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "leading-silence.wav"
+        silent_probe = Path(tmp) / "silent.wav"
+        _write_probe_wav(probe, leading_silence_seconds=21.0)
+        _write_probe_wav(silent_probe, leading_silence_seconds=1.0, include_tone=False)
+        try:
+            result = subprocess.run(
+                [str(path), "--file", str(probe)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            silent_result = subprocess.run(
+                [str(path), "--file", str(silent_probe)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except OSError as exc:
+            return False, f"could not execute leading-silence smoke for {path}: {exc}"
+        except subprocess.TimeoutExpired:
+            return False, f"leading-silence smoke timed out: {path}"
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        return False, f"{path} rejected audible audio after leading silence: {stderr}"
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return False, f"{path} leading-silence smoke emitted invalid JSON: {exc}"
+    vector = payload.get("vector")
+    if not isinstance(vector, list) or len(vector) != FEATURE_VECTOR_SIZE:
+        return False, f"{path} leading-silence vector length mismatch"
+    if silent_result.returncode == 0 or "File is silent" not in silent_result.stderr:
+        return False, f"{path} did not reject a genuinely silent file"
+    return True, f"leading-silence ok: {path}"
 
 
 def _check_schema_smoke(path: Path) -> tuple[bool, str]:
