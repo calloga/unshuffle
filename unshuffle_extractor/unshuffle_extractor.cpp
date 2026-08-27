@@ -251,6 +251,72 @@ std::string find_ffmpeg_executable() {
   return "ffmpeg";
 }
 
+constexpr float SILENCE_MEAN_SQUARE_THRESHOLD = 1e-10f;
+
+bool is_effectively_silent(const std::vector<float> &samples) {
+  if (samples.empty())
+    return true;
+
+  double sum_sq = 0.0;
+  for (float sample : samples) {
+    if (!std::isfinite(sample))
+      return false;
+    sum_sq += (double)sample * (double)sample;
+  }
+  return sum_sq / (double)samples.size() < SILENCE_MEAN_SQUARE_THRESHOLD;
+}
+
+template <typename Reader>
+void replace_silent_prefix_with_active_audio(std::vector<float> &mono_samples,
+                                             int sample_rate, int channels,
+                                             Reader read_frames) {
+  if (!is_effectively_silent(mono_samples) || sample_rate <= 0 || channels <= 0)
+    return;
+
+  const size_t scan_frames = std::max<size_t>(1024, (size_t)sample_rate);
+  const size_t max_output_frames = (size_t)sample_rate * 20;
+  std::vector<float> active_samples;
+  active_samples.reserve(max_output_frames);
+  bool found_active_audio = false;
+
+  while (active_samples.size() < max_output_frames) {
+    size_t requested_frames = scan_frames;
+    if (found_active_audio) {
+      requested_frames =
+          std::min(requested_frames, max_output_frames - active_samples.size());
+    }
+
+    std::vector<float> interleaved(requested_frames * (size_t)channels);
+    size_t frames_read =
+        std::min(requested_frames, (size_t)read_frames(
+                                       requested_frames, interleaved.data()));
+    if (frames_read == 0)
+      break;
+
+    std::vector<float> chunk(frames_read);
+    for (size_t frame = 0; frame < frames_read; ++frame) {
+      float mix = 0.0f;
+      for (int channel = 0; channel < channels; ++channel) {
+        mix += interleaved[frame * (size_t)channels + (size_t)channel];
+      }
+      chunk[frame] = mix / (float)channels;
+    }
+
+    if (!found_active_audio) {
+      if (is_effectively_silent(chunk))
+        continue;
+      found_active_audio = true;
+    }
+
+    size_t remaining = max_output_frames - active_samples.size();
+    active_samples.insert(active_samples.end(), chunk.begin(),
+                          chunk.begin() + std::min(remaining, chunk.size()));
+  }
+
+  if (found_active_audio)
+    mono_samples = std::move(active_samples);
+}
+
 #ifdef _WIN32
 std::wstring windows_quote_arg(const std::wstring &value) {
   if (value.empty())
@@ -414,10 +480,7 @@ bool decode_with_ffmpeg(const fs::path &path, std::vector<float> &mono_samples,
 #endif
 }
 
-constexpr int HEALTH_OK = 0;
-constexpr int HEALTH_SILENT = 4;
-
-int health_check(std::vector<float> &samples, bool report_silence = true) {
+int health_check(std::vector<float> &samples) {
   if (samples.empty()) {
     std::cerr << "File is empty\n";
     return 1;
@@ -437,10 +500,9 @@ int health_check(std::vector<float> &samples, bool report_silence = true) {
   }
 
   float rms_val = rms / (float)samples.size();
-  if (rms_val < 1e-10f) {
-    if (report_silence)
-      std::cerr << "File is silent (RMS: " << rms_val << ")\n";
-    return HEALTH_SILENT;
+  if (rms_val < SILENCE_MEAN_SQUARE_THRESHOLD) {
+    std::cerr << "File is silent (RMS: " << rms_val << ")\n";
+    return 1;
   }
 
   if (samples.size() < 512) {
@@ -448,7 +510,7 @@ int health_check(std::vector<float> &samples, bool report_silence = true) {
     return 1;
   }
 
-  return HEALTH_OK;
+  return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -570,6 +632,13 @@ int extract_file_json(const std::wstring &wfilepath, std::ostream &out) {
       mono_samples[i] = mix / (float)channels;
     }
 
+    replace_silent_prefix_with_active_audio(
+        mono_samples, sampleRate, channels,
+        [&mp3](size_t requested, float *destination) {
+          return drmp3_read_pcm_frames_f32(
+              &mp3, (drmp3_uint64)requested, destination);
+        });
+
     drmp3_uninit(&mp3);
   } else if (ends_with(lower_path, ".flac")) {
     drflac *pFlac = drflac_open_file_w(wpath.c_str(), NULL);
@@ -595,6 +664,13 @@ int extract_file_json(const std::wstring &wfilepath, std::ostream &out) {
         mix += samples[i * channels + c];
       mono_samples[i] = mix / (float)channels;
     }
+
+    replace_silent_prefix_with_active_audio(
+        mono_samples, sampleRate, channels,
+        [pFlac](size_t requested, float *destination) {
+          return drflac_read_pcm_frames_f32(
+              pFlac, (drflac_uint64)requested, destination);
+        });
 
     drflac_close(pFlac);
   } else if (ends_with(lower_path, ".ogg")) {
@@ -633,11 +709,20 @@ int extract_file_json(const std::wstring &wfilepath, std::ostream &out) {
       mono_samples[i] = mix / (float)channels;
     }
 
+    replace_silent_prefix_with_active_audio(
+        mono_samples, sampleRate, channels,
+        [pVorbis, channels](size_t requested, float *destination) {
+          return stb_vorbis_get_samples_float_interleaved(
+              pVorbis, channels, destination,
+              (int)(requested * (size_t)channels));
+        });
+
     stb_vorbis_close(pVorbis);
   } else {
     drwav wav;
     if (!drwav_init_file_w(&wav, wpath.c_str(), NULL)) {
-      if (!decode_with_ffmpeg(fs::path(wpath), mono_samples, sampleRate, channels)) {
+      if (!decode_with_ffmpeg(fs::path(wpath), mono_samples, sampleRate, channels,
+                              true)) {
         std::cerr << "dr_wav: Failed to open file\n";
         return 1;
       }
@@ -675,29 +760,20 @@ int extract_file_json(const std::wstring &wfilepath, std::ostream &out) {
         mono_samples[i] = mix / (float)channels;
       }
 
+      replace_silent_prefix_with_active_audio(
+          mono_samples, sampleRate, channels,
+          [&wav](size_t requested, float *destination) {
+            return drwav_read_pcm_frames_f32(
+                &wav, (drwav_uint64)requested, destination);
+          });
+
       drwav_uninit(&wav);
     }
   }
 
-  int health = health_check(mono_samples, false);
-  if (health != HEALTH_OK && health != HEALTH_SILENT)
-    return 1;
-
-  if (health == HEALTH_SILENT && !force_ffmpeg) {
-    std::vector<float> trimmed_samples;
-    int trimmed_sample_rate = 0;
-    int trimmed_channels = 0;
-    if (decode_with_ffmpeg(fs::path(wpath), trimmed_samples,
-                           trimmed_sample_rate, trimmed_channels, true)) {
-      mono_samples = std::move(trimmed_samples);
-      sampleRate = trimmed_sample_rate;
-      channels = trimmed_channels;
-    }
-  }
-
-  health = health_check(mono_samples);
-  if (health != HEALTH_OK)
-    return 1;
+  int health = health_check(mono_samples);
+  if (health != 0)
+    return health;
 
   Audio_features features = compute_features(mono_samples, sampleRate);
 
