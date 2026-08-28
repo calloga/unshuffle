@@ -2748,6 +2748,78 @@ def test_drafting_controller_reuses_existing_custom_semantic_parent(monkeypatch)
     assert tree_model.index_for_path(("Loops", "Dupes")) is not None
 
 
+def test_profile_node_drop_is_undoable(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QObject
+    from PySide6.QtGui import QUndoStack
+    from PySide6.QtWidgets import QApplication
+    from gui.core.drafting_controller import DraftingController
+    from gui.models.staging_table import StagingTableModel
+
+    _app = QApplication.instance() or QApplication([])
+    rec = _record("dupe.wav", category="Dupes", audio_type="Loops", tags=["dupe"])
+    model = StagingTableModel([rec])
+    profile = _profile(
+        [
+            TreeOrganizationNode("loops", "root", "Loops", 'type:"Loops"', "system", 1),
+            TreeOrganizationNode("dupes", "root", "Dupes", 'tag:"dupe"', "custom", 2),
+        ]
+    )
+
+    class FakeTreeOrganizationController:
+        def __init__(self):
+            self.active_profile = profile
+
+        def _sync_active_profile(self, *, refresh=True):
+            pass
+
+    class FakeViewController:
+        def is_tree_visible(self):
+            return False
+
+        def update_library_views(self, tree_delay_ms=0):
+            pass
+
+    class FakeFooter:
+        def log(self, _message):
+            pass
+
+        def set_status(self, _message):
+            pass
+
+        def set_reorg_draft_state(self, *_args, **_kwargs):
+            pass
+
+    class FakeApp(QObject):
+        def __init__(self):
+            super().__init__()
+            self.model = model
+            self.undo_stack = QUndoStack(self)
+            self.tree_organization_controller = FakeTreeOrganizationController()
+            self.view_controller = FakeViewController()
+            self.footer = FakeFooter()
+            self.operation_monitor = None
+
+    app = FakeApp()
+    controller = DraftingController(app)
+
+    assert controller.stage_tree_reorg_updates(
+        [],
+        move_profile_node_id="dupes",
+        target_fields={"audio_type": "Loops"},
+    )
+    assert app.undo_stack.canUndo()
+    assert next(node for node in app.tree_organization_controller.active_profile.nodes if node.id == "dupes").parent_id == "loops"
+
+    app.undo_stack.undo()
+    assert next(node for node in app.tree_organization_controller.active_profile.nodes if node.id == "dupes").parent_id == "root"
+    assert not controller.has_changes()
+
+    app.undo_stack.redo()
+    assert next(node for node in app.tree_organization_controller.active_profile.nodes if node.id == "dupes").parent_id == "loops"
+    assert controller.has_changes()
+
+
 def test_drafting_controller_merges_duplicate_custom_siblings(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QObject
@@ -3055,6 +3127,7 @@ def test_repeated_custom_node_drop_keeps_profile_bucket_routing(monkeypatch):
 def test_drafting_controller_saves_draft_profile_and_remembers_active_id(monkeypatch, tmp_path):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QObject
+    from PySide6.QtGui import QUndoStack
     from PySide6.QtWidgets import QApplication
     from gui.core.drafting_controller import DraftingController
     from gui.models.staging_table import StagingTableModel
@@ -3080,6 +3153,9 @@ def test_drafting_controller_saves_draft_profile_and_remembers_active_id(monkeyp
             pass
 
         def set_status(self, _message):
+            pass
+
+        def set_reorg_draft_state(self, _text, _visible, _can_save=False):
             pass
 
     class FakeViewController:
@@ -3115,6 +3191,9 @@ def test_drafting_controller_saves_draft_profile_and_remembers_active_id(monkeyp
             self.view_controller = FakeViewController()
             self.tree_organization_controller = FakeTreeOrganizationController()
             self.library_tab = FakeLibraryTab()
+            self.data_manager = None
+            self.system_controller = None
+            self.undo_stack = QUndoStack(self)
 
     app = FakeApp()
     controller = DraftingController(app)
@@ -3124,7 +3203,10 @@ def test_drafting_controller_saves_draft_profile_and_remembers_active_id(monkeyp
         target_fields={"audio_type": "Loops", "category": "Bass"},
     )
 
-    controller._save_draft_profile_if_needed()
+    controller._show_save_confirm_dialog = lambda *_args, **_kwargs: True
+    monkeypatch.setattr("gui.utils.state.rewrite_staging_from_model", lambda _app: None)
+    monkeypatch.setattr("gui.utils.ui_helpers.set_ui_busy", lambda _app, _busy: None)
+    controller.save_reorg_draft()
 
     saved = repository.get_profile(profile.id)
     assert saved is not None
@@ -3132,11 +3214,23 @@ def test_drafting_controller_saves_draft_profile_and_remembers_active_id(monkeyp
     dupes = next(node for node in saved.nodes if node.id == "dupes")
     assert dupes.parent_id == bass.id
     assert app.tree_organization_controller.persisted == [profile.id]
+    assert app.undo_stack.canUndo()
+
+    app.undo_stack.undo()
+    active_dupes = next(node for node in app.tree_organization_controller.active_profile.nodes if node.id == "dupes")
+    assert active_dupes.parent_id == "root"
+    assert controller.has_changes()
+
+    app.undo_stack.redo()
+    active_dupes = next(node for node in app.tree_organization_controller.active_profile.nodes if node.id == "dupes")
+    assert active_dupes.parent_id == bass.id
+    assert not controller.has_changes()
 
 
 def test_drafting_controller_save_defers_refresh_until_after_busy(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QObject
+    from PySide6.QtGui import QUndoStack
     from PySide6.QtWidgets import QApplication
     from gui.core.drafting_controller import DraftingController
     from gui.models.staging_table import StagingTableModel
@@ -3179,6 +3273,7 @@ def test_drafting_controller_save_defers_refresh_until_after_busy(monkeypatch):
             self.search_controller = FakeSearchController()
             self.data_manager = None
             self.system_controller = None
+            self.undo_stack = QUndoStack(self)
 
     app = FakeApp()
     controller = DraftingController(app)
@@ -3205,6 +3300,14 @@ def test_drafting_controller_save_defers_refresh_until_after_busy(monkeypatch):
 
     assert controller._impact_worker is None
     assert controller._impact_request_id == 8
+    assert not controller.has_changes()
+    assert app.undo_stack.canUndo()
+    app.undo_stack.undo()
+    assert rec.category == "Bass"
+    assert controller.has_changes()
+    assert app.undo_stack.canRedo()
+    app.undo_stack.redo()
+    assert rec.category == "FX"
     assert not controller.has_changes()
     assert events.index(("busy", False)) < events.index(("defer", 0)) < events.index(("search",))
 

@@ -2,6 +2,7 @@ import os
 import unittest
 import uuid
 from pathlib import Path
+from typing import Any, cast
 from unittest import mock
 
 from PySide6.QtCore import QObject, Qt, QSettings
@@ -204,7 +205,7 @@ class ThemeManagerTests(unittest.TestCase):
             {"app": app, "_current_palette": None, "_apply_vibe_palette": lambda *_args: None},
         )()
 
-        DockAppearanceController._apply_palette(controller, self._adaptive_palette(), animate=False)
+        DockAppearanceController._apply_palette(cast(Any, controller), self._adaptive_palette(), animate=False)
 
         dock.apply_adaptive_palette.assert_called_once()
 

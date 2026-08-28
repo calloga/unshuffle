@@ -79,6 +79,8 @@ class AnimatedIconButton(QPushButton):
     hoverOffset = Property(int, getHoverOffset, setHoverOffset)
 
     def enterEvent(self, event):
+        if not self.isEnabled():
+            return
         self.anim.stop()
         self.anim.setDuration(self.HOVER_DURATION)
         self.anim.setEndValue(self.LIFT_OFFSET)
@@ -91,6 +93,15 @@ class AnimatedIconButton(QPushButton):
         self.anim.setEndValue(0)
         self.anim.start()
         super().leaveEvent(event)
+
+    def setEnabled(self, enabled: bool) -> None:
+        super().setEnabled(enabled)
+        self.anim.stop()
+        if not enabled:
+            self.hover_offset = 0
+        self.alpha_mult = self.ENABLED_OPACITY if enabled else self.DISABLED_OPACITY
+        self.setCursor(Qt.PointingHandCursor if enabled else Qt.ArrowCursor)
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)

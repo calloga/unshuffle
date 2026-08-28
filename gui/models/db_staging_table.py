@@ -365,7 +365,8 @@ class DbBackedStagingTableModel(QAbstractTableModel):
         if role == Qt.UserRole:
             if col == StagingColumn.CONFIDENCE:
                 return self.scores.get(self.record_id(index.row())) or rec.confidence
-            return getattr(rec, "pack_candidates", None)
+            if col == StagingColumn.PACK:
+                return getattr(rec, "pack_candidates", None)
         if role == Qt.ToolTipRole and col in (StagingColumn.PACK, StagingColumn.FILENAME, StagingColumn.CATEGORY):
             return StagingTableModel._classification_tooltip(cast(Any, self), rec)
         return None
@@ -578,7 +579,7 @@ class DbBackedStagingTableModel(QAbstractTableModel):
             return Qt.ItemFlag.ItemIsEnabled
         if self.record_id(index.row()) in self._duplicate_shadow_ids:
             return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-        if index.column() in [StagingColumn.PACK, StagingColumn.CATEGORY, StagingColumn.SUBCATEGORY, StagingColumn.TAGS]:
+        if index.column() in [StagingColumn.PACK, StagingColumn.CATEGORY, StagingColumn.SUBCATEGORY, StagingColumn.TAGS, StagingColumn.TYPE]:
             return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsEnabled
         return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
 

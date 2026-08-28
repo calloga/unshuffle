@@ -1,4 +1,5 @@
 import logging
+import json
 import re
 from collections.abc import Callable
 from typing import List, NoReturn, Set
@@ -113,9 +114,8 @@ def search_similar_records(
     if candidate_ids is not None:
         if not candidate_ids:
             return []
-        placeholders = ", ".join("?" for _ in candidate_ids)
-        query += f" AND row_id IN ({placeholders})"
-        params.extend(sorted(candidate_ids))
+        query += " AND row_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?))"
+        params.append(json.dumps(sorted(candidate_ids)))
 
     cursor = conn.execute(query, params)
     results = []

@@ -5,7 +5,7 @@ from .. import widgets
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QFrame, QSizePolicy, QStackedWidget, QButtonGroup,
-    QScrollArea, QToolButton, QApplication, QLabel, QMenu, QStyle, QStyledItemDelegate,
+    QScrollArea, QScrollBar, QToolButton, QApplication, QLabel, QMenu, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem,
 )
 from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRect, QSize, Signal, Qt, QTimer
@@ -42,6 +42,7 @@ from ..utils.styles import (
     dock_options_button_style,
     dock_save_search_button_style,
     dock_view_style,
+    scrollbar_style,
     scaled_px,
 )
 from ..utils.layout_helpers import apply_layout_margins, apply_layout_spacing
@@ -577,6 +578,15 @@ class DockView(QWidget):
         apply_minimum_width(self.view_tree, LIB_TAB_CONTENT_ZERO_MARGINS[0])
         self.view_tree.setHeaderHidden(True)
         self.view_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.view_tree.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tree_edge_scrollbar = QScrollBar(Qt.Vertical, self.view_tree)
+        self.tree_edge_scrollbar.setObjectName("DockTreeEdgeScrollBar")
+        self.tree_edge_scrollbar.setFixedWidth(scaled_px(5))
+        apply_style(self.tree_edge_scrollbar, scrollbar_style(left=True, extent=5))
+        self.tree_edge_scrollbar.valueChanged.connect(self._on_tree_edge_scroll)
+        native_tree_scrollbar = self.view_tree.verticalScrollBar()
+        native_tree_scrollbar.valueChanged.connect(self._sync_tree_edge_scrollbar)
+        native_tree_scrollbar.rangeChanged.connect(self._sync_tree_edge_scrollbar)
         self.view_tree.set_read_only_discovery(True)
         self.view_tree.play_requested.connect(lambda target: self.playRequested.emit(target))
         self.view_tree.similarity_requested.connect(lambda target: self.similarityRequested.emit(target))
@@ -702,6 +712,23 @@ class DockView(QWidget):
         header.setStretchLastSection(True)
         self.view_tree.setColumnWidth(0, max(1, self.view_tree.viewport().width()))
         self.view_tree.horizontalScrollBar().setValue(0)
+        self._sync_tree_edge_scrollbar()
+
+    def _sync_tree_edge_scrollbar(self, *_args) -> None:
+        source = self.view_tree.verticalScrollBar()
+        should_show = source.maximum() > source.minimum()
+        blocked = self.tree_edge_scrollbar.blockSignals(True)
+        self.tree_edge_scrollbar.setGeometry(0, 0, scaled_px(5), self.view_tree.height())
+        self.tree_edge_scrollbar.setRange(source.minimum(), source.maximum())
+        self.tree_edge_scrollbar.setPageStep(source.pageStep())
+        self.tree_edge_scrollbar.setSingleStep(source.singleStep())
+        self.tree_edge_scrollbar.setValue(source.value())
+        self.tree_edge_scrollbar.setVisible(should_show)
+        self.tree_edge_scrollbar.raise_()
+        self.tree_edge_scrollbar.blockSignals(blocked)
+
+    def _on_tree_edge_scroll(self, value: int) -> None:
+        self.view_tree.verticalScrollBar().setValue(value)
 
 
     def _on_type_clicked(self, _button):
@@ -894,6 +921,8 @@ class DockView(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if hasattr(self, "tree_edge_scrollbar"):
+            self._sync_tree_edge_scrollbar()
         if hasattr(self, "hover_title_strip"):
             self._position_chrome()
         if self._view_mode == "map":

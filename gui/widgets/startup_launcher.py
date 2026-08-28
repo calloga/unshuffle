@@ -31,18 +31,32 @@ from gui.utils.history import load_session_sources
 from gui.utils.styles import ColorPalette, make_qcolor, scaled_px, set_zoom_percent, sync_color_palette
 
 
+def _normalized_root(root: str) -> str:
+    text = str(root or "").strip()
+    if not text:
+        return ""
+    try:
+        normalized = Path(text).resolve().as_posix().lower()
+    except OSError:
+        normalized = Path(text).as_posix().lower()
+    return normalized.rstrip("/")
+
+
 def _normalized_root_tuple(roots: tuple[str, ...]) -> tuple[str, ...]:
-    result = []
+    return tuple(normalized for root in roots if (normalized := _normalized_root(root)))
+
+
+def _unique_roots(roots: list[str]) -> list[str]:
+    unique = []
+    seen = set()
     for root in roots:
         text = str(root or "").strip()
-        if not text:
+        identity = _normalized_root(text)
+        if not identity or identity in seen:
             continue
-        try:
-            normalized = Path(text).resolve().as_posix().lower()
-        except OSError:
-            normalized = Path(text).as_posix().lower()
-        result.append(normalized.rstrip("/"))
-    return tuple(result)
+        seen.add(identity)
+        unique.append(text)
+    return unique
 
 
 @dataclass(frozen=True)
@@ -94,6 +108,7 @@ class StartupLauncherDialog(QDialog):
         self._initial_roots: tuple[str, ...] = ()
         self._request: StartupLaunchRequest | None = None
         self._new_session_requested = False
+        self._roots_edited = False
         self._theme_is_dark = True
         self.setWindowTitle("Unshuffle Launcher")
         apply_app_icon(self)
@@ -341,7 +356,7 @@ class StartupLauncherDialog(QDialog):
         return [last_source] if last_source else []
 
     def _set_roots(self, roots: list[str]) -> None:
-        self._roots_values = [root for root in roots if root.strip()]
+        self._roots_values = _unique_roots(roots)
         self._render_roots()
         self._refresh_summary()
 
@@ -391,14 +406,18 @@ class StartupLauncherDialog(QDialog):
     def _add_folder(self) -> bool:
         start = self._roots()[0] if self._roots() else str(self.settings.value("last_scan_source", "") or "")
         folder = QFileDialog.getExistingDirectory(self, "Add Folder", start)
-        if folder and folder not in self._roots():
+        existing_roots = set(_normalized_root_tuple(self._roots()))
+        if folder and _normalized_root(folder) not in existing_roots:
             self._roots_values.append(folder)
+            self._roots_edited = True
             self._render_roots()
             self._refresh_summary()
             return True
         return False
 
     def _remove_root(self, root: str) -> None:
+        if root in self._roots_values:
+            self._roots_edited = True
         self._roots_values = [value for value in self._roots_values if value != root]
         self._render_roots()
         self._refresh_summary()
@@ -407,15 +426,18 @@ class StartupLauncherDialog(QDialog):
         previous_roots = list(self._roots_values)
         previous_initial_roots = self._initial_roots
         previous_selected_session_id = self._selected_session_id
+        previous_roots_edited = self._roots_edited
         self._mark_new_session()
         if not self._add_folder():
             self._new_session_requested = False
             self._selected_session_id = previous_selected_session_id
             self._initial_roots = previous_initial_roots
+            self._roots_edited = previous_roots_edited
             self._set_roots(previous_roots)
 
     def _mark_new_session(self) -> None:
         self._new_session_requested = True
+        self._roots_edited = True
         self._selected_session_id = ""
         self._initial_roots = ()
         self._set_roots([])
@@ -443,7 +465,11 @@ class StartupLauncherDialog(QDialog):
             mode = "empty"
             target = ""
             session_id = ""
-        elif _normalized_root_tuple(roots) == _normalized_root_tuple(self._initial_roots) and session_id:
+        elif (
+            not self._roots_edited
+            and _normalized_root_tuple(roots) == _normalized_root_tuple(self._initial_roots)
+            and session_id
+        ):
             mode = "restore"
         else:
             mode = "refresh"
@@ -455,6 +481,7 @@ class StartupLauncherDialog(QDialog):
             "selected_session_id": self._selected_session_id,
             "effective_session_id": session_id,
             "new_session_requested": self._new_session_requested,
+            "roots_edited": self._roots_edited,
         }
         logging.info(
             "Startup launcher request resolved.",

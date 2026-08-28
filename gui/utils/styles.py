@@ -245,7 +245,7 @@ def sidebar_scroll_style(*, left: bool = False) -> str:
     )
 
 
-def scrollbar_style(*, left: bool = False) -> str:
+def scrollbar_style(*, left: bool = False, extent: int = 8) -> str:
     left_rules = (
         "QScrollBar:vertical { subcontrol-position: left; }"
         if left
@@ -261,13 +261,13 @@ def scrollbar_style(*, left: bool = False) -> str:
         )
     )
     return (
-        f"QScrollBar:vertical {{ background: transparent; width: {scaled_px(8)}px; margin: 0; }}"
+        f"QScrollBar:vertical {{ background: transparent; width: {scaled_px(extent)}px; margin: 0; }}"
         f"QScrollBar::handle:vertical {{ background: {ColorPalette.BG_SCROLLBAR_HANDLE}; min-height: {scaled_px(28)}px; "
         f"{vertical_radius} }}"
         f"QScrollBar::handle:vertical:hover {{ background: {ColorPalette.BORDER_ACCENT}; }}"
         "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        f"QScrollBar:horizontal {{ background: transparent; height: {scaled_px(8)}px; margin: 0; }}"
+        f"QScrollBar:horizontal {{ background: transparent; height: {scaled_px(extent)}px; margin: 0; }}"
         f"QScrollBar::handle:horizontal {{ background: {ColorPalette.BG_SCROLLBAR_HANDLE}; min-width: {scaled_px(28)}px; "
         f"border-top-left-radius: 0; border-top-right-radius: 0; "
         f"border-bottom-left-radius: {scaled_px(4)}px; border-bottom-right-radius: {scaled_px(4)}px; }}"

@@ -15,6 +15,21 @@ from unshuffle.core import PlanRecord
 
 
 class TableShortcutTests(unittest.TestCase):
+    def test_disabled_animated_button_does_not_hover_like_an_action(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.buttons import AnimatedIconButton
+
+        app = QApplication.instance() or QApplication([])
+        button = AnimatedIconButton("")
+        button.setEnabled(False)
+        button.enterEvent(QEvent(QEvent.Enter))
+
+        self.assertEqual(button.hover_offset, 0)
+        self.assertEqual(button.cursor().shape(), Qt.ArrowCursor)
+        self.assertEqual(button.alpha_mult, button.DISABLED_OPACITY)
+
     def test_column_resize_rebalances_with_visual_neighbor(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtGui import QUndoStack
@@ -173,6 +188,20 @@ class TableShortcutTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_drag_fill_supports_every_editable_classification_column(self):
+        from gui.views.staging_table import StagingTableView
+
+        self.assertEqual(
+            StagingTableView._fillable_columns(),
+            {
+                StagingColumn.PACK,
+                StagingColumn.CATEGORY,
+                StagingColumn.SUBCATEGORY,
+                StagingColumn.TAGS,
+                StagingColumn.TYPE,
+            },
+        )
+
     def test_pack_drag_fill_allows_fill_when_candidate_metadata_is_missing(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtWidgets import QApplication
@@ -219,6 +248,41 @@ class TableShortcutTests(unittest.TestCase):
         view.mouseMoveEvent(move_event)
 
         self.assertEqual(view.current_drag_row, 1)
+
+    def test_subcategory_drag_fill_stops_before_incompatible_category(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+        records = []
+        for index, (category, subcategory) in enumerate(
+            (("Claps", "Generic"), ("Claps", "Group"), ("Melodics", "Electronic"))
+        ):
+            record = mock.Mock(spec=PlanRecord)
+            record.pack = "Pack"
+            record.category = category
+            record.subcategory = subcategory
+            record.tags = []
+            record.audio_type = "Oneshots"
+            record.source_path = Path(f"Source/{index}.wav")
+            record.confidence = "0.90"
+            record.evidence = {}
+            record.is_manual = False
+            record.is_preserved = False
+            record.pack_candidates = []
+            records.append(record)
+
+        source_model = StagingTableModel(records, undo_stack=None, sync_callback=None)
+        proxy_model = MultiFilterProxyModel()
+        proxy_model.setSourceModel(source_model)
+        view = StagingTableView()
+        view.setModel(proxy_model)
+        view.fill_start_idx = proxy_model.index(0, StagingColumn.SUBCATEGORY)
+        view.is_filling = True
+        view.current_drag_row = 0
+        view._fill_limits = {-1: 0, 1: 0}
+
+        self.assertEqual(view._fill_target_row(2, "Generic"), 1)
 
     def test_plain_drag_selects_cell_rectangle_without_ctrl_export(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

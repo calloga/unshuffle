@@ -9,6 +9,7 @@ from PySide6.QtCore import QThread, Signal
 from unshuffle.core.paths import DB_FILE_NAME, SYSTEM_FOLDER_NAME
 from unshuffle.core.progress import PhaseProgress
 from unshuffle.core.resource_monitor import ResourceMonitor
+from unshuffle.diagnostics import write_launcher_event_log
 from ..models.library_tree import active_tree_levels_for_sort, build_tree_payload
 from .search_engine import SearchEngine
 
@@ -29,6 +30,16 @@ def safe_gc_run(func):
 def _streaming_scan_enabled() -> bool:
     value = str(os.getenv("UNSHUFFLE_STREAMING_SCAN", "1") or "1").strip().lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _report_scan_timing(engine, timing_summary: dict[str, object]) -> None:
+    try:
+        log_timing = getattr(engine, "log", None)
+        if callable(log_timing):
+            log_timing(f"Scan performance timing: {timing_summary}")
+    except Exception:
+        logging.debug("Could not write scan performance timing to the session log.", exc_info=True)
+    write_launcher_event_log("scan-performance-timing", **timing_summary)
 
 
 def _db_native_scan_available(db_conn, *, append: bool) -> bool:
@@ -170,7 +181,14 @@ class ScanWorker(QThread):
         self.current_records = current_records or ()
 
     def run(self):
-        monitor = ResourceMonitor("scan")
+        operation_kind = (
+            "refresh"
+            if self.session_phase == "Refreshing Session"
+            else "append"
+            if self.append
+            else "fresh"
+        )
+        monitor = ResourceMonitor(f"scan-{operation_kind}")
         monitor.start()
         try:
             def report_progress(payload):
@@ -380,9 +398,10 @@ class ScanWorker(QThread):
                     logging.debug("Could not persist failed scan state.", exc_info=True)
             self.error.emit(str(e))
         finally:
-            monitor.stop()
             if getattr(self.engine, "progress_callback", None):
                 self.engine.progress_callback = None
+            timing_summary = monitor.stop()
+            _report_scan_timing(self.engine, timing_summary)
 
 class CommitWorker(QThread):
     """Executes the planned file operations (move/copy)."""

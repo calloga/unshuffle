@@ -111,6 +111,7 @@ def cleanup_empty_target_folders(
             current = current.parent
 
     cleanup_failures = []
+    cleaned_count = 0
     for folder in sorted(list(all_affected_folders), key=lambda path: len(path.parts), reverse=True):
         try:
             if folder.exists() and _is_effectively_empty(folder):
@@ -132,8 +133,10 @@ def cleanup_empty_target_folders(
                         else:
                             os.remove(item.path)
                 os.rmdir(folder)
-                log(f"  - Cleaned empty category: {folder.name}")
+                cleaned_count += 1
         except OSError as exc:
             cleanup_failures.append(str(folder))
             log(f"  ! Cleanup Error for {folder}: {exc}", level=logging.WARNING)
+    if cleaned_count:
+        log(f"  - Cleaned {cleaned_count} empty categor{'y' if cleaned_count == 1 else 'ies'}.")
     return cleanup_failures

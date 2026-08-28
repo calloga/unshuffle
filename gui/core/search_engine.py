@@ -98,26 +98,50 @@ class SearchEngine(QObject):
         ``|`` are OR separators. Quoted text is kept intact.
         """
         tokens = cls._split_query_tokens(query_text)
-        groups = [[]]
-        current = []
-        for token in tokens:
-            marker = token.lower()
-            if marker in {"or", "|"}:
-                if current:
-                    groups[-1].append(" ".join(current).strip())
-                    current = []
-                if groups[-1]:
-                    groups.append([])
-                continue
-            if marker in {"and", ",", "&"}:
-                if current:
-                    groups[-1].append(" ".join(current).strip())
-                    current = []
-                continue
-            current.append(token)
-        if current:
-            groups[-1].append(" ".join(current).strip())
-        return [group for group in groups if group]
+        position = 0
+
+        def parse_primary() -> list[list[str]]:
+            nonlocal position
+            if position < len(tokens) and tokens[position] == "(":
+                position += 1
+                groups = parse_or()
+                if position < len(tokens) and tokens[position] == ")":
+                    position += 1
+                return groups
+            words = []
+            while position < len(tokens):
+                token = tokens[position]
+                if token in {"(", ")", ",", "|", "&"} or token.lower() in {"and", "or"}:
+                    break
+                words.append(token)
+                position += 1
+            term = " ".join(words).strip()
+            return [[term]] if term else []
+
+        def parse_and() -> list[list[str]]:
+            nonlocal position
+            groups = parse_primary()
+            while position < len(tokens):
+                marker = tokens[position].lower()
+                if marker not in {"and", ",", "&"}:
+                    break
+                position += 1
+                right = parse_primary()
+                groups = [left_group + right_group for left_group in groups for right_group in right]
+            return groups
+
+        def parse_or() -> list[list[str]]:
+            nonlocal position
+            groups = parse_and()
+            while position < len(tokens):
+                marker = tokens[position].lower()
+                if marker not in {"or", "|"}:
+                    break
+                position += 1
+                groups.extend(parse_and())
+            return groups
+
+        return [group for group in parse_or() if group]
 
     @classmethod
     def active_prefixes(cls, query_text: str) -> set[str]:
@@ -183,7 +207,7 @@ class SearchEngine(QObject):
                 in_quote = not in_quote
                 current.append(ch)
                 continue
-            if not in_quote and ch in {",", "|", "&"}:
+            if not in_quote and ch in {",", "|", "&", "(", ")"}:
                 if current:
                     tokens.append("".join(current).strip())
                     current = []

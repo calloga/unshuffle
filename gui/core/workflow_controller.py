@@ -254,7 +254,11 @@ class WorkflowController(QObject):
             self.app.coherence_controller.clear_state()
 
         if not append or not self._engine:
-            if not append and getattr(self.app, "tree_organization_controller", None):
+            if (
+                not append
+                and not str(resume_session_id or "").strip()
+                and getattr(self.app, "tree_organization_controller", None)
+            ):
                 self.app.tree_organization_controller.disable_profile(refresh=False)
             if not append:
                 self._ensure_live_session_model()

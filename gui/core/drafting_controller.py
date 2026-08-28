@@ -106,6 +106,8 @@ class DraftingController(QObject):
         if not self._show_save_confirm_dialog(summary_text, detail_rows):
             return
 
+        saved_updates = self._saved_draft_undo_updates()
+        saved_profile_before = self._draft_profile_original if self._draft_profile_active else None
         from ..utils import ui_helpers
         self._saving_reorg_draft = True
         learned_count = 0
@@ -116,6 +118,12 @@ class DraftingController(QObject):
             learned_count = self._learn_category_corrections_from_draft()
             state_helpers.rewrite_staging_from_model(self.app)
             self._save_draft_profile_if_needed()
+            tree_controller = getattr(self.app, "tree_organization_controller", None)
+            saved_profile_after = (
+                getattr(tree_controller, "active_profile", None)
+                if saved_profile_before is not None
+                else None
+            )
             self.reorg_manager.clear()
             self._draft_profile_original = None
             self._draft_profile_active = False
@@ -124,6 +132,15 @@ class DraftingController(QObject):
             undo_stack = getattr(self.app, "undo_stack", None)
             if undo_stack is not None:
                 undo_stack.clear()
+                if saved_updates or saved_profile_before is not None:
+                    undo_stack.push(
+                        SavedDraftUndoCommand(
+                            self,
+                            saved_updates,
+                            profile_before=saved_profile_before,
+                            profile_after=saved_profile_after,
+                        )
+                    )
             self.draftChanged.emit()
             self.app.footer.set_reorg_draft_state("", False)
             self.app.footer.log("<b>Draft:</b> saved")
@@ -131,6 +148,17 @@ class DraftingController(QObject):
             ui_helpers.set_ui_busy(self.app, False)
             self._saving_reorg_draft = False
         QTimer.singleShot(0, lambda: self._refresh_after_saved_draft(learned_count))
+
+    def _saved_draft_undo_updates(self) -> list[tuple[Any, Any, Any, Any]]:
+        """Collapse the current draft into one reversible post-save operation."""
+        if not self.app.model:
+            return []
+        updates = []
+        for rec, col, old_value in self.reorg_manager.originals.values():
+            new_value = self.app.model._get_record_value(rec, col)
+            if old_value != new_value:
+                updates.append((rec, col, old_value, new_value))
+        return updates
 
     def _invalidate_pending_impact_analysis(self) -> None:
         self._reorg_impact_timer.stop()
@@ -579,6 +607,13 @@ class DraftingController(QObject):
         }
 
         target_fields = target_fields or {}
+        profile_before = getattr(
+            getattr(self.app, "tree_organization_controller", None),
+            "active_profile",
+            None,
+        )
+        draft_profile_original_before = self._draft_profile_original
+        draft_profile_active_before = self._draft_profile_active
         profile_changed = self._stage_profile_node_move(
             move_profile_node_id,
             target_fields,
@@ -586,11 +621,37 @@ class DraftingController(QObject):
         )
         if profile_changed:
             self._partial_refresh = False
+        profile_after = getattr(
+            getattr(self.app, "tree_organization_controller", None),
+            "active_profile",
+            None,
+        )
 
         if not normalized and not profile_changed:
             return False
 
         undo_stack = getattr(self.app, "undo_stack", None)
+        if profile_changed and undo_stack is not None:
+            self._set_draft_profile_snapshot(
+                profile_before,
+                original=draft_profile_original_before,
+                active=draft_profile_active_before,
+                refresh=False,
+            )
+            command = DraftTreeReorgCommand(
+                self,
+                undo_updates,
+                action_label,
+                profile_before=profile_before,
+                profile_after=profile_after,
+                original_before=draft_profile_original_before,
+                original_after=self._draft_profile_original or profile_before,
+                active_before=draft_profile_active_before,
+                learn=learn,
+                mark_semantic_override=mark_semantic_override,
+            )
+            undo_stack.push(command)
+            return not command.isObsolete()
         if normalized and not profile_changed and not move_profile_node_id and undo_stack is not None:
             command = DraftEditCommand(
                 self,
@@ -644,6 +705,25 @@ class DraftingController(QObject):
             self.app.footer.log("<b>Draft custom tree:</b> placement staged.")
             self.app.footer.set_status("Custom tree placement staged.")
         return True
+
+    def _set_draft_profile_snapshot(
+        self,
+        profile: TreeOrganizationProfile | None,
+        *,
+        original: TreeOrganizationProfile | None,
+        active: bool,
+        refresh: bool = True,
+    ) -> None:
+        tree_controller = getattr(self.app, "tree_organization_controller", None)
+        if tree_controller is not None:
+            tree_controller.active_profile = profile
+            if hasattr(tree_controller, "_sync_active_profile"):
+                tree_controller._sync_active_profile(refresh=False)
+        self._draft_profile_original = original
+        self._draft_profile_active = bool(active)
+        self.draftChanged.emit()
+        if refresh and getattr(self.app, "view_controller", None):
+            self.app.view_controller.update_library_views(tree_delay_ms=0)
 
     def _mark_semantic_overrides(
         self,
@@ -1309,3 +1389,118 @@ class DraftEditCommand(QUndoCommand):
             self._applied_once = True
         elif not self._applied_once:
             self.setObsolete(True)
+
+
+class DraftTreeReorgCommand(QUndoCommand):
+    """Undo one tree drop as a single record-and-profile draft operation."""
+
+    def __init__(
+        self,
+        controller: DraftingController,
+        updates,
+        text: str,
+        *,
+        profile_before: TreeOrganizationProfile | None,
+        profile_after: TreeOrganizationProfile | None,
+        original_before: TreeOrganizationProfile | None,
+        original_after: TreeOrganizationProfile | None,
+        active_before: bool,
+        learn: bool,
+        mark_semantic_override: bool,
+    ):
+        super().__init__(text or "Tree Reorganize")
+        self.controller = controller
+        self.updates = list(updates or [])
+        self.profile_before = profile_before
+        self.profile_after = profile_after
+        self.original_before = original_before
+        self.original_after = original_after
+        self.active_before = active_before
+        self.learn = learn
+        self.mark_semantic_override = mark_semantic_override
+        self._applied_once = False
+
+    def _apply(self, *, redo: bool) -> bool:
+        updates = [
+            (rec, col, new_val if redo else old_val)
+            for rec, col, old_val, new_val in self.updates
+        ]
+        if updates:
+            applied = self.controller._apply_draft_updates(
+                updates,
+                undo_text=self.text(),
+                push_undo=False,
+                learn=self.learn,
+                mark_semantic_override=self.mark_semantic_override,
+                operation_title="Updating Library Layout",
+            )
+            if not applied:
+                return False
+        self.controller._set_draft_profile_snapshot(
+            self.profile_after if redo else self.profile_before,
+            original=self.original_after if redo else self.original_before,
+            active=True if redo else self.active_before,
+        )
+        return True
+
+    def undo(self) -> None:
+        self._apply(redo=False)
+
+    def redo(self) -> None:
+        if self._apply(redo=True):
+            self._applied_once = True
+        elif not self._applied_once:
+            self.setObsolete(True)
+
+
+class SavedDraftUndoCommand(QUndoCommand):
+    """Keep one saved draft reversible without pretending it is still pending."""
+
+    def __init__(
+        self,
+        controller: DraftingController,
+        updates,
+        *,
+        profile_before: TreeOrganizationProfile | None,
+        profile_after: TreeOrganizationProfile | None,
+    ):
+        super().__init__("Saved Draft")
+        self.controller = controller
+        self.updates = list(updates or [])
+        self.profile_before = profile_before
+        self.profile_after = profile_after
+        self._skip_initial_redo = True
+
+    def _apply_records(self, *, redo: bool) -> None:
+        if not self.updates:
+            return
+        self.controller._apply_draft_updates(
+            [
+                (rec, col, new_value if redo else old_value)
+                for rec, col, old_value, new_value in self.updates
+            ],
+            undo_text=self.text(),
+            push_undo=False,
+            operation_title="Updating Library Layout",
+        )
+
+    def undo(self) -> None:
+        self._apply_records(redo=False)
+        if self.profile_before is not None:
+            self.controller._set_draft_profile_snapshot(
+                self.profile_before,
+                original=self.profile_after,
+                active=True,
+            )
+
+    def redo(self) -> None:
+        if self._skip_initial_redo:
+            self._skip_initial_redo = False
+            return
+        self._apply_records(redo=True)
+        if self.profile_before is not None:
+            self.controller._set_draft_profile_snapshot(
+                self.profile_after,
+                original=None,
+                active=False,
+            )

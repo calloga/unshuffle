@@ -141,8 +141,8 @@ class StagingTableView(QTableView):
         self._preserve_selection_for_drag = False
         self._drag_started = False
         self._selection_drag_anchor: QModelIndex | None = None
-        self._pack_fill_limits = {-1: -1, 1: -1}
-        self._pack_fill_blocked: dict[int, int] = {}
+        self._fill_limits = {-1: -1, 1: -1}
+        self._fill_blocked: dict[int, int] = {}
         self.setSortingEnabled(False)
         self.horizontalHeader().setSectionsClickable(True)
         self.horizontalHeader().setSectionsMovable(True)
@@ -157,6 +157,16 @@ class StagingTableView(QTableView):
     def _source_model(self):
         model = self.model()
         return model.sourceModel() if isinstance(model, QSortFilterProxyModel) else model
+
+    @staticmethod
+    def _fillable_columns():
+        return {
+            StagingColumn.PACK,
+            StagingColumn.CATEGORY,
+            StagingColumn.SUBCATEGORY,
+            StagingColumn.TAGS,
+            StagingColumn.TYPE,
+        }
 
     def _to_source_index(self, index):
         model = self.model()
@@ -245,21 +255,14 @@ class StagingTableView(QTableView):
             pos = event.position().toPoint()
             curr_idx = self.indexAt(pos)
             if curr_idx.isValid() and curr_idx.column() == self.fill_start_idx.column():
-                if curr_idx.column() == StagingColumn.PACK:
-                    val = self.model().data(self.fill_start_idx, Qt.EditRole)
-                    self.current_drag_row = self._pack_fill_target_row(curr_idx.row(), val)
-                else:
-                    self.current_drag_row = curr_idx.row()
+                val = self.model().data(self.fill_start_idx, Qt.EditRole)
+                self.current_drag_row = self._fill_target_row(curr_idx.row(), val)
             self.viewport().update()
             return
             
         pos = event.position().toPoint()
         idx = self.indexAt(pos)
-        fillable_cols = [
-            StagingColumn.PACK, 
-            StagingColumn.CATEGORY, 
-            StagingColumn.TAGS
-        ]
+        fillable_cols = self._fillable_columns()
         
         if idx.isValid() and idx.column() in fillable_cols:
             if self._get_handle_rect(idx).contains(pos):
@@ -294,18 +297,14 @@ class StagingTableView(QTableView):
         pos = event.position().toPoint()
         idx = self.indexAt(pos)
         self._drag_started = False
-        fillable_cols = [
-            StagingColumn.PACK, 
-            StagingColumn.CATEGORY, 
-            StagingColumn.TAGS
-        ]
+        fillable_cols = self._fillable_columns()
         
         if idx.isValid() and idx.column() in fillable_cols and self._get_handle_rect(idx).contains(pos):
             self.is_filling = True
             self.fill_start_idx = idx
             self.current_drag_row = idx.row()
-            self._pack_fill_limits = {-1: idx.row(), 1: idx.row()}
-            self._pack_fill_blocked.clear()
+            self._fill_limits = {-1: idx.row(), 1: idx.row()}
+            self._fill_blocked.clear()
             self._selection_drag_anchor = None
             return
         
@@ -369,35 +368,67 @@ class StagingTableView(QTableView):
                     source_model.apply_bulk_updates(updates, f"Fill {val}")
             self.viewport().update()
             self.setCursor(Qt.CursorShape.ArrowCursor)
-            self._pack_fill_blocked.clear()
+            self._fill_blocked.clear()
             return
         self._preserve_selection_for_drag = False
         self._drag_started = False
         self._selection_drag_anchor = None
         super().mouseReleaseEvent(event)
 
-    def _pack_fill_target_row(self, requested_row: int, value) -> int:
+    def _fill_target_row(self, requested_row: int, value) -> int:
         if self.fill_start_idx is None:
             return requested_row
         start_row = self.fill_start_idx.row()
         step = 1 if requested_row >= start_row else -1
-        blocked_row = self._pack_fill_blocked.get(step)
+        blocked_row = self._fill_blocked.get(step)
         if blocked_row is not None and (requested_row - blocked_row) * step >= 0:
             return blocked_row - step
 
-        validated_row = self._pack_fill_limits.get(step, start_row)
+        validated_row = self._fill_limits.get(step, start_row)
         if (requested_row - validated_row) * step <= 0:
             return requested_row
 
         for row in range(validated_row + step, requested_row + step, step):
             if row < 0 or row >= self.model().rowCount():
                 break
-            candidates = self.model().data(self.model().index(row, StagingColumn.PACK), Qt.UserRole)
-            if candidates and value not in [candidate[0] for candidate in candidates]:
-                self._pack_fill_blocked[step] = row
+            if not self._fill_value_is_valid(row, self.fill_start_idx.column(), value):
+                self._fill_blocked[step] = row
                 return row - step
-            self._pack_fill_limits[step] = row
-        return self._pack_fill_limits[step]
+            self._fill_limits[step] = row
+        return self._fill_limits[step]
+
+    def _fill_value_is_valid(self, proxy_row: int, column: int, value) -> bool:
+        """Return whether a classification value is meaningful for one row."""
+        proxy_index = self.model().index(proxy_row, column)
+        source_index = self._to_source_index(proxy_index)
+        source_model = self._source_model()
+        if source_model is None or not source_index.isValid() or not hasattr(source_model, "record"):
+            return True
+        record = source_model.record(source_index.row())
+
+        if column == StagingColumn.PACK:
+            candidates = getattr(record, "pack_candidates", None)
+            return not candidates or value in {
+                candidate[0] if isinstance(candidate, (tuple, list)) else candidate
+                for candidate in candidates
+            }
+        if column == StagingColumn.SUBCATEGORY:
+            from unshuffle.core.constants import SUB_TAXONOMY_MAP
+
+            category = str(getattr(record, "category", "") or "")
+            valid = {
+                candidate
+                for candidate in SUB_TAXONOMY_MAP.get(category, {}).values()
+                if candidate and candidate != "no-sub"
+            }
+            return not value or value in valid
+        if column in {StagingColumn.CATEGORY, StagingColumn.TYPE}:
+            from gui.widgets.library_filters import category_is_valid_for_audio_type
+
+            category = str(value if column == StagingColumn.CATEGORY else getattr(record, "category", "") or "")
+            audio_type = str(value if column == StagingColumn.TYPE else getattr(record, "audio_type", "") or "")
+            return not category or not audio_type or category_is_valid_for_audio_type(category, audio_type)
+        return True
 
     def _select_drag_range(self, start: QModelIndex, end: QModelIndex, *, additive: bool = False) -> None:
         selection_model = self.selectionModel()
@@ -426,11 +457,7 @@ class StagingTableView(QTableView):
             return
 
         selection = self.selectionModel().currentIndex()
-        fillable_cols = [
-            StagingColumn.PACK, 
-            StagingColumn.CATEGORY, 
-            StagingColumn.TAGS
-        ]
+        fillable_cols = self._fillable_columns()
 
         painter = QPainter(self.viewport())
         try:

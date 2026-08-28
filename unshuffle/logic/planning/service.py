@@ -44,6 +44,7 @@ from ...persistence import (
 
 DEFAULT_EXTRACTOR_WORKERS = 8
 DEFAULT_EXTRACTOR_BATCH_SIZE = 512
+FIRST_EXTRACTOR_BATCH_SIZE = 32
 CACHE_UPDATE_BATCH_SIZE = 256
 
 
@@ -101,6 +102,23 @@ def _extractor_batch_size(total: int) -> int:
 def _chunks(items: List[Path], size: int) -> Iterator[List[Path]]:
     for index in range(0, len(items), size):
         yield items[index : index + size]
+
+
+def _responsive_extractor_chunks(items: List[Path], size: int) -> Iterator[List[Path]]:
+    """Yield one small batch so progress starts without shrinking steady-state batches."""
+    first_size = min(len(items), size, FIRST_EXTRACTOR_BATCH_SIZE)
+    if first_size:
+        yield items[:first_size]
+    for index in range(first_size, len(items), size):
+        yield items[index : index + size]
+
+
+def _responsive_extractor_batch_count(total: int, size: int) -> int:
+    if total <= 0:
+        return 0
+    first_size = min(total, size, FIRST_EXTRACTOR_BATCH_SIZE)
+    remaining = total - first_size
+    return 1 + ((remaining + size - 1) // size)
 
 
 def _ancestor_candidates(
@@ -311,8 +329,8 @@ def _analyze_db_audio(
         paths = list(extract_rows)
         if paths:
             batch_size = _extractor_batch_size(len(paths))
-            chunks = _chunks(paths, batch_size)
-            batch_count = (len(paths) + batch_size - 1) // batch_size
+            chunks = _responsive_extractor_chunks(paths, batch_size)
+            batch_count = _responsive_extractor_batch_count(len(paths), batch_size)
             workers = _extractor_worker_count(batch_count)
             cache_updates = []
             analysis_updates = []
@@ -354,7 +372,7 @@ def _analyze_db_audio(
                                     tag or "analysis_unavailable",
                                     sim_engine.extraction_failure_message(path),
                                 ))
-                            if tag in {"Empty", "Silent"} and file_hash:
+                            if tag in {"Empty", "Silent", "Corrupted"} and file_hash:
                                 cache_updates.append((
                                     file_hash,
                                     path,
@@ -860,8 +878,8 @@ def run_plan(
                 duplicate_extractions_skipped,
             )
             batch_size = _extractor_batch_size(len(to_extract))
-            batch_count = (len(to_extract) + batch_size - 1) // batch_size
-            batches = _chunks(to_extract, batch_size)
+            batch_count = _responsive_extractor_batch_count(len(to_extract), batch_size)
+            batches = _responsive_extractor_chunks(to_extract, batch_size)
             max_workers = _extractor_worker_count(batch_count)
             max_pending = max_workers * 2
             logger.info("Audio feature analysis")
@@ -938,7 +956,7 @@ def run_plan(
                                 for result_path in dependent_paths:
                                     analysis_failure_tags[result_path] = failure_tag
                                     analysis_statuses[result_path] = failure_tag
-                                if db and failure_tag in {"Empty", "Silent"}:
+                                if db and failure_tag in {"Empty", "Silent", "Corrupted"}:
                                     node = context.nodes.get(path)
                                     if node and node.hash:
                                         stat = path.stat()

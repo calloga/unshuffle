@@ -1252,6 +1252,25 @@ def test_db_backed_table_uses_visible_positions_and_lightweight_rows(tmp_path):
         db.close()
 
 
+def test_large_query_id_sets_use_single_json_bind_parameter(tmp_path):
+    db = UnshuffleDB(tmp_path / "large-query.db")
+    try:
+        store = StagingSessionStore(db, "session")
+        query = StagingQuery(
+            matched_ids=frozenset(range(1, 12001)),
+            similarity_rows=frozenset(range(6000, 18001)),
+        )
+
+        where, params = store._where(query)
+
+        assert where.count("json_each(?)") == 2
+        assert len(params) == 3
+        assert len(json.loads(params[1])) == 12000
+        assert len(json.loads(params[2])) == 12001
+    finally:
+        db.close()
+
+
 def test_db_backed_model_updates_rows_without_rewrite(tmp_path):
     db = UnshuffleDB(tmp_path / "test.db")
     try:
@@ -1669,5 +1688,27 @@ def test_db_backed_cleanup_removes_deleted_paths_without_hydrating_records(tmp_p
         assert removed == 1
         assert model.rowCount() == 1
         assert db.get_staging_records("session")[0]["source_path"] == "D:/Samples/Pack/sample_0.wav"
+    finally:
+        db.close()
+
+
+def test_db_backed_cleanup_chunks_large_deleted_path_sets(tmp_path):
+    import sqlite3
+
+    db = UnshuffleDB(tmp_path / "test.db")
+    try:
+        db.register_session("session", Path("D:/Samples"), Path("D:/Target"), "pending")
+        rows = [_row(index) for index in range(1200)]
+        db.add_staging_records_bulk("session", rows)
+        model = DbBackedStagingTableModel(StagingSessionStore(db, "session"))
+        db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+
+        removed = workflow_model_cleanup.remove_deleted_paths(
+            model,
+            [Path(row[1]) for row in rows],
+        )
+
+        assert removed == 1200
+        assert model.rowCount() == 0
     finally:
         db.close()

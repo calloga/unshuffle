@@ -267,7 +267,8 @@ class StagingTableModel(QAbstractTableModel):
         if role == Qt.UserRole:
             if col == StagingColumn.CONFIDENCE:
                 return self.scores.get(row) or rec.confidence
-            return getattr(rec, "pack_candidates", None)
+            if col == StagingColumn.PACK:
+                return getattr(rec, "pack_candidates", None)
         return None
 
     def _classification_tooltip(self, rec: PlanRecord) -> str:
@@ -519,7 +520,7 @@ class StagingTableModel(QAbstractTableModel):
         rec = self.records[index.row()]
         if getattr(rec, "is_duplicate_shadow", False) is True:
             return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
-        if index.column() in [StagingColumn.PACK, StagingColumn.CATEGORY, StagingColumn.SUBCATEGORY, StagingColumn.TAGS]:
+        if index.column() in [StagingColumn.PACK, StagingColumn.CATEGORY, StagingColumn.SUBCATEGORY, StagingColumn.TAGS, StagingColumn.TYPE]:
             return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsEnabled
         return Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
 

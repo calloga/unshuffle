@@ -37,20 +37,31 @@ class ResourceMonitor:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started_at = 0.0
+        self._phase_changed_at = 0.0
+        self._stopped_at: float | None = None
         self._samples = 0
         self._peak_tree_rss = 0
         self._phase_peaks: dict[str, int] = defaultdict(int)
+        self._phase_durations: dict[str, float] = defaultdict(float)
 
     def set_phase(self, phase: str | None) -> None:
         if not phase:
             return
+        next_phase = str(phase)
         with self._phase_lock:
-            self._phase = str(phase)
+            if next_phase == self._phase:
+                return
+            now = time.monotonic()
+            if self._started_at > 0.0 and self._stopped_at is None:
+                self._phase_durations[self._phase] += max(0.0, now - self._phase_changed_at)
+                self._phase_changed_at = now
+            self._phase = next_phase
 
     def start(self) -> None:
         if self._thread is not None:
             return
         self._started_at = time.monotonic()
+        self._phase_changed_at = self._started_at
         self._thread = threading.Thread(
             target=self._run,
             name=f"unshuffle-{self.operation}-resources",
@@ -62,11 +73,24 @@ class ResourceMonitor:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=max(1.0, self.interval_seconds + 0.5))
+        with self._phase_lock:
+            if self._stopped_at is None:
+                self._stopped_at = time.monotonic()
+                if self._started_at > 0.0:
+                    self._phase_durations[self._phase] += max(
+                        0.0,
+                        self._stopped_at - self._phase_changed_at,
+                    )
+            stopped_at = self._stopped_at
         summary = {
             "operation": self.operation,
-            "elapsed_seconds": round(max(0.0, time.monotonic() - self._started_at), 3),
+            "elapsed_seconds": round(max(0.0, stopped_at - self._started_at), 3),
             "samples": self._samples,
             "peak_process_tree_mib": round(self._peak_tree_rss / (1024 * 1024), 3),
+            "phase_seconds": {
+                phase: round(seconds, 3)
+                for phase, seconds in sorted(self._phase_durations.items())
+            },
             "phase_peak_mib": {
                 phase: round(value / (1024 * 1024), 3)
                 for phase, value in sorted(self._phase_peaks.items())

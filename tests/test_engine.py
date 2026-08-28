@@ -7,6 +7,20 @@ from unshuffle.runtime.engine import RuntimeUnshuffler as Unshuffler
 from unshuffle.core import PlanRecord, get_file_hash
 from gui.core.workflow_records import build_result_summary
 
+
+def test_extractor_batches_start_small_then_return_to_throughput_size():
+    from unshuffle.logic.planning.service import (
+        _responsive_extractor_batch_count,
+        _responsive_extractor_chunks,
+    )
+
+    paths = [Path(f"sample-{index}.wav") for index in range(1200)]
+    batches = list(_responsive_extractor_chunks(paths, 512))
+
+    assert [len(batch) for batch in batches] == [32, 512, 512, 144]
+    assert _responsive_extractor_batch_count(len(paths), 512) == len(batches)
+
+
 class TestEngine(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.TemporaryDirectory()

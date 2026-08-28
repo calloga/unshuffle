@@ -133,7 +133,7 @@ class CacheStore(ABC):
                 FROM file_cache
                 WHERE hash IN ({placeholders})
                   AND feature_vector IS NULL
-                  AND analysis_status IN ('Empty', 'Silent')
+                  AND analysis_status IN ('Empty', 'Silent', 'Corrupted')
                   AND extractor_version = ?
                 """,
                 [*chunk, CURRENT_EXTRACTOR_VERSION],

@@ -46,16 +46,22 @@ def _delete_db_paths(model, deleted_paths: list[Path]) -> int | None:
     paths = [normalize_source_path_key(path) for path in deleted_paths]
     if not paths:
         return 0
-    placeholders = ", ".join("?" for _ in paths)
-    cursor = store.conn.execute(
-        f"""
-        DELETE FROM staging_records
-        WHERE session_id = ?
-          AND LOWER(REPLACE(source_path, '\\', '/')) IN ({placeholders})
-        """,
-        [store.session_id, *paths],
-    )
-    removed_count = int(getattr(cursor, "rowcount", 0) or 0)
+    removed_count = 0
+    # Keep well below SQLite's lowest commonly configured variable limit. The
+    # session id consumes one parameter in addition to the path parameters.
+    with store.conn:
+        for start in range(0, len(paths), 700):
+            chunk = paths[start : start + 700]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = store.conn.execute(
+                f"""
+                DELETE FROM staging_records
+                WHERE session_id = ?
+                  AND LOWER(REPLACE(source_path, '\\', '/')) IN ({placeholders})
+                """,
+                [store.session_id, *chunk],
+            )
+            removed_count += max(0, int(getattr(cursor, "rowcount", 0) or 0))
     _refresh_after_db_delete(model)
     return removed_count
 

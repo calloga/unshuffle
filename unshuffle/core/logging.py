@@ -6,6 +6,7 @@ from .paths import get_system_dir
 
 
 logger = logging.getLogger("unshuffle")
+logger.propagate = False
 
 
 def _resolve_log_level(log_level: str | int | None) -> int:

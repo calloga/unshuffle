@@ -11,6 +11,11 @@ def format_query_groups(groups: list[list[str]]) -> str:
     return " OR ".join(" AND ".join(terms) for terms in groups if terms)
 
 
+def _parenthesized_query(groups: list[list[str]]) -> str:
+    text = format_query_groups(groups)
+    return f"({text})" if len(groups) > 1 else text
+
+
 def combine_filter_queries(current: str, query: str, mode: str) -> str:
     current_groups = SearchEngine.parse_query_groups(current)
     query_groups = SearchEngine.parse_query_groups(query)
@@ -21,11 +26,7 @@ def combine_filter_queries(current: str, query: str, mode: str) -> str:
     if mode == "or":
         return format_query_groups([*current_groups, *query_groups])
     if mode == "and":
-        return format_query_groups([
-            [*current_group, *query_group]
-            for current_group in current_groups
-            for query_group in query_groups
-        ])
+        return f"{_parenthesized_query(current_groups)} AND {_parenthesized_query(query_groups)}"
     return format_query_groups(query_groups)
 
 

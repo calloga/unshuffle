@@ -1447,11 +1447,11 @@ class StagingSessionStore:
         where = " AND ".join(clauses)
         rows: dict[int, dict[str, Any]] = {}
         if priority:
-            placeholders = ", ".join("?" for _ in priority)
             cursor = self.conn.execute(
                 f"SELECT {', '.join(MAP_RECORD_COLUMNS)} FROM staging_records "
-                f"WHERE session_id = ? AND row_id IN ({placeholders})",
-                [self.session_id, *priority],
+                "WHERE session_id = ? AND row_id IN "
+                "(SELECT CAST(value AS INTEGER) FROM json_each(?))",
+                [self.session_id, json.dumps(priority)],
             )
             rows.update({int(row["row_id"]): dict(row) for row in cursor.fetchall()})
         remaining = max(0, int(limit) - len(rows))
@@ -1619,8 +1619,11 @@ class StagingSessionStore:
             if not ids:
                 clauses.append("0")
             else:
-                clauses.append(f"{column('row_id')} IN ({', '.join('?' for _ in ids)})")
-                params.extend(ids)
+                clauses.append(
+                    f"{column('row_id')} IN "
+                    "(SELECT CAST(value AS INTEGER) FROM json_each(?))"
+                )
+                params.append(json.dumps(ids))
         if query.audio_types is not None:
             values = sorted(str(value) for value in query.audio_types)
             if not values:
@@ -1658,8 +1661,11 @@ class StagingSessionStore:
             if not ids:
                 clauses.append("0")
             else:
-                clauses.append(f"{column('row_id')} IN ({', '.join('?' for _ in ids)})")
-                params.extend(ids)
+                clauses.append(
+                    f"{column('row_id')} IN "
+                    "(SELECT CAST(value AS INTEGER) FROM json_each(?))"
+                )
+                params.append(json.dumps(ids))
         return " AND ".join(clauses), params
 
     def _where_with_fields(self, fields: dict[str, str], query: StagingQuery | None = None) -> tuple[str, list[Any]]:

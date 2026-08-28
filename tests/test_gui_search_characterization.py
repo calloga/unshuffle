@@ -522,7 +522,7 @@ class SearchControllerConfidenceFilterTests(unittest.TestCase):
 
         controller.set_query.assert_called_once_with('category:"Kicks" AND tag:"warm"')
 
-    def test_and_filter_distributes_across_saved_filter_or_groups(self):
+    def test_and_filter_parenthesizes_saved_filter_or_groups(self):
         controller = SearchController(engine=None, model=None, proxy_model=mock.Mock(), parent=None)
         controller._current_query = 'source:"d:/samples"'
         controller.set_query = mock.Mock()
@@ -530,8 +530,7 @@ class SearchControllerConfidenceFilterTests(unittest.TestCase):
         controller.apply_filter('tag:"possibleduplicate" OR tag:"duplicate"', True, mode="and")
 
         controller.set_query.assert_called_once_with(
-            'source:"d:/samples" AND tag:"possibleduplicate" OR '
-            'source:"d:/samples" AND tag:"duplicate"'
+            'source:"d:/samples" AND (tag:"possibleduplicate" OR tag:"duplicate")'
         )
 
     def test_removing_filter_preserves_readable_and_separator(self):

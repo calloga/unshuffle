@@ -121,6 +121,19 @@ class QueryContractTests(unittest.TestCase):
         groups = SearchEngine.parse_query_groups('cat:"Kicks", type:"Loops" OR pack:"Aden Pack"')
         self.assertEqual(groups, [['cat:"Kicks"', 'type:"Loops"'], ['pack:"Aden Pack"']])
 
+    def test_parse_parenthesized_filter_groups(self):
+        groups = SearchEngine.parse_query_groups(
+            'source:"d:/samples" AND (tag:"Silent" OR tag:"Empty" OR tag:"Corrupted")'
+        )
+        self.assertEqual(
+            groups,
+            [
+                ['source:"d:/samples"', 'tag:"Silent"'],
+                ['source:"d:/samples"', 'tag:"Empty"'],
+                ['source:"d:/samples"', 'tag:"Corrupted"'],
+            ],
+        )
+
     def test_canonicalize_prefix_aliases(self):
         self.assertEqual(SearchEngine.canonicalize_term('cat:"Kicks"'), 'category:"Kicks"')
         self.assertEqual(SearchEngine.canonicalize_term('packname:"Aden Pack"'), 'pack:"Aden Pack"')

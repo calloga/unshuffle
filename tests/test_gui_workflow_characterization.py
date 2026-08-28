@@ -102,6 +102,105 @@ class MainWindowDebounceTests(unittest.TestCase):
         self.assertEqual(request.roots, ("D:/Music/Drum Kits",))
         close_qt_window(dialog, app)
 
+    def test_startup_launcher_scans_when_same_roots_are_removed_and_readded(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.startup_launcher import StartupLauncherDialog
+
+        app = QApplication.instance() or QApplication([])
+        settings = SimpleNamespace(
+            value=mock.Mock(
+                side_effect=lambda key, default="": {
+                    "last_scan_session_id": "last-session",
+                    "last_target": "D:/Music/Drum Kits",
+                    "last_scan_source": "D:/Music/Drum Kits",
+                }.get(key, default)
+            )
+        )
+        settings_controller = SimpleNamespace(
+            settings=settings,
+            get_library_view_modes=mock.Mock(return_value=("table", "tree")),
+        )
+
+        with mock.patch(
+            "gui.widgets.startup_launcher.load_session_sources",
+            return_value=["D:/Music/Drum Kits"],
+        ), mock.patch(
+            "gui.widgets.startup_launcher.QFileDialog.getExistingDirectory",
+            return_value="D:/Music/Drum Kits",
+        ):
+            dialog = StartupLauncherDialog(settings_controller)
+            dialog._remove_root("D:/Music/Drum Kits")
+            assert dialog._add_folder()
+
+        request = dialog.launch_request()
+        self.assertEqual(request.mode, "refresh")
+        self.assertEqual(request.session_id, "")
+        self.assertEqual(request.roots, ("D:/Music/Drum Kits",))
+        close_qt_window(dialog, app)
+
+    def test_startup_launcher_deduplicates_persisted_root_spellings(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.startup_launcher import StartupLauncherDialog
+
+        app = QApplication.instance() or QApplication([])
+        settings = SimpleNamespace(
+            value=mock.Mock(
+                side_effect=lambda key, default="": {
+                    "last_scan_session_id": "last-session",
+                    "last_target": "D:/SAMPLES",
+                    "last_scan_source": "D:/SAMPLES",
+                }.get(key, default)
+            )
+        )
+        settings_controller = SimpleNamespace(
+            settings=settings,
+            get_library_view_modes=mock.Mock(return_value=("table", "tree")),
+        )
+
+        with mock.patch(
+            "gui.widgets.startup_launcher.load_session_sources",
+            return_value=["D:\\SAMPLES", "D:/Drum Kits", "d:/samples/"],
+        ):
+            dialog = StartupLauncherDialog(settings_controller)
+
+        self.assertEqual(dialog.launch_request().roots, ("D:\\SAMPLES", "D:/Drum Kits"))
+        close_qt_window(dialog, app)
+
+    def test_startup_launcher_rejects_new_duplicate_root_spelling(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.widgets.startup_launcher import StartupLauncherDialog
+
+        app = QApplication.instance() or QApplication([])
+        settings = SimpleNamespace(
+            value=mock.Mock(
+                side_effect=lambda key, default="": {
+                    "last_scan_session_id": "last-session",
+                    "last_target": "D:/SAMPLES",
+                    "last_scan_source": "D:/SAMPLES",
+                }.get(key, default)
+            )
+        )
+        settings_controller = SimpleNamespace(
+            settings=settings,
+            get_library_view_modes=mock.Mock(return_value=("table", "tree")),
+        )
+
+        with mock.patch(
+            "gui.widgets.startup_launcher.load_session_sources",
+            return_value=["D:\\SAMPLES", "D:/Drum Kits"],
+        ), mock.patch(
+            "gui.widgets.startup_launcher.QFileDialog.getExistingDirectory",
+            return_value="d:/samples/",
+        ):
+            dialog = StartupLauncherDialog(settings_controller)
+            self.assertFalse(dialog._add_folder())
+
+        self.assertEqual(dialog.launch_request().roots, ("D:\\SAMPLES", "D:/Drum Kits"))
+        close_qt_window(dialog, app)
+
     def test_startup_launcher_uses_theme_without_logo_pixmap(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from PySide6.QtGui import QColor
@@ -3891,6 +3990,29 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         controller.app.tagging_controller.clear_state.assert_called_once_with(refresh_filter_state=False)
         controller.app.tree_organization_controller.disable_profile.assert_called_once_with(refresh=False)
 
+    def test_refresh_preserves_active_custom_tree(self):
+        from gui.core.workflow_controller import WorkflowController
+
+        class _Parent(QObject):
+            def __init__(self):
+                super().__init__()
+                self.model = None
+                self.tagging_controller = mock.Mock()
+                self.tree_organization_controller = mock.Mock()
+                self.drafting_controller = mock.Mock()
+                self.drafting_controller.confirm_clear_pending_draft.return_value = True
+
+        engine = mock.Mock()
+        engine.session_id = "existing-session"
+        engine.session_source_roots = [Path("D:/Samples")]
+        worker_manager = mock.Mock()
+        worker_manager.start_scan.return_value = True
+        controller = WorkflowController(engine, worker_manager, mock.Mock(), _Parent())
+
+        controller.start_refresh([])
+
+        controller.app.tree_organization_controller.disable_profile.assert_not_called()
+
     def test_preserved_undo_confirmation_restarts_with_confirmation_flag(self):
         from PySide6.QtWidgets import QMessageBox
         from gui.core.workflow_controller import WorkflowController
@@ -5847,9 +5969,10 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
                 return index
 
         holder = type("Holder", (), {"proxy_model": _Proxy()})()
-        visible = LibraryTab._visible_record_ids_from_proxy(holder, limit=10000)
+        visible = LibraryTab._visible_record_ids_from_proxy(cast(Any, holder), limit=10000)
 
-        self.assertIsNotNone(visible)
+        if visible is None:
+            self.fail("Expected visible record ids")
         self.assertEqual(len(visible), 10000)
         self.assertIn("100", visible)
         self.assertIn("10099", visible)
