@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -36,6 +37,28 @@ def test_peewee_clear_cache_executes_delete(tmp_path: Path, monkeypatch: pytest.
 
         assert db.get_all_hashes() == {}
     finally:
+        db.close()
+
+
+def test_large_peewee_cache_upsert_batches_below_sqlite_variable_limit(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(db_module, "get_config", lambda: _store_config("peewee"))
+    db = UnshuffleDB(tmp_path / "batched-cache.db")
+    original_limit = db.conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    try:
+        db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 100)
+        rows = [
+            _cache_row(f"hash-{index}", tmp_path / f"sample-{index}.wav")
+            for index in range(50)
+        ]
+
+        db.update_cache_bulk(rows)
+
+        assert set(db.get_all_hashes()) == {f"hash-{index}" for index in range(50)}
+    finally:
+        db.conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, original_limit)
         db.close()
 
 

@@ -2,6 +2,7 @@ import logging
 import csv
 import json
 import uuid
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from PySide6.QtCore import QUrl
@@ -53,7 +54,15 @@ def remap_imported_staging_row(row: dict, source_remaps: dict[str, Path]) -> dic
     return remapped
 
 
-def copy_portable_session_table(source_conn, destination_conn, table: str, session_id: str, *, batch_size: int = 1000) -> int:
+def copy_portable_session_table(
+    source_conn,
+    destination_conn,
+    table: str,
+    session_id: str,
+    *,
+    batch_size: int = 1000,
+    progress_callback: Callable[[int], None] | None = None,
+) -> int:
     if table not in PORTABLE_SESSION_TABLES:
         raise ValueError(f"Unsupported portable session table: {table}")
     columns = [
@@ -81,6 +90,8 @@ def copy_portable_session_table(source_conn, destination_conn, table: str, sessi
                 [tuple(row) for row in rows],
             )
             copied += len(rows)
+            if progress_callback is not None:
+                progress_callback(copied)
 
 class DataManager:
     """
@@ -502,6 +513,26 @@ class DataManager:
 
         cursor_set = False
         local_db = None
+        import_monitor = getattr(self.app, "operation_monitor", None)
+        monitor_token = None
+
+        def update_monitor(payload: dict) -> None:
+            if import_monitor is not None and monitor_token is not None:
+                import_monitor.update(payload, token=monitor_token)
+            QApplication.processEvents()
+
+        def finish_monitor(message: str) -> None:
+            nonlocal monitor_token
+            if import_monitor is not None and monitor_token is not None:
+                import_monitor.finish(message, token=monitor_token)
+            monitor_token = None
+
+        def fail_monitor(message: str) -> None:
+            nonlocal monitor_token
+            if import_monitor is not None and monitor_token is not None:
+                import_monitor.fail(message, token=monitor_token)
+            monitor_token = None
+
         try:
             local_db = UnshuffleDB(local_db_path)
             recent = local_db.get_recent_sessions(100000)
@@ -517,12 +548,6 @@ class DataManager:
                 QMessageBox.warning(parent_widget or self.app, "Import Session", "Invalid or empty session ID in sidecar database.")
                 return False
 
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            cursor_set = True
-            if self.app and getattr(self.app, "footer", None):
-                self.app.footer.set_status("Importing session records...")
-                self.app.footer.log("<b>Staging Session:</b> reading and copying sidecar database...")
-            
             total_staging = int(local_db.conn.execute(
                 "SELECT COUNT(*) FROM staging_records WHERE session_id = ?",
                 (session_id,),
@@ -541,9 +566,25 @@ class DataManager:
                 if str(source or "").strip()
             ]
 
+            if import_monitor is not None:
+                monitor_token = import_monitor.start("Importing Session", cancellable=False)
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            cursor_set = True
+            if self.app and getattr(self.app, "footer", None):
+                self.app.footer.set_status("Importing session records...")
+                self.app.footer.log("<b>Staging Session:</b> reading and copying sidecar database...")
+
+            update_monitor({
+                "phase": "Checking Imported Files",
+                "message": "Checking file availability...",
+                "current": 0,
+                "total": total_staging,
+            })
+
             # Validate physical presence without materializing the session.
             importable_count = 0
             skipped_count = 0
+            checked_count = 0
             for batch in local_db.iter_staging_records(session_id, batch_size=1000):
                 for row in batch:
                     source_path = str(row.get("source_path") or "").strip()
@@ -557,8 +598,16 @@ class DataManager:
                     else:
                         logging.warning("Session import skipped missing file: %s -> %s", source_path, path)
                         skipped_count += 1
+                checked_count += len(batch)
+                update_monitor({
+                    "phase": "Checking Imported Files",
+                    "message": "Checking file availability...",
+                    "current": checked_count,
+                    "total": total_staging,
+                })
 
             if importable_count <= 0:
+                finish_monitor("No files were available to import.")
                 QMessageBox.warning(
                     parent_widget or self.app,
                     "Import Session",
@@ -593,6 +642,12 @@ class DataManager:
             if not global_db:
                 raise RuntimeError("No active database available to register import.")
 
+            update_monitor({
+                "phase": "Preparing Destination",
+                "message": "Preparing the imported session...",
+                "percent": 0,
+            })
+
             # Clear old records in global db
             global_db.clear_staging(session_id)
             global_db.delete_session(session_id)
@@ -610,7 +665,10 @@ class DataManager:
             global_db.set_session_sources(session_id, remapped_sources)
 
             # 3. Stream staging records into the destination database.
+            copied_count = 0
+
             def imported_rows():
+                nonlocal copied_count
                 for batch in local_db.iter_staging_records(session_id, batch_size=1000):
                     for row in batch:
                         source_path = str(row.get("source_path") or "").strip()
@@ -620,10 +678,30 @@ class DataManager:
                         remapped = remap_imported_staging_row(row, source_remaps)
                         if Path(remapped["source_path"]).exists():
                             yield staging_row_tuple(remapped)
+                            copied_count += 1
+                    update_monitor({
+                        "phase": "Copying Session Records",
+                        "message": "Copying staging records...",
+                        "current": copied_count,
+                        "total": importable_count,
+                    })
 
+            update_monitor({
+                "phase": "Copying Session Records",
+                "message": "Copying staging records...",
+                "current": 0,
+                "total": importable_count,
+            })
             global_db.add_staging_records_iter(session_id, imported_rows(), batch_size=1000)
             # Seed the scoped analysis cache from trusted exported staging metadata.
             cache_rows = []
+            cache_checked = 0
+            update_monitor({
+                "phase": "Restoring Audio Cache",
+                "message": "Restoring cached analysis...",
+                "current": 0,
+                "total": importable_count,
+            })
             for batch in global_db.iter_staging_records(session_id, batch_size=500):
                 for row in batch:
                     file_hash = str(row.get("hash") or "").strip()
@@ -650,13 +728,42 @@ class DataManager:
                     if len(cache_rows) >= 256:
                         global_db.update_cache_bulk(cache_rows)
                         cache_rows.clear()
+                cache_checked += len(batch)
+                update_monitor({
+                    "phase": "Restoring Audio Cache",
+                    "message": "Restoring cached analysis...",
+                    "current": cache_checked,
+                    "total": importable_count,
+                })
             if cache_rows:
                 global_db.update_cache_bulk(cache_rows)
 
             # 4-6. Restore coherence metadata in bounded batches.
             try:
-                for table in PORTABLE_SESSION_TABLES:
-                    copy_portable_session_table(local_db.conn, global_db.conn, table, session_id)
+                for table_index, table in enumerate(PORTABLE_SESSION_TABLES, start=1):
+                    table_total = int(local_db.conn.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchone()[0])
+                    phase_name = f"Restoring Session Metadata ({table_index}/{len(PORTABLE_SESSION_TABLES)})"
+                    update_monitor({
+                        "phase": phase_name,
+                        "message": f"Restoring {table.replace('_', ' ')}...",
+                        "current": 0,
+                        "total": table_total,
+                    })
+                    copy_portable_session_table(
+                        local_db.conn,
+                        global_db.conn,
+                        table,
+                        session_id,
+                        progress_callback=lambda copied, phase=phase_name, total=table_total, name=table: update_monitor({
+                            "phase": phase,
+                            "message": f"Restoring {name.replace('_', ' ')}...",
+                            "current": copied,
+                            "total": total,
+                        }),
+                    )
                 with global_db.write_transaction():
                     for table in ("coherence_results", "refinement_candidates"):
                         global_db.conn.execute(
@@ -676,6 +783,13 @@ class DataManager:
 
             # 7. Restore review decisions and remap their source paths.
             try:
+                reviewed_count = 0
+                update_monitor({
+                    "phase": "Restoring Review Decisions",
+                    "message": "Restoring coherence review decisions...",
+                    "current": 0,
+                    "total": importable_count,
+                })
                 for batch in local_db.iter_staging_records(session_id, batch_size=800):
                     decisions = local_db.list_coherence_review_decisions(
                         [str(row.get("source_path") or "") for row in batch],
@@ -687,6 +801,13 @@ class DataManager:
                         )
                     if decisions:
                         global_db.upsert_coherence_review_decisions(session_id, decisions)
+                    reviewed_count += len(batch)
+                    update_monitor({
+                        "phase": "Restoring Review Decisions",
+                        "message": "Restoring coherence review decisions...",
+                        "current": reviewed_count,
+                        "total": importable_count,
+                    })
             except Exception:
                 logging.exception("Failed to import coherence review decisions.")
 
@@ -755,6 +876,11 @@ class DataManager:
                 "session_dupe_count": 0,
                 "total_dupe_count": 0,
             }
+            update_monitor({
+                "phase": "Opening Imported Session",
+                "message": "Preparing the library views...",
+                "percent": 95,
+            })
             self.app.workflow_controller.finalize_scan_data(
                 [],
                 False,
@@ -763,12 +889,16 @@ class DataManager:
                 persist_staging=False,
             )
             self.app.footer.log(f"<b>Staging Session:</b> imported {importable_count} records successfully.")
+            finish_monitor(f"Imported {importable_count} records.")
             return True
         except Exception as e:
             logging.exception("Failed to import staging session")
+            fail_monitor(str(e))
             QMessageBox.critical(parent_widget or self.app, "Import Error", f"Failed to import staging session:\n{e}")
             return False
         finally:
+            if monitor_token is not None:
+                finish_monitor("Session import stopped.")
             if cursor_set:
                 QApplication.restoreOverrideCursor()
             if local_db is not None:

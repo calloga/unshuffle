@@ -2,8 +2,8 @@ import abc
 import json
 import sqlite3
 import time
-from collections.abc import Iterator, Mapping
-from typing import Any, Optional, Callable, List, cast
+from collections.abc import Mapping
+from typing import Any, Optional, Callable, List
 
 from pathlib import Path
 from peewee import EXCLUDED, SQL, Case
@@ -13,6 +13,7 @@ from unshuffle.persistence.schema.enums import AnchorProfileState, RefinementCan
 from unshuffle.persistence.schema.models import AnchorProfile, CoherenceResult, CoherenceReviewDecision, \
     RefinementCandidate
 from unshuffle.persistence.utils.cache_utils import normalize_feature_vector
+from unshuffle.persistence.utils.peewee_batches import peewee_insert_batches
 from unshuffle.persistence.utils.thread_aware_sqlite_database import (
     ConnectionBoundStore,
     ConnectionProvider,
@@ -22,34 +23,6 @@ from unshuffle.persistence.utils.thread_aware_sqlite_database import (
 from unshuffle.persistence.stores import sqlite_coherence_queries
 
 REMOVED_VERIFIED_ANCHOR_SESSION = "__removed_verified_anchors__"
-_PEEWEE_INSERT_MAX_ROWS = 500
-_PEEWEE_INSERT_VARIABLE_RESERVE = 32
-
-
-def _peewee_insert_batches(
-    connection: sqlite3.Connection,
-    model: Any,
-    rows: list[dict[str, Any]],
-) -> Iterator[list[dict[str, Any]]]:
-    """Yield batches that fit the active connection's SQL-variable limit."""
-    if not rows:
-        return
-    variable_limit = 999
-    getlimit = getattr(connection, "getlimit", None)
-    if callable(getlimit):
-        try:
-            variable_limit = int(cast(Any, getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)))
-        except (TypeError, ValueError):
-            pass
-    model_field_count = len(getattr(model._meta, "sorted_fields", ()))
-    variables_per_row = max(1, len(rows[0]), model_field_count)
-    available_variables = max(1, variable_limit - _PEEWEE_INSERT_VARIABLE_RESERVE)
-    batch_size = max(
-        1,
-        min(_PEEWEE_INSERT_MAX_ROWS, available_variables // variables_per_row),
-    )
-    for start in range(0, len(rows), batch_size):
-        yield rows[start:start + batch_size]
 
 
 def _normalized_source_path(value: Any) -> str:
@@ -363,7 +336,7 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
     def upsert_coherence_results(self, session_id: str, results: list[Any]):
         CoherenceResult.delete().where(CoherenceResult.session_id == session_id).execute()
         rows = [_coherence_result_row(session_id, result) for result in results]
-        for batch in _peewee_insert_batches(self._connection, CoherenceResult, rows):
+        for batch in peewee_insert_batches(self._connection, CoherenceResult, rows):
             CoherenceResult.insert_many(batch).on_conflict_replace().execute()
 
     def list_coherence_results(self, session_id: str) -> list[dict[str, Any]]:
@@ -406,7 +379,7 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
             }
             for candidate in candidates
         ]
-        for batch in _peewee_insert_batches(self._connection, RefinementCandidate, rows):
+        for batch in peewee_insert_batches(self._connection, RefinementCandidate, rows):
             (
                 RefinementCandidate
                 .insert_many(batch)
@@ -562,7 +535,7 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
         ]
         if not _rows:
             return
-        for batch in _peewee_insert_batches(self._connection, AnchorProfile, _rows):
+        for batch in peewee_insert_batches(self._connection, AnchorProfile, _rows):
             (
                 AnchorProfile
                 .insert_many(batch)
@@ -631,7 +604,7 @@ class PeeweeCoherenceStore(CoherenceStore, PeeweeStore):
         }
         if update_state:
             update[AnchorProfile.state] = EXCLUDED.state
-        for batch in _peewee_insert_batches(self._connection, AnchorProfile, rows):
+        for batch in peewee_insert_batches(self._connection, AnchorProfile, rows):
             (
                 AnchorProfile
                 .insert_many(batch)

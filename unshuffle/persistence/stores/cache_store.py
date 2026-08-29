@@ -14,6 +14,7 @@ from unshuffle.core.features import (
 )
 from unshuffle.persistence.schema.enums import RecordStepStatus, RecordStatus
 from unshuffle.persistence.schema.models import FileCache, Record
+from unshuffle.persistence.utils.peewee_batches import peewee_insert_batches
 from unshuffle.persistence.utils.thread_aware_sqlite_database import (
     ConnectionBoundStore,
     ConnectionProvider,
@@ -386,24 +387,23 @@ class PeeweeCacheStore(SqliteCacheStore, PeeweeStore):
         return _row.last_path if _row else None
 
     def upsert_cache_rows(self, rows: list[tuple]) -> None:
-        (
-            FileCache
-            .insert_many(
-                rows,
-                fields=[
-                    FileCache.hash,
-                    FileCache.last_path,
-                    FileCache.size,
-                    FileCache.mtime,
-                    FileCache.feature_vector,
-                    FileCache.feature_space_version,
-                    FileCache.extractor_version,
-                    FileCache.feature_schema_json,
-                    FileCache.analysis_status,
-                    FileCache.analysis_tags_json,
-                    FileCache.fast_hash,
-                ],
+        fields = [
+            FileCache.hash,
+            FileCache.last_path,
+            FileCache.size,
+            FileCache.mtime,
+            FileCache.feature_vector,
+            FileCache.feature_space_version,
+            FileCache.extractor_version,
+            FileCache.feature_schema_json,
+            FileCache.analysis_status,
+            FileCache.analysis_tags_json,
+            FileCache.fast_hash,
+        ]
+        for batch in peewee_insert_batches(self._connection, FileCache, rows):
+            (
+                FileCache
+                .insert_many(batch, fields=fields)
+                .on_conflict_replace()
+                .execute()
             )
-            .on_conflict_replace()
-            .execute()
-        )

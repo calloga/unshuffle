@@ -5367,6 +5367,8 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
             app.settings_controller = mock.Mock()
             app.library_tab = mock.Mock()
             app.filter_controller = mock.Mock()
+            app.operation_monitor = mock.Mock()
+            app.operation_monitor.start.return_value = 41
             manager = DataManager(engine=engine, app=app)
 
             def choose_old(_parent, _title, _label, items, _current, _editable):
@@ -5374,7 +5376,8 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
 
             with mock.patch("gui.core.data_manager.QInputDialog.getItem", side_effect=choose_old) as get_item, \
                  mock.patch("PySide6.QtWidgets.QApplication.setOverrideCursor"), \
-                 mock.patch("PySide6.QtWidgets.QApplication.restoreOverrideCursor"):
+                 mock.patch("PySide6.QtWidgets.QApplication.restoreOverrideCursor"), \
+                 mock.patch("PySide6.QtWidgets.QApplication.processEvents") as process_events:
                 imported = manager.import_session_from_folder(export_root, parent_widget=app)
 
             self.assertTrue(imported)
@@ -5396,6 +5399,14 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
                 [{"name": "Old kicks", "query": 'cat:"Kicks"'}]
             )
             app.filter_controller.refresh_dock_filters.assert_called_once_with()
+            app.operation_monitor.start.assert_called_once_with("Importing Session", cancellable=False)
+            phases = [call.args[0].get("phase") for call in app.operation_monitor.update.call_args_list]
+            self.assertIn("Checking Imported Files", phases)
+            self.assertIn("Copying Session Records", phases)
+            self.assertIn("Restoring Audio Cache", phases)
+            self.assertIn("Opening Imported Session", phases)
+            app.operation_monitor.finish.assert_called_once_with("Imported 1 records.", token=41)
+            self.assertGreater(process_events.call_count, 4)
             self.assertFalse(global_db.get_staging_records("new-session"))
         finally:
             local_db.close()
