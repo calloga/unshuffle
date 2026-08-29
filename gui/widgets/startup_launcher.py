@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from pathlib import Path
+import ntpath
+from pathlib import Path, PureWindowsPath
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
@@ -35,10 +36,12 @@ def _normalized_root(root: str) -> str:
     text = str(root or "").strip()
     if not text:
         return ""
+    if PureWindowsPath(text).drive:
+        return ntpath.normpath(text).replace("\\", "/").casefold().rstrip("/")
     try:
-        normalized = Path(text).resolve().as_posix().lower()
+        normalized = Path(text).resolve().as_posix().casefold()
     except OSError:
-        normalized = Path(text).as_posix().lower()
+        normalized = Path(text).as_posix().casefold()
     return normalized.rstrip("/")
 
 
