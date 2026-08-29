@@ -180,7 +180,11 @@ def enter_build_handover_state(controller, res: dict, summary: str) -> None:
     copied = int(res.get("copied", 0) or 0)
     skipped = int(res.get("skipped_duplicates", 0) or 0) + int(res.get("duplicates", 0) or 0)
     failed = int(res.get("failed", 0) or 0)
-    remaining_count, remaining_bytes = remaining_source_footprint(source_paths) if mode == "move" else (0, 0)
+    if mode == "move" and "remaining_source_file_count" in res and "remaining_source_bytes" in res:
+        remaining_count = int(res.get("remaining_source_file_count") or 0)
+        remaining_bytes = int(res.get("remaining_source_bytes") or 0)
+    else:
+        remaining_count, remaining_bytes = remaining_source_footprint(source_paths) if mode == "move" else (0, 0)
     state = {
         "mode": mode,
         "source_paths": source_paths,

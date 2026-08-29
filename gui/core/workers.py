@@ -11,7 +11,9 @@ from unshuffle.core.progress import PhaseProgress
 from unshuffle.core.resource_monitor import ResourceMonitor
 from unshuffle.diagnostics import write_launcher_event_log
 from ..models.library_tree import active_tree_levels_for_sort, build_tree_payload
+from . import workflow_build_completion
 from .search_engine import SearchEngine
+from .workflow_summary import remaining_source_footprint
 
 def safe_gc_run(func):
     @wraps(func)
@@ -440,6 +442,24 @@ class CommitWorker(QThread):
                 self.no_px,
                 skip_confirmed_duplicates=self.skip_confirmed_duplicates,
             )
+            if isinstance(res, dict) and not res.get("error"):
+                self.progress.emit({
+                    "phase": "Finalizing Build",
+                    "message": "Cleaning up temporary scan data...",
+                    "cancellable": False,
+                })
+                workflow_build_completion.prune_successful_build_state(self.engine)
+                if self.move:
+                    self.progress.emit({
+                        "phase": "Finalizing Build",
+                        "message": "Checking remaining source files...",
+                        "cancellable": False,
+                    })
+                    remaining_count, remaining_bytes = remaining_source_footprint(
+                        getattr(self.engine, "session_source_roots", []) or []
+                    )
+                    res["remaining_source_file_count"] = remaining_count
+                    res["remaining_source_bytes"] = remaining_bytes
             self.finished.emit(res)
         except Exception as e:
             logging.exception("CommitWorker encountered an error")

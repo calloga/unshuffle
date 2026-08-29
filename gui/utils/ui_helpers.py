@@ -372,6 +372,8 @@ def on_worker_finished(app, worker_type, res):
     elif worker_type == "undo":
         invalidate_history_cache(app.settings.value("last_target", ""))
         app.workflow_controller.handle_undo_finished(res)
+    elif worker_type == "csv_import":
+        app.workflow_controller.handle_csv_import_finished(res)
 
 def on_engine_changed(app, engine):
     app.set_runtime_context(engine=engine)
@@ -423,14 +425,8 @@ def import_csv(app):
     default_dir = str(last_tgt) if last_tgt and Path(last_tgt).exists() else str(Path.home())
     path, _ = QFileDialog.getOpenFileName(app, "Import CSV", default_dir, "CSV Files (*.csv)")
     if path:
-        from PySide6.QtWidgets import QMessageBox
-        try:
-            recs = app.data_manager.import_from_csv(path)
-        except Exception as exc:
-            QMessageBox.warning(app, "Import CSV", f"Could not import CSV: {exc}")
-            return
-        if recs:
-            app.workflow_controller.handle_scan_finished(recs, False, {})
+        target = Path(last_tgt) if last_tgt else Path(path).parent
+        app.workflow_controller.start_csv_import(path, target_path=target)
 
 def export_csv(app):
     if not app.model: return

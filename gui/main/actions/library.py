@@ -202,7 +202,7 @@ def import_session(app):
         "Unshuffle Session Database (unshuffle.db *.db);;All Files (*)",
     )
     if path:
-        app.data_manager.import_session_from_folder(path, parent_widget=app)
+        app.data_manager.start_session_import_from_folder(path, parent_widget=app)
 
 
 def remove_folder_clicked(app):

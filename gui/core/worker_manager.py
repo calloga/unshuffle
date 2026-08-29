@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal, QThread
 from .workers import ScanWorker, CommitWorker, UndoWorker
+from .import_workers import CsvImportWorker
 
 class WorkerManager(QObject):
     """
@@ -128,10 +129,47 @@ class WorkerManager(QObject):
             return False
         return True
 
+    def start_csv_import(self, file_path, target_path, *, existing_engine=None):
+        if self.is_busy():
+            return False
+        self.worker_type = "csv_import"
+        self._cancel_requested_type = None
+        self.busyStateChanged.emit(True)
+        try:
+            self.worker = CsvImportWorker(
+                Path(file_path),
+                Path(target_path),
+                existing_engine=existing_engine,
+            )
+            self.worker.progress.connect(self.progress.emit)
+            worker = self.worker
+            self.worker.completed.connect(
+                lambda payload, w=worker: self._on_finished(w, "csv_import", payload)
+            )
+            self.worker.completed.connect(self.worker.deleteLater)
+            self.worker.error.connect(lambda err, w=worker: self._on_error(w, err))
+            self.worker.error.connect(self.worker.deleteLater)
+            self.worker.start(QThread.LowPriority)
+        except Exception as exc:
+            logging.exception("Failed to start CSV import worker")
+            self._clear_failed_start(str(exc))
+            return False
+        return True
+
     def request_cancel(self):
         if not self.is_busy():
             logging.debug("Cancel requested but no worker is running.")
             return False
+        request_cancel = getattr(self.worker, "request_cancel", None)
+        if callable(request_cancel):
+            if self._cancel_requested_type == self.worker_type:
+                logging.debug("Cancel already in progress.")
+                return True
+            self._cancel_requested_type = self.worker_type
+            request_cancel()
+            logging.info("Worker cancellation requested for %s.", self.worker_type or "unknown operation")
+            self.cancelling.emit()
+            return True
         if self.engine:
             if getattr(self.engine, "interrupted", False):
                 logging.debug("Cancel already in progress.")

@@ -337,16 +337,16 @@ def _launch_refresh(window: Any, request: StartupLaunchRequest, app: QApplicatio
             _launch_refresh(window, next_request, app)
         elif next_request.mode == "import_session":
             _show_window(window)
-            QTimer.singleShot(150, lambda: window.data_manager.import_session_from_folder(next_request.import_path, parent_widget=window))
+            QTimer.singleShot(150, lambda: window.data_manager.start_session_import_from_folder(next_request.import_path, parent_widget=window))
         elif next_request.mode == "import_csv":
             _show_window(window)
-
-            def _do_import_csv():
-                recs = window.data_manager.import_from_csv(next_request.import_path)
-                if recs:
-                    window.workflow_controller.handle_scan_finished(recs, False, {})
-
-            QTimer.singleShot(150, _do_import_csv)
+            QTimer.singleShot(
+                150,
+                lambda: window.workflow_controller.start_csv_import(
+                    next_request.import_path,
+                    target_path=next_request.target or Path(next_request.import_path).parent,
+                ),
+            )
         else:
             _show_window(window)
 
@@ -557,14 +557,16 @@ def main() -> int:
             _launch_refresh(window, request, app)
         elif request.mode == "import_session":
             _show_window(window)
-            QTimer.singleShot(150, lambda: window.data_manager.import_session_from_folder(request.import_path, parent_widget=window))
+            QTimer.singleShot(150, lambda: window.data_manager.start_session_import_from_folder(request.import_path, parent_widget=window))
         elif request.mode == "import_csv":
             _show_window(window)
-            def _do_import_csv():
-                recs = window.data_manager.import_from_csv(request.import_path)
-                if recs:
-                    window.workflow_controller.handle_scan_finished(recs, False, {})
-            QTimer.singleShot(150, _do_import_csv)
+            QTimer.singleShot(
+                150,
+                lambda: window.workflow_controller.start_csv_import(
+                    request.import_path,
+                    target_path=request.target or Path(request.import_path).parent,
+                ),
+            )
         else:
             _show_window(window)
         _launcher_event("enter-event-loop", mode=request.mode)

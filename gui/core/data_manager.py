@@ -5,7 +5,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QThread, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
@@ -263,6 +263,220 @@ class DataManager:
         except Exception as e:
             logging.error(f"CSV Import failed: {e}")
             return None
+
+    def start_session_import_from_folder(self, folder_path, parent_widget=None) -> bool:
+        """Prepare a portable import on the GUI thread, then copy it in a worker."""
+        from unshuffle.bridge.workflow_bridge import create_workflow_bridge
+        from unshuffle.core.paths import get_local_system_dir
+        from unshuffle.persistence import UnshuffleDB
+        from ..utils.ui_helpers import set_ui_busy
+        from .import_workers import PortableSessionImportWorker
+
+        active_worker = getattr(self, "_session_import_worker", None)
+        if active_worker is not None and active_worker.isRunning():
+            QMessageBox.information(parent_widget or self.app, "Import Session", "A session import is already running.")
+            return False
+
+        import_path = Path(folder_path)
+        local_db_path = import_path if import_path.is_file() else get_local_system_dir(import_path) / DB_FILE_NAME
+        if not local_db_path.exists():
+            QMessageBox.warning(parent_widget or self.app, "Import Session", f"No staging session database found at:\n{local_db_path}")
+            return False
+
+        local_db = None
+        created_engine = False
+        destination_engine = None
+        try:
+            local_db = UnshuffleDB(local_db_path)
+            recent = local_db.get_recent_sessions(100000)
+            if not recent:
+                QMessageBox.warning(parent_widget or self.app, "Import Session", "No staging sessions found in the target database.")
+                return False
+            session = self._choose_import_session(recent, parent_widget=parent_widget)
+            if session is None:
+                return False
+            session_id = str(session.get("session_id") or "")
+            if not session_id:
+                QMessageBox.warning(parent_widget or self.app, "Import Session", "Invalid or empty session ID in sidecar database.")
+                return False
+            total_staging = int(local_db.conn.execute(
+                "SELECT COUNT(*) FROM staging_records WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0])
+            if total_staging <= 0:
+                QMessageBox.warning(parent_widget or self.app, "Import Session", "No staging records found in the sidecar database.")
+                return False
+            sources = local_db.get_session_sources(session_id)
+            source_remaps = self._prompt_source_remaps(sources, parent_widget=parent_widget)
+            if source_remaps is None:
+                return False
+            remapped_sources = [
+                source_remaps[str(source)].resolve() if str(source) in source_remaps else Path(source)
+                for source in sources
+                if str(source or "").strip()
+            ]
+            import_target_root = import_session_target_root(
+                import_path, local_db_path, session.get("target_root")
+            )
+
+            global_db = self.bridge._get_db() if self.bridge else None
+            destination_engine = self.engine
+            if global_db is None:
+                destination_engine = create_workflow_bridge(
+                    import_target_root,
+                    session_id=session_id,
+                )
+                global_db = destination_engine.db
+                created_engine = True
+        except Exception as exc:
+            logging.exception("Failed to prepare staging session import")
+            if created_engine and destination_engine is not None:
+                destination_engine.close()
+            QMessageBox.critical(parent_widget or self.app, "Import Error", f"Failed to prepare staging session import:\n{exc}")
+            return False
+        finally:
+            if local_db is not None:
+                local_db.close()
+
+        monitor = getattr(self.app, "operation_monitor", None)
+        monitor_token = monitor.start("Importing Session", cancellable=False) if monitor is not None else None
+        set_ui_busy(self.app, True)
+        self.app._scan_finalizing = True
+        worker = PortableSessionImportWorker(
+            local_db_path,
+            global_db,
+            session,
+            source_remaps,
+            remapped_sources,
+            import_target_root,
+        )
+        self._session_import_worker = worker
+
+        def update_progress(payload: dict) -> None:
+            if monitor is not None and monitor_token is not None:
+                monitor.update(payload, token=monitor_token)
+
+        def clear_worker() -> None:
+            if getattr(self, "_session_import_worker", None) is worker:
+                self._session_import_worker = None
+
+        def fail_import(message: str) -> None:
+            clear_worker()
+            self.app._scan_finalizing = False
+            set_ui_busy(self.app, False)
+            if monitor is not None and monitor_token is not None:
+                monitor.fail(message, token=monitor_token)
+            if created_engine and destination_engine is not None:
+                try:
+                    destination_engine.close()
+                except Exception:
+                    logging.debug("Could not close failed session-import engine.", exc_info=True)
+            QMessageBox.critical(parent_widget or self.app, "Import Error", f"Failed to import staging session:\n{message}")
+
+        def finish_import(payload: dict) -> None:
+            clear_worker()
+            record_count = int(payload.get("record_count") or 0)
+            skipped_count = int(payload.get("skipped_count") or 0)
+            imported_session_id = str(payload.get("session_id") or "")
+            try:
+                if destination_engine is None or not imported_session_id or record_count <= 0:
+                    raise RuntimeError("The imported session contained no available records.")
+                if hasattr(destination_engine, "update_state"):
+                    destination_engine.update_state(
+                        session_id=imported_session_id,
+                        session_source_roots=[source for source in remapped_sources if source.exists()],
+                        session_source_root=remapped_sources[0] if remapped_sources else None,
+                    )
+                else:
+                    destination_engine.session_id = imported_session_id
+                    destination_engine.session_source_roots = [source for source in remapped_sources if source.exists()]
+                    destination_engine.session_source_root = remapped_sources[0] if remapped_sources else None
+                self.set_engine(destination_engine)
+                self.app.workflow_controller.set_engine(destination_engine)
+                self.app.set_runtime_context(engine=destination_engine)
+                self._restore_imported_session_metadata(
+                    payload.get("saved_filters_json"),
+                    payload.get("portable_manifest_json"),
+                )
+                drafting = getattr(self.app, "drafting_controller", None)
+                if drafting is not None:
+                    drafting.clear()
+                undo_stack = getattr(self.app, "undo_stack", None)
+                if undo_stack is not None:
+                    undo_stack.clear()
+                stats = {
+                    "total_scanned": record_count,
+                    "added_count": record_count,
+                    "lib_dupe_count": 0,
+                    "session_dupe_count": 0,
+                    "total_dupe_count": 0,
+                }
+                self.app.workflow_controller.finalize_scan_data(
+                    [], False, stats, show_summary=False, persist_staging=False
+                )
+                self.app.footer.log(
+                    f"<b>Staging Session:</b> imported {record_count} records successfully."
+                )
+                if skipped_count:
+                    QMessageBox.information(
+                        parent_widget or self.app,
+                        "Import Session",
+                        f"Imported {record_count} records; {skipped_count} missing files were skipped.",
+                    )
+            except Exception as exc:
+                logging.exception("Failed to open imported staging session")
+                fail_import(str(exc))
+
+        worker.progress.connect(update_progress)
+        worker.completed.connect(finish_import)
+        worker.completed.connect(worker.deleteLater)
+        worker.error.connect(fail_import)
+        worker.error.connect(worker.deleteLater)
+        worker.start(QThread.LowPriority)
+        return True
+
+    def _restore_imported_session_metadata(self, saved_filters_json, portable_json) -> None:
+        if saved_filters_json:
+            try:
+                saved_filters = json.loads(saved_filters_json)
+            except (TypeError, json.JSONDecodeError):
+                saved_filters = []
+            restored_filters = saved_filters if isinstance(saved_filters, list) else []
+            settings_controller = getattr(self.app, "settings_controller", None)
+            if settings_controller is not None and hasattr(settings_controller, "save_saved_filters"):
+                settings_controller.save_saved_filters(restored_filters)
+                if getattr(self.app, "library_tab", None) is not None:
+                    self.app.library_tab.set_saved_filters(restored_filters)
+                filter_controller = getattr(self.app, "filter_controller", None)
+                if filter_controller is not None and hasattr(filter_controller, "refresh_dock_filters"):
+                    filter_controller.refresh_dock_filters()
+
+        if not portable_json:
+            return
+        try:
+            portable = json.loads(portable_json)
+            profile_payload = portable.get("active_tree_profile") if isinstance(portable, dict) else None
+            if not isinstance(profile_payload, dict):
+                return
+            from unshuffle.logic.tree_organization.models import TreeOrganizationProfile
+
+            tree_controller = getattr(self.app, "tree_organization_controller", None)
+            repository = getattr(tree_controller, "repository", None)
+            if tree_controller is None or repository is None:
+                return
+            imported_profile = TreeOrganizationProfile.from_dict(profile_payload)
+            existing = repository.get_profile(imported_profile.id)
+            if existing is not None and existing.to_dict() != imported_profile.to_dict():
+                profile_payload = dict(profile_payload)
+                profile_payload["id"] = f"profile_{uuid.uuid4().hex[:12]}"
+                profile_payload["name"] = f"{imported_profile.name} (Imported)"
+                imported_profile = TreeOrganizationProfile.from_dict(profile_payload)
+            saved_profile = existing or repository.save_profile(imported_profile)
+            tree_controller.active_profile = saved_profile
+            tree_controller._persist_active_profile_id(saved_profile.id)
+            tree_controller._sync_active_profile(refresh=False)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            logging.exception("Failed to restore portable library structure metadata.")
 
     def reconstruct_plan_records(self, db_rows):
         """Converts raw database staging rows back into PlanRecord objects."""

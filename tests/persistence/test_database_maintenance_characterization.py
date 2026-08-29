@@ -379,15 +379,24 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
             ],
         )
 
-    def test_successful_build_prunes_ephemeral_state_without_fallback(self):
+    def test_successful_build_completion_uses_worker_finalization_without_gui_prune(self):
         db = mock.Mock()
         engine = SimpleNamespace(db=db, target_dir=Path("D:/Library"), session_id="build-session", session_source_roots=[])
-        app = SimpleNamespace(settings=mock.Mock())
+        operation_monitor = mock.Mock(active=True)
+        app = SimpleNamespace(settings=mock.Mock(), operation_monitor=operation_monitor)
         controller = WorkflowController(engine, mock.Mock(), mock.Mock(), None)
         controller.app = app
+        events = []
 
-        with mock.patch.object(controller, "_enter_build_handover_state") as handover, \
-             mock.patch("PySide6.QtWidgets.QMessageBox.information") as info:
+        with mock.patch.object(
+            controller,
+            "_enter_build_handover_state",
+            side_effect=lambda *_args: events.append("handover"),
+        ) as handover, mock.patch(
+            "PySide6.QtWidgets.QMessageBox.information",
+            side_effect=lambda *_args: events.append("alert"),
+        ) as info:
+            operation_monitor.finish.side_effect = lambda *_args: events.append("monitor-finished")
             controller.handle_commit_finished(
                 {
                     "session_id": "build-session",
@@ -402,11 +411,8 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
         handover.assert_called_once()
         info.assert_called_once()
         self.assertEqual(info.call_args.args[1:3], ("Build Complete", "Build complete."))
-        db.prune_ephemeral_state.assert_called_once_with(
-            {"build-session"},
-            target_root=Path("D:/Library"),
-            use_restorable_fallback=False,
-        )
+        self.assertEqual(events, ["handover", "monitor-finished", "alert"])
+        db.prune_ephemeral_state.assert_not_called()
         app.settings.setValue.assert_any_call("last_target", str(Path("D:/Library")))
 
     def test_successful_build_enters_handover_without_starting_target_scan(self):
@@ -499,6 +505,41 @@ class DatabaseMaintenanceLifecycleTests(unittest.TestCase):
         self.assertTrue(app.footer.handover[1]["can_open_target"])
         self.assertTrue(app.footer.handover[1]["can_open_source"])
         self.assertTrue(app.footer.handover[1]["can_undo"])
+
+    def test_move_build_handover_uses_worker_footprint_without_rescanning_sources(self):
+        from gui.core import workflow_handover
+
+        footer = SimpleNamespace(
+            set_status=mock.Mock(),
+            set_count=mock.Mock(),
+            set_build_handover_state=mock.Mock(),
+            log=mock.Mock(),
+        )
+        app = SimpleNamespace(model=SimpleNamespace(rowCount=lambda: 0), footer=footer, settings=mock.Mock())
+        engine = SimpleNamespace(
+            target_dir=Path("D:/Target"),
+            session_id="move-session",
+            session_source_roots=[Path("D:/Source")],
+        )
+        controller = WorkflowController(engine, mock.Mock(), mock.Mock(), None)
+        controller.app = app
+        controller._last_build_options = {"target": "D:/Target", "move": True}
+
+        with mock.patch.object(workflow_handover, "remaining_source_footprint") as footprint:
+            controller._enter_build_handover_state(
+                {
+                    "session_id": "move-session",
+                    "copied": 10,
+                    "move": True,
+                    "remaining_source_file_count": 3,
+                    "remaining_source_bytes": 4096,
+                },
+                "Moved 10 files.",
+            )
+
+        footprint.assert_not_called()
+        self.assertEqual(app._build_handover_state["remaining_source_file_count"], 3)
+        self.assertEqual(app._build_handover_state["remaining_source_bytes"], 4096)
 
     def test_copy_build_handover_keeps_workbench_and_hides_undo(self):
         records = [SimpleNamespace(source_path=Path("D:/Source/kick.wav"))]

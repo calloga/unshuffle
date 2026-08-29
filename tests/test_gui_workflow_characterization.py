@@ -5169,6 +5169,48 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         self.assertEqual(errors, ["start failed"])
         self.assertIsNone(manager.worker)
 
+    def test_commit_worker_finalizes_database_and_move_footprint_before_finished(self):
+        from gui.core import workers as workers_module
+        from gui.core.workers import CommitWorker
+
+        result = {
+            "session_id": "build-session",
+            "copied": 2,
+            "duplicates": 0,
+            "failed": 0,
+            "error": None,
+        }
+        engine = SimpleNamespace(
+            execute_plan=mock.Mock(return_value=result),
+            progress_callback=None,
+            db=mock.Mock(),
+            session_id="build-session",
+            target_dir=Path("D:/Target"),
+            session_source_roots=[Path("D:/Source")],
+        )
+        worker = CommitWorker(engine, [], True, False, False, False)
+        events = []
+        payloads = []
+        worker.progress.connect(lambda payload: payloads.append(payload))
+        worker.finished.connect(lambda payload: events.append(("finished", payload)))
+
+        with mock.patch.object(
+            workers_module.workflow_build_completion,
+            "prune_successful_build_state",
+            side_effect=lambda _engine: events.append(("pruned", None)),
+        ), mock.patch.object(
+            workers_module,
+            "remaining_source_footprint",
+            return_value=(3, 4096),
+        ) as footprint:
+            worker.run()
+
+        self.assertEqual([event[0] for event in events], ["pruned", "finished"])
+        self.assertTrue(any(payload.get("phase") == "Finalizing Build" for payload in payloads))
+        footprint.assert_called_once_with([Path("D:/Source")])
+        self.assertEqual(result["remaining_source_file_count"], 3)
+        self.assertEqual(result["remaining_source_bytes"], 4096)
+
     def test_export_staging_session_uses_active_target_without_save_dialog(self):
         from gui.main.actions.library import export_session
 

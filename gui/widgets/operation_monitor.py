@@ -104,6 +104,12 @@ class OperationMonitorDialog(QDialog):
         value = None
         phase_changed = False
         if isinstance(payload, dict):
+            if "cancellable" in payload:
+                cancellable = bool(payload.get("cancellable"))
+                self.btn_cancel.setVisible(cancellable)
+                self.btn_cancel.setEnabled(cancellable)
+                if not cancellable:
+                    self._cancel_handler = None
             phase = str(payload.get("phase") or "").strip()
             text = str(payload.get("message") or payload.get("status") or payload.get("text") or "")
             if phase:

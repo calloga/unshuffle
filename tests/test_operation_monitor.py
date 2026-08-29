@@ -100,6 +100,31 @@ def test_operation_monitor_cancel_and_close_guard(monkeypatch):
     assert inactive_close.isAccepted() is True
 
 
+def test_operation_monitor_disables_cancellation_during_finalization(monkeypatch):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets.operation_monitor import OperationMonitorDialog
+
+    _app = QApplication.instance() or QApplication([])
+    calls = []
+    dialog = OperationMonitorDialog()
+    dialog.start("Building Library", cancellable=True, on_cancel=lambda: calls.append("cancel"))
+
+    dialog.update_progress(
+        {
+            "phase": "Finalizing Build",
+            "message": "Cleaning up temporary scan data...",
+            "cancellable": False,
+        }
+    )
+
+    assert dialog.btn_cancel.isHidden()
+    assert not dialog.btn_cancel.isEnabled()
+    dialog.btn_cancel.click()
+    assert calls == []
+    dialog.finish()
+
+
 def test_operation_monitor_manager_ignores_stale_progress(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication, QWidget

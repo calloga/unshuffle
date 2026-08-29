@@ -447,6 +447,78 @@ class WorkflowController(QObject):
             return
         self.scanDataReady.emit(new_records, is_append, stats)
 
+    def start_csv_import(self, file_path: str | Path, *, target_path: str | Path | None = None) -> bool:
+        file_path = Path(file_path)
+        target = Path(target_path) if target_path else file_path.parent
+        existing_engine = None
+        current_target = getattr(self._engine, "target_dir", None)
+        if current_target is not None:
+            try:
+                if Path(current_target).resolve() == target.resolve():
+                    existing_engine = self._engine
+            except (OSError, TypeError, ValueError):
+                pass
+        self._start_operation_monitor("Importing CSV", cancellable=True)
+        started = self.worker_manager.start_csv_import(
+            file_path,
+            target,
+            existing_engine=existing_engine,
+        )
+        if not started:
+            self._fail_operation_monitor("Could not start CSV import.")
+        return bool(started)
+
+    def handle_csv_import_finished(self, payload: dict) -> None:
+        if payload.get("cancelled"):
+            self._finish_operation_monitor("CSV import canceled.")
+            return
+        imported_engine = payload.get("engine")
+        imported_session_id = str(payload.get("session_id") or "")
+        source_roots = [Path(root) for root in payload.get("source_roots") or []]
+        record_count = int(payload.get("record_count") or 0)
+        if imported_engine is None or not imported_session_id or record_count <= 0:
+            self._fail_operation_monitor("CSV import produced no records.")
+            return
+
+        old_engine = self._engine
+        self.app._scan_finalizing = True
+        if hasattr(imported_engine, "update_state"):
+            imported_engine.update_state(
+                session_id=imported_session_id,
+                session_source_roots=source_roots,
+                session_source_root=source_roots[0] if source_roots else None,
+            )
+        else:
+            imported_engine.session_id = imported_session_id
+            imported_engine.session_source_roots = source_roots
+            imported_engine.session_source_root = source_roots[0] if source_roots else None
+        self.set_engine(imported_engine)
+        self.app.set_runtime_context(engine=imported_engine)
+        if old_engine is not None and old_engine is not imported_engine:
+            try:
+                old_engine.close()
+            except Exception:
+                logging.exception("Failed to close the previous engine after CSV import.")
+        self.undo_stack.clear()
+        drafting = getattr(self.app, "drafting_controller", None)
+        if drafting is not None:
+            drafting.clear()
+        stats = {
+            "total_scanned": record_count,
+            "added_count": record_count,
+            "lib_dupe_count": 0,
+            "session_dupe_count": 0,
+            "total_dupe_count": 0,
+        }
+        self.finalize_scan_data(
+            [],
+            False,
+            stats,
+            show_summary=False,
+            persist_staging=False,
+        )
+        self.app.footer.log(f"<b>CSV Import:</b> imported {record_count} records successfully.")
+
     def _clear_workbench_for_cancelled_scan(self) -> None:
         workflow_scan_cancellation.clear_workbench_for_cancelled_scan(getattr(self, "app", None))
 
@@ -881,11 +953,6 @@ class WorkflowController(QObject):
             workflow_build_completion.apply_default_move_flag(res, opts)
             workflow_build_completion.apply_retry_display_counts(res, opts)
         error = res.get("error") if isinstance(res, dict) else None
-        self._finish_operation_monitor(
-            "Build canceled." if isinstance(res, dict) and res.get("cancelled") else
-            "Build needs attention." if error else
-            "Build complete."
-        )
         summary = build_result_summary(res) if isinstance(res, dict) else ""
         summary_lines = build_result_compact_lines(res) if isinstance(res, dict) and error else build_result_lines(res) if isinstance(res, dict) else [summary]
         committed_count = 0
@@ -893,9 +960,6 @@ class WorkflowController(QObject):
             committed_count = workflow_build_completion.committed_record_count(res)
 
         if self._engine and getattr(self._engine, "db", None):
-            if not error:
-                workflow_build_completion.prune_successful_build_state(self._engine)
-
             session_id = workflow_build_completion.build_session_id(res, self._engine)
             workflow_build_completion.persist_build_session(self.app.settings, self._engine, session_id)
 
@@ -905,10 +969,12 @@ class WorkflowController(QObject):
             self.app.history_page.refresh_from_target(str(self._engine.target_dir))
 
         if isinstance(res, dict) and res.get("cancelled"):
+            self._finish_operation_monitor("Build canceled.")
             self._handle_cancelled_commit(res, summary_lines)
             return res
 
         if error:
+            self._finish_operation_monitor("Build needs attention.")
             message = self._build_error_message(res, summary_lines, str(error)) if isinstance(res, dict) else str(error)
             retry_records = self._retryable_failed_records(res) if isinstance(res, dict) else []
             if retry_records:
@@ -941,6 +1007,7 @@ class WorkflowController(QObject):
             return res
         
         self._enter_build_handover_state(res, "\n".join(summary_lines))
+        self._finish_operation_monitor("Build complete.")
         QMessageBox.information(self._parent_widget(), "Build Complete", "Build complete.")
         return res
 
