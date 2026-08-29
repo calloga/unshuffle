@@ -860,7 +860,9 @@ def iter_canonical_audio_items(
                        ORDER BY item_id
                    ) AS hash_rank
             FROM scan_items AS item
-            WHERE scan_id = ? AND is_supported_audio = 1
+            WHERE scan_id = ?
+              AND is_supported_audio = 1
+              AND analysis_state != 'done'
         )
         SELECT * FROM ranked WHERE hash_rank = 1 ORDER BY item_id
         """,

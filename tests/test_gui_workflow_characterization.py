@@ -4181,6 +4181,64 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
             resume_session_id="active-session",
         )
 
+    def test_start_refresh_waits_for_running_coherence_before_replacing_engine(self):
+        from gui.core.workflow_controller import WorkflowController
+
+        class _Signal:
+            def __init__(self):
+                self.callbacks = []
+
+            def connect(self, callback):
+                self.callbacks.append(callback)
+
+            def disconnect(self, callback):
+                self.callbacks.remove(callback)
+
+            def emit(self):
+                for callback in list(self.callbacks):
+                    callback()
+
+        coherence_finished = _Signal()
+        coherence = SimpleNamespace(
+            _running_workers={object()},
+            coherenceFinished=coherence_finished,
+            clear_state=mock.Mock(),
+        )
+        footer = SimpleNamespace(set_status=mock.Mock())
+        app = SimpleNamespace(
+            drafting_controller=None,
+            coherence_controller=coherence,
+            footer=footer,
+        )
+        parent = QObject()
+        controller = WorkflowController(None, mock.Mock(), mock.Mock(), parent)
+        controller.app = app
+        controller._engine = SimpleNamespace(
+            session_id="active-session",
+            session_source_roots=[Path("D:/Samples")],
+        )
+        controller.clear_build_handover_state = mock.Mock()
+
+        with mock.patch.object(controller, "start_scan", return_value=True) as start_scan_mock, \
+             mock.patch("gui.core.workflow_controller.QTimer.singleShot", side_effect=lambda _delay, callback: callback()):
+            controller.start_refresh([])
+            start_scan_mock.assert_not_called()
+            coherence._running_workers.clear()
+            coherence_finished.emit()
+
+        coherence.clear_state.assert_called_once_with()
+        footer.set_status.assert_called_once_with(
+            "Waiting for the background coherence check before rescanning..."
+        )
+        start_scan_mock.assert_called_once_with(
+            [str(Path("D:/Samples"))],
+            append=False,
+            require_clear_draft=False,
+            finalize_options={"restore_previous_session_on_cancel": True},
+            session_phase="Refreshing Session",
+            resume_session_id="active-session",
+        )
+
     def test_finalize_scan_data_from_signal_drops_cancel_only_restore_option(self):
         from gui.core.workflow_controller import WorkflowController
 

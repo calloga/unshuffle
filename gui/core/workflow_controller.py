@@ -58,6 +58,8 @@ class WorkflowController(QObject):
         self.app = parent
         self._pending_finalize_options = {}
         self._detached_build_db = None
+        self._pending_refresh_roots: list[Path] | None = None
+        self._refresh_waiting_for_coherence = False
         self.worker_manager.error.connect(lambda _message: self._close_detached_build_db())
 
     def _close_detached_build_db(self) -> None:
@@ -341,6 +343,45 @@ class WorkflowController(QObject):
             roots = self._engine.session_source_roots
             
         if not roots:
+            return
+
+        coherence = getattr(self.app, "coherence_controller", None)
+        if coherence is not None and getattr(coherence, "_running_workers", None):
+            self._defer_refresh_until_coherence(roots, coherence)
+            return
+
+        self._start_refresh_now(roots)
+
+    def _defer_refresh_until_coherence(self, roots: list[Path], coherence) -> None:
+        self._pending_refresh_roots = [Path(root) for root in roots]
+        if hasattr(coherence, "clear_state"):
+            coherence.clear_state()
+        footer = getattr(self.app, "footer", None)
+        if footer is not None:
+            footer.set_status("Waiting for the background coherence check before rescanning...")
+        if self._refresh_waiting_for_coherence or not hasattr(coherence, "coherenceFinished"):
+            return
+        self._refresh_waiting_for_coherence = True
+
+        def _resume_refresh() -> None:
+            try:
+                coherence.coherenceFinished.disconnect(_resume_refresh)
+            except (RuntimeError, TypeError):
+                pass
+            self._refresh_waiting_for_coherence = False
+            pending_roots = self._pending_refresh_roots
+            if pending_roots is None:
+                return
+            if getattr(coherence, "_running_workers", None):
+                self._defer_refresh_until_coherence(pending_roots, coherence)
+                return
+            self._pending_refresh_roots = None
+            QTimer.singleShot(0, lambda: self._start_refresh_now(pending_roots))
+
+        coherence.coherenceFinished.connect(_resume_refresh)
+
+    def _start_refresh_now(self, roots: list[Path]) -> None:
+        if not self._engine:
             return
 
         # A refresh updates the active staged session. Keeping its ID lets each

@@ -202,6 +202,37 @@ def test_scan_analysis_hash_update_does_not_mark_non_audio_with_same_hash(tmp_pa
         db.close()
 
 
+def test_canonical_audio_iterator_skips_completed_analysis_rows(tmp_path):
+    db = UnshuffleDB(tmp_path / "scan-analysis-resume.db")
+    try:
+        db.create_scan_run(
+            scan_id="scan-1",
+            session_id="session-1",
+            target_root=tmp_path,
+            roots=[Path("C:/Samples")],
+        )
+        db.insert_scan_directories("scan-1", _directory_rows(1))
+        db.insert_scan_items("scan-1", _item_rows(3))
+        db.update_scan_items(
+            "scan-1",
+            [
+                (0, {"effective_hash": "done-hash", "analysis_state": "done"}),
+                (1, {"effective_hash": "pending-hash", "analysis_state": "pending"}),
+                (2, {"effective_hash": "failed-hash", "analysis_state": "failed"}),
+            ],
+        )
+
+        rows = [
+            row
+            for batch in db.iter_canonical_scan_audio_items("scan-1", batch_size=1)
+            for row in batch
+        ]
+
+        assert [row["effective_hash"] for row in rows] == ["pending-hash", "failed-hash"]
+    finally:
+        db.close()
+
+
 def test_version_nine_database_without_scan_tables_receives_additive_schema(tmp_path):
     import sqlite3
 
