@@ -345,6 +345,7 @@ def _launch_refresh(window: Any, request: StartupLaunchRequest, app: QApplicatio
                 lambda: window.workflow_controller.start_csv_import(
                     next_request.import_path,
                     target_path=next_request.target or Path(next_request.import_path).parent,
+                    source_roots=next_request.roots,
                 ),
             )
         else:
@@ -565,6 +566,7 @@ def main() -> int:
                 lambda: window.workflow_controller.start_csv_import(
                     request.import_path,
                     target_path=request.target or Path(request.import_path).parent,
+                    source_roots=request.roots,
                 ),
             )
         else:

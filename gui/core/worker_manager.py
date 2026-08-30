@@ -129,7 +129,14 @@ class WorkerManager(QObject):
             return False
         return True
 
-    def start_csv_import(self, file_path, target_path, *, existing_engine=None):
+    def start_csv_import(
+        self,
+        file_path,
+        target_path,
+        *,
+        existing_engine=None,
+        preferred_source_roots=(),
+    ):
         if self.is_busy():
             return False
         self.worker_type = "csv_import"
@@ -140,6 +147,7 @@ class WorkerManager(QObject):
                 Path(file_path),
                 Path(target_path),
                 existing_engine=existing_engine,
+                preferred_source_roots=preferred_source_roots,
             )
             self.worker.progress.connect(self.progress.emit)
             worker = self.worker

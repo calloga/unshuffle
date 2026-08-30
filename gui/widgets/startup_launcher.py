@@ -537,9 +537,12 @@ class StartupLauncherDialog(QDialog):
         
         path, _ = QFileDialog.getOpenFileName(self, "Select CSV to Import", default_dir, "CSV Files (*.csv)")
         if path:
+            import_target = str(last_tgt) if last_tgt and Path(last_tgt).exists() else ""
             self._request = StartupLaunchRequest(
                 mode="import_csv",
                 import_path=path,
+                target=import_target,
+                roots=tuple(self._roots_values),
                 show_launcher_next_time=not self.dont_show.isChecked(),
             )
             self._save_high_performance_scan()

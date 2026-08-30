@@ -447,7 +447,13 @@ class WorkflowController(QObject):
             return
         self.scanDataReady.emit(new_records, is_append, stats)
 
-    def start_csv_import(self, file_path: str | Path, *, target_path: str | Path | None = None) -> bool:
+    def start_csv_import(
+        self,
+        file_path: str | Path,
+        *,
+        target_path: str | Path | None = None,
+        source_roots=(),
+    ) -> bool:
         file_path = Path(file_path)
         target = Path(target_path) if target_path else file_path.parent
         existing_engine = None
@@ -458,11 +464,28 @@ class WorkflowController(QObject):
                     existing_engine = self._engine
             except (OSError, TypeError, ValueError):
                 pass
+        preferred_source_roots = []
+        preferred_source_keys: set[str] = set()
+        for root in source_roots:
+            if not str(root).strip():
+                continue
+            candidate = Path(root)
+            key = str(candidate).casefold()
+            if key not in preferred_source_keys:
+                preferred_source_keys.add(key)
+                preferred_source_roots.append(candidate)
+        for root in getattr(self._engine, "session_source_roots", []) or []:
+            candidate = Path(root)
+            key = str(candidate).casefold()
+            if key not in preferred_source_keys:
+                preferred_source_keys.add(key)
+                preferred_source_roots.append(candidate)
         self._start_operation_monitor("Importing CSV", cancellable=True)
         started = self.worker_manager.start_csv_import(
             file_path,
             target,
             existing_engine=existing_engine,
+            preferred_source_roots=preferred_source_roots,
         )
         if not started:
             self._fail_operation_monitor("Could not start CSV import.")
@@ -516,6 +539,7 @@ class WorkflowController(QObject):
             stats,
             show_summary=False,
             persist_staging=False,
+            completion_message=f"Imported {record_count} CSV records.",
         )
         self.app.footer.log(f"<b>CSV Import:</b> imported {record_count} records successfully.")
 
@@ -688,6 +712,7 @@ class WorkflowController(QObject):
         on_background_work_start=None,
         status_callback=None,
         summary_callback=None,
+        completion_message="Scan complete.",
     ):
         from ..models import DbBackedStagingTableModel, StagingTableModel
         from .staging_session_store import StagingSessionStore
@@ -818,7 +843,7 @@ class WorkflowController(QObject):
             if show_summary:
                 if hasattr(self.app.footer, "show_scan_summary_button"):
                     self.app.footer.show_scan_summary_button()
-            self._finish_operation_monitor("Scan complete.")
+            self._finish_operation_monitor(completion_message)
             if hasattr(self.app, "check_for_updates"):
                 QTimer.singleShot(1000, self.app.check_for_updates)
             if callable(on_ready):

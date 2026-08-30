@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import json
 import logging
-import os
 import threading
 import uuid
 from pathlib import Path
@@ -20,19 +19,36 @@ class _ImportCancelled(RuntimeError):
     pass
 
 
-def _extend_common_source_roots(roots_by_drive: dict[str, Path], directory: Path) -> None:
-    """Update one common source root per drive using bounded memory."""
-    key = directory.drive.casefold() or "relative"
-    current = roots_by_drive.get(key)
-    if current is None:
-        roots_by_drive[key] = directory
-        return
+def _path_is_within(path: Path, root: Path) -> bool:
     try:
-        roots_by_drive[key] = Path(os.path.commonpath((str(current), str(directory))))
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
     except (OSError, ValueError):
-        # Different path dialects should already have different drive keys. Keep
-        # the first useful root if a malformed legacy CSV defeats commonpath().
-        return
+        return False
+
+
+def _is_filesystem_root(path: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        resolved = path
+    return resolved.parent == resolved
+
+
+def _inferred_csv_source_root(source_directory: Path, pack_value: object) -> Path:
+    """Recover the scan root immediately above a matching pack directory."""
+    pack_name = str(pack_value or "").strip().casefold()
+    if not pack_name:
+        return source_directory
+    parts = source_directory.parts
+    for index in range(len(parts) - 1, 0, -1):
+        if str(parts[index]).strip().casefold() != pack_name:
+            continue
+        candidate = Path(*parts[:index])
+        # If the pack itself was the selected drive/root, walking above it
+        # would reproduce the overly broad D:\ regression.
+        return source_directory if _is_filesystem_root(candidate) else candidate
+    return source_directory
 
 
 class CsvImportWorker(QThread):
@@ -42,11 +58,20 @@ class CsvImportWorker(QThread):
     completed = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, file_path: Path, target_path: Path, *, existing_engine=None, parent=None):
+    def __init__(
+        self,
+        file_path: Path,
+        target_path: Path,
+        *,
+        existing_engine=None,
+        preferred_source_roots=(),
+        parent=None,
+    ):
         super().__init__(parent)
         self.file_path = Path(file_path)
         self.target_path = Path(target_path)
         self.existing_engine = existing_engine
+        self.preferred_source_roots = [Path(root) for root in preferred_source_roots if str(root).strip()]
         self._cancel_requested = threading.Event()
 
     def request_cancel(self) -> None:
@@ -104,7 +129,9 @@ class CsvImportWorker(QThread):
                 raise RuntimeError("Could not create an import session.")
 
             db = engine.db
-            source_roots_by_drive: dict[str, Path] = {}
+            fallback_source_roots: list[Path] = []
+            fallback_source_keys: set[str] = set()
+            matched_preferred_keys: set[str] = set()
             inserted = 0
 
             def staging_rows():
@@ -123,18 +150,34 @@ class CsvImportWorker(QThread):
                                 f"CSV row {row_number} is missing its source directory or filename."
                             )
                         source_dir = Path(source_directory)
-                        _extend_common_source_roots(source_roots_by_drive, source_dir)
                         source_path = source_dir / source_filename
+                        pack_value = row.get("pack", "Unknown")
+                        category_value = row.get("category", "Utility")
+                        audio_type_value = row.get("audio_type", "Oneshots")
+                        covered = False
+                        for preferred_root in self.preferred_source_roots:
+                            if _is_filesystem_root(preferred_root):
+                                continue
+                            if _path_is_within(source_path, preferred_root):
+                                matched_preferred_keys.add(str(preferred_root).casefold())
+                                covered = True
+                                break
+                        if not covered:
+                            inferred_root = _inferred_csv_source_root(source_dir, pack_value)
+                            source_key = str(inferred_root).casefold()
+                            if source_key not in fallback_source_keys:
+                                fallback_source_keys.add(source_key)
+                                fallback_source_roots.append(inferred_root)
                         row_id = inserted
                         inserted += 1
                         yield (
                             row_id,
                             str(source_path),
                             source_path.name,
-                            str(row.get("pack") or "Unknown"),
-                            str(row.get("category") or "Utility"),
+                            str(pack_value),
+                            str(category_value),
                             str(row.get("subcategory") or ""),
-                            str(row.get("audio_type") or "Oneshots"),
+                            str(audio_type_value),
                             tags_to_search_text(parse_tags(row.get("tags") or "")),
                             "1.0",
                             0.0,
@@ -146,7 +189,7 @@ class CsvImportWorker(QThread):
                             None,
                             None,
                             None,
-                            "[]",
+                            None,
                             None,
                             False,
                         )
@@ -167,7 +210,15 @@ class CsvImportWorker(QThread):
             )
             db.add_staging_records_iter(session_id, staging_rows(), batch_size=1000)
             self._check_cancelled()
-            source_roots = list(source_roots_by_drive.values())
+            source_roots = [
+                root
+                for root in self.preferred_source_roots
+                if str(root).casefold() in matched_preferred_keys
+            ]
+            known_root_keys = {str(root).casefold() for root in source_roots}
+            source_roots.extend(
+                root for root in fallback_source_roots if str(root).casefold() not in known_root_keys
+            )
             db.register_session(
                 session_id,
                 source=source_roots[0] if source_roots else self.target_path,
@@ -276,6 +327,11 @@ class PortableSessionImportWorker(QThread):
                     if remap_imported_source_path(source_path, self.source_remaps).exists():
                         importable_count += 1
                     else:
+                        logging.warning(
+                            "Session import skipped missing file: %s -> %s",
+                            source_path,
+                            remap_imported_source_path(source_path, self.source_remaps),
+                        )
                         skipped_count += 1
                 checked_count += len(batch)
                 self.progress.emit({
@@ -312,6 +368,13 @@ class PortableSessionImportWorker(QThread):
 
             copied_count = 0
 
+            self.progress.emit({
+                "phase": "Copying Session Records",
+                "message": "Copying staging records...",
+                "current": 0,
+                "total": importable_count,
+            })
+
             def imported_rows():
                 nonlocal copied_count
                 for batch in local_db.iter_staging_records(session_id, batch_size=1000):
@@ -335,6 +398,12 @@ class PortableSessionImportWorker(QThread):
 
             cache_rows = []
             cache_checked = 0
+            self.progress.emit({
+                "phase": "Restoring Audio Cache",
+                "message": "Restoring cached analysis...",
+                "current": 0,
+                "total": importable_count,
+            })
             for batch in self.global_db.iter_staging_records(session_id, batch_size=500):
                 for row in batch:
                     file_hash = str(row.get("hash") or "").strip()
@@ -378,6 +447,12 @@ class PortableSessionImportWorker(QThread):
                         (session_id,),
                     ).fetchone()[0])
                     phase = f"Restoring Session Metadata ({table_index}/{len(PORTABLE_SESSION_TABLES)})"
+                    self.progress.emit({
+                        "phase": phase,
+                        "message": f"Restoring {table.replace('_', ' ')}...",
+                        "current": 0,
+                        "total": table_total,
+                    })
                     copy_portable_session_table(
                         local_db.conn,
                         self.global_db.conn,
@@ -409,6 +484,12 @@ class PortableSessionImportWorker(QThread):
 
             try:
                 reviewed_count = 0
+                self.progress.emit({
+                    "phase": "Restoring Review Decisions",
+                    "message": "Restoring coherence review decisions...",
+                    "current": 0,
+                    "total": importable_count,
+                })
                 for batch in local_db.iter_staging_records(session_id, batch_size=800):
                     decisions = local_db.list_coherence_review_decisions(
                         [str(row.get("source_path") or "") for row in batch],
@@ -430,6 +511,11 @@ class PortableSessionImportWorker(QThread):
             except Exception:
                 logging.exception("Failed to import portable coherence review decisions.")
 
+            self.progress.emit({
+                "phase": "Opening Imported Session",
+                "message": "Preparing the library views...",
+                "percent": 95,
+            })
             self.completed.emit({
                 "session_id": session_id,
                 "record_count": importable_count,

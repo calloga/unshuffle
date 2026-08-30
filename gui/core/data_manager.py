@@ -276,6 +276,14 @@ class DataManager:
         if active_worker is not None and active_worker.isRunning():
             QMessageBox.information(parent_widget or self.app, "Import Session", "A session import is already running.")
             return False
+        worker_manager = getattr(self.app, "worker_manager", None)
+        if worker_manager is not None and worker_manager.is_busy():
+            QMessageBox.information(
+                parent_widget or self.app,
+                "Import Session",
+                "Wait for the current operation to finish before importing a session.",
+            )
+            return False
 
         import_path = Path(folder_path)
         local_db_path = import_path if import_path.is_file() else get_local_system_dir(import_path) / DB_FILE_NAME
@@ -342,6 +350,11 @@ class DataManager:
         monitor_token = monitor.start("Importing Session", cancellable=False) if monitor is not None else None
         set_ui_busy(self.app, True)
         self.app._scan_finalizing = True
+        if getattr(self.app, "footer", None) is not None:
+            self.app.footer.set_status("Importing session records...")
+            self.app.footer.log(
+                "<b>Staging Session:</b> reading and copying sidecar database..."
+            )
         worker = PortableSessionImportWorker(
             local_db_path,
             global_db,
@@ -412,7 +425,12 @@ class DataManager:
                     "total_dupe_count": 0,
                 }
                 self.app.workflow_controller.finalize_scan_data(
-                    [], False, stats, show_summary=False, persist_staging=False
+                    [],
+                    False,
+                    stats,
+                    show_summary=False,
+                    persist_staging=False,
+                    completion_message=f"Imported {record_count} records.",
                 )
                 self.app.footer.log(
                     f"<b>Staging Session:</b> imported {record_count} records successfully."
