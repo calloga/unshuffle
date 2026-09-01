@@ -5,9 +5,9 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from PySide6.QtCore import QThread, QUrl
+from PySide6.QtCore import QThread, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
+from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from unshuffle.bridge.persistence_bridge import PersistenceBridge
 from unshuffle.core import PlanRecord, parse_tags, plan_records_from_staging_rows
@@ -15,6 +15,7 @@ from unshuffle.core.features import CURRENT_EXTRACTOR_VERSION, CURRENT_FEATURE_S
 from unshuffle.core.paths import DB_FILE_NAME, SYSTEM_FOLDER_NAME
 from unshuffle.persistence.exports import export_staging_plan_csv
 
+from ..dialogs.session_import_dialog import SessionImportDialog
 from ..utils.constants import StagingColumn, STAGING_HEADERS
 
 SESSION_METADATA_SAVED_FILTERS_KEY = "saved_filters"
@@ -300,7 +301,7 @@ class DataManager:
             if not recent:
                 QMessageBox.warning(parent_widget or self.app, "Import Session", "No staging sessions found in the target database.")
                 return False
-            session = self._choose_import_session(recent, parent_widget=parent_widget)
+            session = self._choose_import_session(recent, local_db, parent_widget=parent_widget)
             if session is None:
                 return False
             session_id = str(session.get("session_id") or "")
@@ -503,57 +504,93 @@ class DataManager:
     def _show_session_export_success(self, local_db_path: Path, sources: list[str], parent_widget=None) -> None:
         parent = parent_widget or self.app
         message = QMessageBox(parent)
-        message.setWindowTitle("Export Session")
+        message.setWindowTitle("Session Exported")
         message.setIcon(QMessageBox.Information)
-        message.setText("Staging session exported.")
+        message.setText("Session exported.")
         message.setInformativeText(
-            "The session was saved to this folder's unshuffle sidecar.\n\n"
-            "To restore it later, use Library > Import > From Staging Session and select this folder "
-            "or the sidecar unshuffle.db file.\n\n"
-            "If a source folder has moved or the drive letter changed, import will ask for its current location."
+            f"Saved to:\n{local_db_path}\n\n"
+            "Your audio files remain in their original folders."
         )
-        message.setDetailedText(
-            f"Exported database:\n{local_db_path}\n\n"
-            f"Linked source folders:\n" + "\n".join(str(source) for source in sources)
-        )
-        show_button = message.addButton("Show", QMessageBox.ActionRole)
-        message.addButton(QMessageBox.Ok)
+        message.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        show_button = message.addButton("Open Folder", QMessageBox.ActionRole)
+        ok_button = message.addButton(QMessageBox.Ok)
+        message.setDefaultButton(ok_button)
         message.exec()
         if message.clickedButton() is show_button:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(local_db_path.parent.absolute())))
 
-    @staticmethod
-    def _session_choice_label(session: dict) -> str:
-        session_id = str(session.get("session_id") or "")
-        timestamp = str(session.get("timestamp") or "").strip()
-        source = str(session.get("source_path") or "").strip()
-        parts = [session_id]
-        if timestamp:
-            parts.append(timestamp)
-        if source:
-            parts.append(source)
-        return " | ".join(part for part in parts if part)
+    def _confirm_session_export(
+        self,
+        local_db_path: Path,
+        sources: list[str],
+        parent_widget=None,
+    ) -> bool:
+        message = QMessageBox(parent_widget or self.app)
+        message.setWindowTitle("Export Session")
+        message.setIcon(QMessageBox.Question)
+        message.setText("Export this staging session?")
+        source_count = len([source for source in sources if str(source or "").strip()])
+        source_label = "folder" if source_count == 1 else "folders"
+        dependency_note = (
+            f" Keep the {source_count} linked source {source_label} available when restoring."
+            if source_count
+            else ""
+        )
+        message.setInformativeText(
+            f"Save to:\n{local_db_path}\n\n"
+            "This exports the staging plan, saved filters, and library structure. "
+            f"Audio files are not copied.{dependency_note}"
+        )
+        message.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        export_button = message.addButton("Export", QMessageBox.AcceptRole)
+        message.addButton("Cancel", QMessageBox.RejectRole)
+        message.setDefaultButton(export_button)
+        message.exec()
+        return message.clickedButton() is export_button
 
-    def _choose_import_session(self, sessions: list[dict], parent_widget=None) -> dict | None:
+    @staticmethod
+    def _session_import_choices(sessions: list[dict], session_db) -> list[dict]:
+        counts = {
+            str(row["session_id"]): int(row["record_count"])
+            for row in session_db.conn.execute(
+                "SELECT session_id, COUNT(*) AS record_count FROM staging_records GROUP BY session_id"
+            )
+        }
+        sources_by_session: dict[str, list[str]] = {}
+        for row in session_db.conn.execute(
+            "SELECT session_id, source_path FROM session_sources ORDER BY session_id, ordinal"
+        ):
+            sources_by_session.setdefault(str(row["session_id"]), []).append(str(row["source_path"]))
+        return [
+            {
+                "session": session,
+                "record_count": counts.get(str(session.get("session_id") or ""), 0),
+                "sources": sources_by_session.get(str(session.get("session_id") or ""), []),
+            }
+            for session in sessions
+        ]
+
+    def _choose_import_session(self, sessions: list[dict], session_db, parent_widget=None) -> dict | None:
         if not sessions:
             return None
-        if len(sessions) == 1:
-            return sessions[0]
-        labels = [self._session_choice_label(session) for session in sessions]
-        selected, ok = QInputDialog.getItem(
-            parent_widget or self.app,
-            "Import Session",
-            "Select the staging session to import:",
-            labels,
-            0,
-            False,
-        )
-        if not ok:
+        choices = [
+            choice
+            for choice in self._session_import_choices(sessions, session_db)
+            if int(choice.get("record_count") or 0) > 0
+        ]
+        if not choices:
+            QMessageBox.warning(
+                parent_widget or self.app,
+                "Import Session",
+                "No staging records found in the sidecar database.",
+            )
             return None
-        try:
-            return sessions[labels.index(selected)]
-        except ValueError:
+        if len(choices) == 1:
+            return choices[0]["session"]
+        dialog = SessionImportDialog(choices, parent_widget or self.app)
+        if dialog.exec() != SessionImportDialog.Accepted:
             return None
+        return dialog.selected_session()
 
     def _prompt_source_remaps(self, sources: list[str], parent_widget=None) -> dict[str, Path] | None:
         remaps: dict[str, Path] = {}
@@ -604,29 +641,9 @@ class DataManager:
             return False
         sources = global_db.get_session_sources(session_id)
 
-        # Pop warning dialog about source folder dependencies
-        sources_list = "\n".join(f"- {s}" for s in sources)
-        msg = (
-            f"Exporting staging session '{session_id}' to target folder.\n\n"
-            f"The following directory paths are linked to this session:\n{sources_list}\n\n"
-            "These directories will be needed to fully restore the session later. "
-            "If a source folder has moved or the drive letter changed, import will ask for its current location.\n\n"
-            "Proceed with export?"
-        )
-        reply = QMessageBox.question(
-            parent_widget or self.app,
-            "Confirm Staging Session Export",
-            msg,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if reply != QMessageBox.Yes:
-            return False
-
         local_db = None
         try:
             from unshuffle.persistence import UnshuffleDB
-            from unshuffle.core.paths import get_local_system_dir
 
             saved_filters = []
             settings_controller = getattr(self.app, "settings_controller", None)
@@ -636,11 +653,13 @@ class DataManager:
             export_path = Path(folder_path)
             if export_path.suffix == ".unshuffle" or export_path.is_file():
                 local_db_path = export_path
-                local_db_path.parent.mkdir(parents=True, exist_ok=True)
             else:
-                local_system_dir = get_local_system_dir(export_path)
-                local_system_dir.mkdir(parents=True, exist_ok=True)
-                local_db_path = local_system_dir / "unshuffle.db"
+                local_db_path = export_path / SYSTEM_FOLDER_NAME / DB_FILE_NAME
+
+            if not self._confirm_session_export(local_db_path, sources, parent_widget=parent_widget):
+                return False
+
+            local_db_path.parent.mkdir(parents=True, exist_ok=True)
             
             local_db = UnshuffleDB(local_db_path)
             
@@ -772,7 +791,7 @@ class DataManager:
                 QMessageBox.warning(parent_widget or self.app, "Import Session", "No staging sessions found in the target database.")
                 return False
 
-            sess = self._choose_import_session(recent, parent_widget=parent_widget)
+            sess = self._choose_import_session(recent, local_db, parent_widget=parent_widget)
             if sess is None:
                 return False
             session_id = str(sess.get("session_id") or "")

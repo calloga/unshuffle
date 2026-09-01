@@ -5321,11 +5321,14 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
             ]
             manager = DataManager(engine=SimpleNamespace(db=global_db, session_id=session_id), app=app)
 
-            with mock.patch("gui.core.data_manager.QMessageBox.question", return_value=QMessageBox.Yes), \
+            with mock.patch.object(manager, "_confirm_session_export", return_value=True) as confirm_export, \
                  mock.patch.object(manager, "_show_session_export_success"):
                 exported = manager.export_session_to_folder(target, parent_widget=app)
 
             self.assertTrue(exported)
+            confirm_args = confirm_export.call_args.args
+            self.assertEqual(confirm_args[0], get_local_system_dir(target) / "unshuffle.db")
+            self.assertEqual([Path(source_path) for source_path in confirm_args[1]], [source])
             self.assertEqual(local_db.foreign_key_violations(), [])
             self.assertEqual(len(local_db.get_staging_records(session_id)), 1)
             self.assertEqual(
@@ -5413,17 +5416,23 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
             app.operation_monitor.start.return_value = 41
             manager = DataManager(engine=engine, app=app)
 
-            def choose_old(_parent, _title, _label, items, _current, _editable):
-                return next(item for item in items if "old-session" in item), True
-
-            with mock.patch("gui.core.data_manager.QInputDialog.getItem", side_effect=choose_old) as get_item, \
+            with mock.patch.object(
+                manager,
+                "_choose_import_session",
+                return_value=local_db.get_session("old-session"),
+            ) as choose_session, \
                  mock.patch("PySide6.QtWidgets.QApplication.setOverrideCursor"), \
                  mock.patch("PySide6.QtWidgets.QApplication.restoreOverrideCursor"), \
                  mock.patch("PySide6.QtWidgets.QApplication.processEvents") as process_events:
                 imported = manager.import_session_from_folder(export_root, parent_widget=app)
 
             self.assertTrue(imported)
-            get_item.assert_called_once()
+            choose_session.assert_called_once()
+            self.assertEqual(
+                {session["session_id"] for session in choose_session.call_args.args[0]},
+                {"old-session", "new-session"},
+            )
+            self.assertIsInstance(choose_session.call_args.args[1], UnshuffleDB)
             self.assertEqual(engine.session_id, "old-session")
             args, kwargs = app.workflow_controller.finalize_scan_data.call_args
             self.assertEqual(args[0], [])
