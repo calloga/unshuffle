@@ -127,20 +127,21 @@ class StagingTableModelTests(unittest.TestCase):
 
         self.assertEqual(remapped, Path("G:/Drum Library/Kicks/kick.wav"))
 
-    def test_import_session_choice_label_omits_file_count(self):
-        manager = DataManager()
+    def test_import_session_display_name_omits_internal_session_fields(self):
+        from gui.dialogs.session_import_dialog import session_display_name
 
-        label = manager._session_choice_label(
-            {
-                "session_id": "session-a",
-                "timestamp": "2026-06-13 12:00:00",
-                "source_path": "F:/Samples",
-                "file_count": 10,
-            }
-        )
+        session = {
+            "session_id": "session-a",
+            "timestamp": "2026-06-13 12:00:00",
+            "source_path": "F:/Samples",
+            "file_count": 10,
+        }
 
-        self.assertEqual(label, "session-a | 2026-06-13 12:00:00 | F:/Samples")
-        self.assertNotIn("10 files", label)
+        label = session_display_name([], session["source_path"])
+
+        self.assertEqual(label, "Samples")
+        self.assertNotIn(session["session_id"], label)
+        self.assertNotIn(str(session["file_count"]), label)
 
     def test_import_session_target_root_falls_back_to_sidecar_parent_when_saved_target_is_missing(self):
         from gui.core.data_manager import import_session_target_root

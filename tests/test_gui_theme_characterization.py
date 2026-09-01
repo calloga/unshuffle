@@ -497,6 +497,7 @@ class ViewThemeMenuTests(unittest.TestCase):
 
         window = ModernApp(defer_startup_restore=True)
         try:
+            self.assertEqual(window.windowTitle(), "Unshuffle")
             self.assertFalse(window.custom_menu_bar.isNativeMenuBar())
         finally:
             window.close()

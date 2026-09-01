@@ -6,7 +6,7 @@ from PySide6.QtGui import QUndoStack
 from PySide6.QtWidgets import QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout, QMainWindow, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 import shiboken6
 
-from unshuffle.core.constants import APP_NAME, APP_VERSION
+from unshuffle.core.constants import APP_NAME
 from ..core import (
     AcousticController,
     DataManager,
@@ -67,7 +67,7 @@ class ModernApp(QMainWindow):
     def __init__(self, *, defer_startup_restore: bool = False):
         super().__init__()
         self._defer_window_show = defer_startup_restore
-        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
+        self.setWindowTitle(APP_NAME)
         apply_app_icon(self)
         self.resize(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
         self.setAcceptDrops(True)
