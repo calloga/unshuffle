@@ -152,6 +152,125 @@ def test_single_importable_session_skips_the_picker(tmp_path: Path) -> None:
         database.close()
 
 
+def test_portable_import_uses_global_database_when_runtime_is_local(tmp_path: Path) -> None:
+    local_db = SimpleNamespace(db_path=tmp_path / "local" / "unshuffle.db")
+    global_db = SimpleNamespace(db_path=tmp_path / "global" / "unshuffle.db")
+
+    with mock.patch("unshuffle.persistence.get_global_system_dir", return_value=tmp_path / "global"), \
+         mock.patch("unshuffle.persistence.get_db", return_value=global_db) as get_db:
+        selected, opened = DataManager._portable_import_destination_database(
+            local_db,
+            tmp_path / "library",
+        )
+
+    assert selected is global_db
+    assert opened
+    get_db.assert_called_once_with(tmp_path / "library")
+
+
+def test_portable_import_reuses_existing_global_database(tmp_path: Path) -> None:
+    global_db = SimpleNamespace(db_path=tmp_path / "global" / "unshuffle.db")
+
+    with mock.patch("unshuffle.persistence.get_global_system_dir", return_value=tmp_path / "global"), \
+         mock.patch("unshuffle.persistence.get_db") as get_db:
+        selected, opened = DataManager._portable_import_destination_database(
+            global_db,
+            tmp_path / "library",
+        )
+
+    assert selected is global_db
+    assert not opened
+    get_db.assert_not_called()
+
+
+def test_export_to_active_database_does_not_clear_its_source_rows(tmp_path: Path) -> None:
+    from unshuffle.core.paths import get_local_system_dir
+
+    export_root = tmp_path / "library"
+    source_root = tmp_path / "source"
+    export_root.mkdir()
+    source_root.mkdir()
+    sample = source_root / "kick.wav"
+    sample.write_bytes(b"sample")
+    database = UnshuffleDB(get_local_system_dir(export_root) / "unshuffle.db")
+    session_id = "local-session"
+    database.register_session(session_id, source_root, export_root, "pending")
+    database.set_session_sources(session_id, [source_root])
+    database.add_staging_records_bulk(
+        session_id,
+        [
+            (
+                1,
+                str(sample),
+                sample.name,
+                "Pack",
+                "Kicks",
+                "",
+                "Oneshots",
+                "[]",
+                "1.0",
+                0.1,
+                "hash",
+                "fast-hash",
+                "[]",
+                "{}",
+                None,
+                None,
+                None,
+                "ok",
+                "[]",
+                None,
+                False,
+            )
+        ],
+    )
+    app = SimpleNamespace(
+        drafting_controller=None,
+        settings_controller=None,
+        tree_organization_controller=None,
+    )
+    manager = DataManager(engine=SimpleNamespace(db=database, session_id=session_id), app=app)
+
+    try:
+        with mock.patch.object(manager, "_confirm_session_export", return_value=True), \
+             mock.patch.object(manager, "_show_session_export_success"):
+            exported = manager.export_session_to_folder(export_root)
+
+        assert exported
+        assert len(database.get_staging_records(session_id)) == 1
+        database.conn.execute("SELECT 1").fetchone()
+    finally:
+        database.close()
+
+
+def test_export_prefers_the_session_backing_the_visible_model(tmp_path: Path) -> None:
+    visible_db = UnshuffleDB(tmp_path / "visible.db")
+    stale_db = UnshuffleDB(tmp_path / "stale.db")
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    sample = source_root / "kick.wav"
+    sample.write_bytes(b"sample")
+    visible_db.register_session("visible", source_root, tmp_path, "pending")
+    visible_db.add_staging_records_bulk(
+        "visible",
+        [(1, str(sample), sample.name, "Pack", "Kicks", "", "Oneshots", "[]", "1.0", 0.1, None, "[]", None, None, 0)],
+    )
+    stale_db.register_session("stale", source_root, tmp_path, "pending")
+    app = SimpleNamespace(
+        session_store=SimpleNamespace(db=visible_db, session_id="visible"),
+    )
+    manager = DataManager(engine=SimpleNamespace(db=stale_db, session_id="stale"), app=app)
+
+    try:
+        database, session_id = manager._active_staging_export_source()
+
+        assert database is visible_db
+        assert session_id == "visible"
+    finally:
+        visible_db.close()
+        stale_db.close()
+
+
 def test_export_confirmation_states_exact_path_and_audio_dependency() -> None:
     expected_path = Path(r"D:\Library\DO_NOT_DELETE_unshuffle\unshuffle.db")
     export_button = object()

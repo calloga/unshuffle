@@ -5562,6 +5562,105 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
             global_db.close()
             tmp.cleanup()
 
+    def test_async_session_import_rebinds_local_runtime_to_global_database(self):
+        from gui.core.data_manager import DataManager
+        from gui.core.import_workers import PortableSessionImportWorker
+        from unshuffle.bridge.workflow_bridge import WorkflowBridge
+        from unshuffle.core.paths import get_local_system_dir
+        from unshuffle.persistence import UnshuffleDB
+
+        QCoreApplication.instance() or QCoreApplication([])
+        tmp = tempfile.TemporaryDirectory()
+        root = Path(tmp.name)
+        export_root = root / "exported"
+        source_root = root / "source"
+        export_root.mkdir()
+        source_root.mkdir()
+        sample = source_root / "kick.wav"
+        sample.write_bytes(b"sample")
+        session_id = "portable-session"
+        local_db_path = get_local_system_dir(export_root) / "unshuffle.db"
+        sidecar_db = UnshuffleDB(local_db_path)
+        runtime_local_db = UnshuffleDB(local_db_path)
+        global_db = UnshuffleDB(root / "global.db")
+        sidecar_db.register_session(session_id, source_root, export_root, "pending")
+        sidecar_db.set_session_sources(session_id, [source_root])
+        sidecar_db.add_staging_records_bulk(
+            session_id,
+            [
+                (
+                    1,
+                    str(sample),
+                    sample.name,
+                    "Pack",
+                    "Kicks",
+                    "",
+                    "Oneshots",
+                    "[]",
+                    "1.0",
+                    0.1,
+                    "full-hash",
+                    "fast-hash",
+                    "[]",
+                    "{}",
+                    None,
+                    None,
+                    None,
+                    "ok",
+                    "[]",
+                    None,
+                    False,
+                )
+            ],
+        )
+        raw_engine = SimpleNamespace(
+            db=runtime_local_db,
+            local_db=runtime_local_db,
+            target_dir=export_root,
+            session_id=session_id,
+            session_source_root=source_root,
+            session_source_roots=[source_root],
+            interrupted=False,
+            progress_callback=None,
+        )
+        engine = WorkflowBridge(raw_engine)
+        app = mock.Mock()
+        app.worker_manager.is_busy.return_value = False
+        app.operation_monitor.start.return_value = 73
+        app.drafting_controller = mock.Mock()
+        app.undo_stack = mock.Mock()
+        manager = DataManager(engine=engine, app=app)
+
+        try:
+            with mock.patch.object(
+                manager,
+                "_portable_import_destination_database",
+                return_value=(global_db, True),
+            ) as choose_destination, mock.patch(
+                "gui.utils.ui_helpers.set_ui_busy"
+            ), mock.patch.object(
+                PortableSessionImportWorker,
+                "start",
+                lambda worker, *_args: worker.run(),
+            ):
+                started = manager.start_session_import_from_folder(export_root, parent_widget=None)
+
+            self.assertTrue(started)
+            choose_destination.assert_called_once_with(runtime_local_db, export_root)
+            self.assertIs(raw_engine.db, global_db)
+            self.assertIs(raw_engine.local_db, runtime_local_db)
+            self.assertIs(manager.bridge._get_db(), global_db)
+            self.assertEqual(len(global_db.get_staging_records(session_id)), 1)
+            self.assertEqual(len(sidecar_db.get_staging_records(session_id)), 1)
+            app.workflow_controller.finalize_scan_data.assert_called_once()
+            finalize_args = app.workflow_controller.finalize_scan_data.call_args.args
+            self.assertEqual(finalize_args[2]["total_scanned"], 1)
+        finally:
+            sidecar_db.close()
+            runtime_local_db.close()
+            global_db.close()
+            tmp.cleanup()
+
     def test_portable_import_remaps_preserved_and_duplicate_shadow_paths(self):
         from gui.core.data_manager import remap_imported_staging_row
 

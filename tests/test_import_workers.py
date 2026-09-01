@@ -382,6 +382,77 @@ class CsvImportWorkerTests(unittest.TestCase):
 
 
 class PortableSessionImportWorkerTests(unittest.TestCase):
+    def test_same_database_import_keeps_source_rows_intact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_root = root / "source"
+            source_root.mkdir()
+            sample = source_root / "kick.wav"
+            sample.write_bytes(b"sample")
+            database_path = root / "portable.db"
+            source_db = UnshuffleDB(database_path)
+            destination_handle = UnshuffleDB(database_path)
+            session_id = "same-database-session"
+            source_db.register_session(session_id, source_root, root / "target", "pending")
+            source_db.set_session_sources(session_id, [source_root])
+            source_db.set_session_metadata(session_id, "saved_filters", '[{"name":"Kicks"}]')
+            source_db.add_staging_records_bulk(
+                session_id,
+                [
+                    (
+                        1,
+                        str(sample),
+                        sample.name,
+                        "Pack",
+                        "Kicks",
+                        "",
+                        "Oneshots",
+                        "[]",
+                        "1.0",
+                        0.1,
+                        "full-hash",
+                        "fast-hash",
+                        "[]",
+                        "{}",
+                        None,
+                        None,
+                        None,
+                        "ok",
+                        "[]",
+                        None,
+                        False,
+                    )
+                ],
+            )
+            session = source_db.get_session(session_id)
+            self.assertIsNotNone(session)
+            assert session is not None
+            completed = []
+            errors = []
+            worker = PortableSessionImportWorker(
+                database_path,
+                destination_handle,
+                session,
+                {str(source_root): source_root},
+                [source_root],
+                root / "target",
+            )
+            worker.completed.connect(completed.append)
+            worker.error.connect(errors.append)
+
+            try:
+                worker.run()
+
+                self.assertEqual(errors, [])
+                self.assertEqual(completed[0]["record_count"], 1)
+                self.assertEqual(completed[0]["saved_filters_json"], '[{"name":"Kicks"}]')
+                rows = source_db.get_staging_records(session_id)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(Path(rows[0]["source_path"]), sample)
+            finally:
+                source_db.close()
+                destination_handle.close()
+
     def test_copies_available_rows_and_reports_missing_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

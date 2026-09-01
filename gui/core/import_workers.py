@@ -294,6 +294,8 @@ class PortableSessionImportWorker(QThread):
             SESSION_METADATA_PORTABLE_MANIFEST_KEY,
             SESSION_METADATA_SAVED_FILTERS_KEY,
             copy_portable_session_table,
+            database_uses_path,
+            paths_refer_to_same_location,
             remap_imported_source_path,
             remap_imported_staging_row,
             staging_row_tuple,
@@ -345,6 +347,35 @@ class PortableSessionImportWorker(QThread):
                     f"All {total_staging} files in this session are unmounted or missing on this system."
                 )
 
+            if database_uses_path(self.global_db, self.local_db_path):
+                moved_sources = [
+                    source
+                    for source, replacement in self.source_remaps.items()
+                    if not paths_refer_to_same_location(source, replacement)
+                ]
+                if moved_sources:
+                    raise ValueError(
+                        "This session is already stored in the active database, but one or more source "
+                        "folders were remapped. Export it to a different folder before importing it."
+                    )
+                self.progress.emit({
+                    "phase": "Opening Imported Session",
+                    "message": "Preparing the library views...",
+                    "percent": 95,
+                })
+                self.completed.emit({
+                    "session_id": session_id,
+                    "record_count": total_staging,
+                    "skipped_count": 0,
+                    "saved_filters_json": local_db.get_session_metadata(
+                        session_id, SESSION_METADATA_SAVED_FILTERS_KEY
+                    ),
+                    "portable_manifest_json": local_db.get_session_metadata(
+                        session_id, SESSION_METADATA_PORTABLE_MANIFEST_KEY
+                    ),
+                })
+                return
+
             self.progress.emit({
                 "phase": "Preparing Destination",
                 "message": "Preparing the imported session...",
@@ -394,7 +425,20 @@ class PortableSessionImportWorker(QThread):
                         "total": importable_count,
                     })
 
-            self.global_db.add_staging_records_iter(session_id, imported_rows(), batch_size=1000)
+            inserted_count = self.global_db.add_staging_records_iter(
+                session_id,
+                imported_rows(),
+                batch_size=1000,
+            )
+            destination_count = int(self.global_db.conn.execute(
+                "SELECT COUNT(*) FROM staging_records WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0])
+            if inserted_count != copied_count or destination_count != copied_count:
+                raise RuntimeError(
+                    "Session import verification failed: "
+                    f"copied {copied_count}, inserted {inserted_count}, found {destination_count}."
+                )
 
             cache_rows = []
             cache_checked = 0
@@ -518,7 +562,7 @@ class PortableSessionImportWorker(QThread):
             })
             self.completed.emit({
                 "session_id": session_id,
-                "record_count": importable_count,
+                "record_count": copied_count,
                 "skipped_count": skipped_count,
                 "saved_filters_json": local_db.get_session_metadata(
                     session_id, SESSION_METADATA_SAVED_FILTERS_KEY

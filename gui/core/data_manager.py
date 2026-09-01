@@ -1,6 +1,7 @@
 import logging
 import csv
 import json
+import os
 import uuid
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -22,6 +23,20 @@ SESSION_METADATA_SAVED_FILTERS_KEY = "saved_filters"
 SESSION_METADATA_PORTABLE_MANIFEST_KEY = "portable_session_manifest"
 PORTABLE_SESSION_FORMAT_VERSION = 2
 PORTABLE_SESSION_TABLES = ("coherence_results", "refinement_candidates", "anchor_profiles")
+
+
+def paths_refer_to_same_location(left_path: Path | str, right_path: Path | str) -> bool:
+    try:
+        left = Path(left_path).resolve(strict=False)
+        right = Path(right_path).resolve(strict=False)
+    except (OSError, TypeError, ValueError):
+        return False
+    return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+def database_uses_path(database, path: Path) -> bool:
+    database_path = getattr(database, "db_path", None)
+    return database_path is not None and paths_refer_to_same_location(database_path, path)
 
 
 def staging_row_tuple(row: dict) -> tuple:
@@ -118,6 +133,40 @@ class DataManager:
     def set_bridge(self, bridge):
         self.bridge = bridge
         self.engine = bridge.workflow if bridge else None
+
+    @staticmethod
+    def _portable_import_destination_database(current_db, target_root: Path):
+        """Return the global import database and whether the caller opened it."""
+        from unshuffle.persistence import get_db, get_global_system_dir
+
+        global_db_path = get_global_system_dir() / DB_FILE_NAME
+        if current_db is not None and database_uses_path(current_db, global_db_path):
+            return current_db, False
+        return get_db(target_root), True
+
+    def _active_staging_export_source(self):
+        database = self.bridge._get_db() if self.bridge else None
+        session_id = str(self.bridge.session_id or "") if self.bridge else ""
+        store = getattr(self.app, "session_store", None)
+        store_database = getattr(store, "db", None)
+        store_session_value = getattr(store, "session_id", "")
+        store_session_id = store_session_value.strip() if isinstance(store_session_value, str) else ""
+        store_database_path = getattr(store_database, "db_path", None)
+        if (
+            store_database is not None
+            and isinstance(store_database_path, (str, Path))
+            and store_session_id
+        ):
+            try:
+                row = store_database.conn.execute(
+                    "SELECT 1 FROM staging_records WHERE session_id = ? LIMIT 1",
+                    (store_session_id,),
+                ).fetchone()
+                if row is not None:
+                    return store_database, store_session_id
+            except Exception:
+                logging.debug("Could not validate the visible staging model for export.", exc_info=True)
+        return database, session_id
 
     def _active_databases_for_target(self, target_path: Path):
         """Return engine-owned (local, global) databases for the active target."""
@@ -295,6 +344,8 @@ class DataManager:
         local_db = None
         created_engine = False
         destination_engine = None
+        replacement_primary_db = None
+        replacement_primary_attached = False
         try:
             local_db = UnshuffleDB(local_db_path)
             recent = local_db.get_recent_sessions(100000)
@@ -337,6 +388,13 @@ class DataManager:
                 )
                 global_db = destination_engine.db
                 created_engine = True
+            else:
+                global_db, opened_global_db = self._portable_import_destination_database(
+                    global_db,
+                    import_target_root,
+                )
+                if opened_global_db:
+                    replacement_primary_db = global_db
         except Exception as exc:
             logging.exception("Failed to prepare staging session import")
             if created_engine and destination_engine is not None:
@@ -385,9 +443,15 @@ class DataManager:
                     destination_engine.close()
                 except Exception:
                     logging.debug("Could not close failed session-import engine.", exc_info=True)
+            elif replacement_primary_db is not None and not replacement_primary_attached:
+                try:
+                    replacement_primary_db.close()
+                except Exception:
+                    logging.debug("Could not close failed global session-import database.", exc_info=True)
             QMessageBox.critical(parent_widget or self.app, "Import Error", f"Failed to import staging session:\n{message}")
 
         def finish_import(payload: dict) -> None:
+            nonlocal replacement_primary_attached
             clear_worker()
             record_count = int(payload.get("record_count") or 0)
             skipped_count = int(payload.get("skipped_count") or 0)
@@ -395,6 +459,17 @@ class DataManager:
             try:
                 if destination_engine is None or not imported_session_id or record_count <= 0:
                     raise RuntimeError("The imported session contained no available records.")
+                if replacement_primary_db is not None:
+                    raw_engine = getattr(destination_engine, "engine", destination_engine)
+                    previous_primary_db = getattr(raw_engine, "db", None)
+                    raw_engine.db = replacement_primary_db
+                    replacement_primary_attached = True
+                    local_mirror = getattr(raw_engine, "local_db", None)
+                    if previous_primary_db is not None and previous_primary_db is not local_mirror:
+                        try:
+                            previous_primary_db.close()
+                        except Exception:
+                            logging.debug("Could not close replaced session-import database.", exc_info=True)
                 if hasattr(destination_engine, "update_state"):
                     destination_engine.update_state(
                         session_id=imported_session_id,
@@ -634,14 +709,26 @@ class DataManager:
             if not drafting.confirm_clear_pending_draft("export this session"):
                 return False
 
-        global_db = self.bridge._get_db()
-        session_id = str(self.bridge.session_id or "")
-        if not session_id:
+        global_db, session_id = self._active_staging_export_source()
+        if global_db is None or not session_id:
             QMessageBox.warning(parent_widget or self.app, "Export Session", "No active staging session is loaded.")
             return False
         sources = global_db.get_session_sources(session_id)
 
+        source_record_count = int(global_db.conn.execute(
+            "SELECT COUNT(*) FROM staging_records WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0])
+        if source_record_count <= 0:
+            QMessageBox.warning(
+                parent_widget or self.app,
+                "Export Session",
+                "The active staging session has no records to export.",
+            )
+            return False
+
         local_db = None
+        owns_local_db = False
         try:
             from unshuffle.persistence import UnshuffleDB
 
@@ -660,14 +747,19 @@ class DataManager:
                 return False
 
             local_db_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            local_db = UnshuffleDB(local_db_path)
-            
-            # 1. Clear any pre-existing session export payload without deleting
-            # the session parent row; sidecar DBs may have child history rows.
-            local_db.clear_staging(session_id)
-            with local_db.write_transaction():
-                local_db.conn.execute("DELETE FROM records WHERE session_id = ?", (session_id,))
+
+            source_is_destination = database_uses_path(global_db, local_db_path)
+            if source_is_destination:
+                local_db = global_db
+            else:
+                local_db = UnshuffleDB(local_db_path)
+                owns_local_db = True
+
+                # 1. Clear any pre-existing session export payload without deleting
+                # the session parent row; sidecar DBs may have child history rows.
+                local_db.clear_staging(session_id)
+                with local_db.write_transaction():
+                    local_db.conn.execute("DELETE FROM records WHERE session_id = ?", (session_id,))
 
             # 2. Copy Session details
             sess = global_db.get_session(session_id)
@@ -705,34 +797,47 @@ class DataManager:
             local_db.set_session_sources(session_id, [Path(s) for s in sources if s])
 
             # 4. Copy Staging Records
-            local_db.add_staging_records_iter(
-                session_id,
-                (
-                    staging_row_tuple(row)
-                    for batch in global_db.iter_staging_records(session_id, batch_size=1000)
-                    for row in batch
-                ),
-                batch_size=1000,
-            )
+            if not source_is_destination:
+                local_db.add_staging_records_iter(
+                    session_id,
+                    (
+                        staging_row_tuple(row)
+                        for batch in global_db.iter_staging_records(session_id, batch_size=1000)
+                        for row in batch
+                    ),
+                    batch_size=1000,
+                )
 
             # 5-7. Copy coherence metadata without materializing complete result sets.
-            try:
-                for table in PORTABLE_SESSION_TABLES:
-                    copy_portable_session_table(global_db.conn, local_db.conn, table, session_id)
-            except Exception:
-                logging.exception("Failed to export coherence session metadata.")
+            if not source_is_destination:
+                try:
+                    for table in PORTABLE_SESSION_TABLES:
+                        copy_portable_session_table(global_db.conn, local_db.conn, table, session_id)
+                except Exception:
+                    logging.exception("Failed to export coherence session metadata.")
 
             # 8. Copy review decisions scoped to this session without loading all paths.
-            try:
-                for batch in global_db.iter_staging_records(session_id, batch_size=800):
-                    decisions = global_db.list_coherence_review_decisions(
-                        [str(row.get("source_path") or "") for row in batch],
-                        [str(row.get("hash") or "") for row in batch],
-                    )
-                    if decisions:
-                        local_db.upsert_coherence_review_decisions(session_id, decisions)
-            except Exception:
-                logging.exception("Failed to export coherence review decisions.")
+            if not source_is_destination:
+                try:
+                    for batch in global_db.iter_staging_records(session_id, batch_size=800):
+                        decisions = global_db.list_coherence_review_decisions(
+                            [str(row.get("source_path") or "") for row in batch],
+                            [str(row.get("hash") or "") for row in batch],
+                        )
+                        if decisions:
+                            local_db.upsert_coherence_review_decisions(session_id, decisions)
+                except Exception:
+                    logging.exception("Failed to export coherence review decisions.")
+
+            exported_count = int(local_db.conn.execute(
+                "SELECT COUNT(*) FROM staging_records WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0])
+            if exported_count != source_record_count:
+                raise RuntimeError(
+                    "Session export verification failed: "
+                    f"expected {source_record_count} records, found {exported_count}."
+                )
 
             self._show_session_export_success(local_db_path, sources, parent_widget=parent_widget)
             return True
@@ -741,7 +846,7 @@ class DataManager:
             QMessageBox.critical(parent_widget or self.app, "Export Error", f"Failed to export staging session:\n{e}")
             return False
         finally:
-            if local_db is not None:
+            if owns_local_db and local_db is not None:
                 local_db.close()
 
     def import_session_from_folder(self, folder_path, parent_widget=None) -> bool:
