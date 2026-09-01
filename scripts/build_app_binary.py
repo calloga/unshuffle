@@ -97,6 +97,8 @@ def pyinstaller_command(
         "peewee",
         "--hidden-import",
         "peewee",
+        "--hidden-import",
+        "psutil",
     ]
     if clean:
         command.append("--clean")

@@ -106,6 +106,10 @@ def test_app_binary_builder_collects_backports_tarfile_for_pyinstaller_runtime_h
     assert ["--hidden-import", "backports.tarfile"] == command[
         command.index("--hidden-import"):command.index("--hidden-import") + 2
     ]
+    assert any(
+        command[index:index + 2] == ["--hidden-import", "psutil"]
+        for index in range(len(command) - 1)
+    )
 
 
 def test_app_binary_builder_uses_platform_icons(monkeypatch) -> None:
@@ -233,6 +237,8 @@ def test_macos_package_identifier_matches_app_bundle_identifier() -> None:
 def test_app_binary_workflow_uploads_installable_platform_artifacts() -> None:
     workflow = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "app-binaries.yml").read_text(encoding="utf-8")
 
+    assert 'python-version: "3.14"' in workflow
+    assert 'python-version: "3.11"' not in workflow
     assert "dist/installer/UnshuffleWinSetup.exe" in workflow
     assert "dist/installer/Unshuffle-macos.pkg" in workflow
     assert "dist/installer/*.deb" in workflow
@@ -260,7 +266,12 @@ def test_release_build_dependencies_include_backports_tarfile() -> None:
     requirements_dev = (repo / "requirements-dev.txt").read_text(encoding="utf-8")
     pyproject = (repo / "pyproject.toml").read_text(encoding="utf-8")
 
-    for dependency in ("peewee>=4.1.0", "pydantic>=2.13.4", "jinja2>=3.1.6"):
+    for dependency in (
+        "peewee>=4.1.0",
+        "pydantic>=2.13.4",
+        "jinja2>=3.1.6",
+        "psutil>=7.2,<8",
+    ):
         assert dependency in requirements
         assert f'"{dependency}"' in pyproject
     assert "pyinstaller>=6.11,<7" in requirements_dev

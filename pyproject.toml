@@ -19,6 +19,7 @@ dependencies = [
   "peewee>=4.1.0",
   "pydantic>=2.13.4",
   "jinja2>=3.1.6",
+  "psutil>=7.2,<8",
 ]
 
 [project.optional-dependencies]
