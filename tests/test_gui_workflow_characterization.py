@@ -3918,6 +3918,48 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         self.assertEqual(app_for_remove.model.records, [shadow])
         self.assertFalse(shadow.is_duplicate_shadow)
 
+    def test_remove_folder_shows_monitor_for_db_backed_cleanup(self):
+        from gui.main.actions.library import do_remove_folder
+
+        root_a = Path("D:/RootA")
+        root_b = Path("D:/RootB")
+        engine = SimpleNamespace(db=mock.Mock(), session_source_roots=[root_a, root_b], session_source_root=root_a)
+        workflow_controller = SimpleNamespace(
+            detach_source_root=mock.Mock(side_effect=lambda _root: setattr(engine, "session_source_roots", [root_b])),
+        )
+        operation_monitor = mock.Mock()
+        operation_monitor.start.return_value = 19
+        session_store = mock.Mock()
+        session_store.delete_source_root.return_value = 5
+        session_store.promote_duplicate_shadows_after_root_removal.return_value = 1
+        model = SimpleNamespace(
+            refresh_index=mock.Mock(),
+            refresh_duplicate_shadow_ids=mock.Mock(),
+        )
+        app_for_remove = SimpleNamespace(
+            engine=engine,
+            model=model,
+            session_store=session_store,
+            operation_monitor=operation_monitor,
+            workflow_controller=workflow_controller,
+            library_tab=SimpleNamespace(set_sources=mock.Mock()),
+            footer=SimpleNamespace(log=mock.Mock()),
+        )
+
+        with (
+            mock.patch("gui.main.actions.library.finalize_model_mutation"),
+            mock.patch("gui.core.workflow_scan_finalization.update_corrupt_filter_state"),
+            mock.patch("gui.core.workflow_scan_finalization.update_possible_duplicate_filter_state"),
+        ):
+            do_remove_folder(app_for_remove, root_a)
+
+        operation_monitor.start.assert_called_once_with("Removing Folder", cancellable=False)
+        phases = [call.args[0]["phase"] for call in operation_monitor.update.call_args_list]
+        self.assertEqual(phases, ["Updating Session", "Removing Staged Files", "Refreshing Library"])
+        operation_monitor.finish.assert_called_once_with("Folder removed.", token=19)
+        operation_monitor.fail.assert_not_called()
+        session_store.conn.commit.assert_called_once_with()
+
     def test_removed_source_filter_is_cleared(self):
         from gui.main.actions.library import _clear_removed_source_filter
 
@@ -6534,6 +6576,32 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
             window.library_tab.set_sort_index(0)
             self.assertTrue(window.library_tab.sort_carousel.is_active)
             self.assertEqual(window.library_tab.sort_carousel.active_values, {0})
+        finally:
+            if getattr(window, "engine", None):
+                try:
+                    window.engine.close()
+                except Exception:
+                    pass
+            close_qt_window(window, app)
+
+    def test_docked_save_search_emits_default_name_and_query(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from gui.main.launcher import ModernApp
+
+        app = QApplication.instance() or QApplication([])
+        window = ModernApp(defer_startup_restore=True)
+        captured = []
+        try:
+            window.dock_view.saveSearchRequested.disconnect()
+            window.dock_view.saveSearchRequested.connect(
+                lambda name, query: captured.append((name, query))
+            )
+            window.dock_view.edit_search.setText('category:"Kicks"')
+
+            window.dock_view.btn_save_search.click()
+
+            self.assertEqual(captured, [("Kicks", 'category:"Kicks"')])
         finally:
             if getattr(window, "engine", None):
                 try:

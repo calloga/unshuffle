@@ -40,7 +40,7 @@ class DiagnosticsTests(unittest.TestCase):
              mock.patch("subprocess.run", return_value=completed):
             report = get_version_report()
 
-        self.assertEqual(report["app_version"], "1.1.0")
+        self.assertEqual(report["app_version"], "1.1.1")
         self.assertEqual(report["native_available"], "yes")
         self.assertEqual(report["native_version"], "unshuffle_extractor 2.0.0")
 
@@ -50,7 +50,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(CURRENT_EXTRACTOR_VERSION, "unshuffle_extractor 1.0.0")
         source = (Path(__file__).resolve().parent.parent / "unshuffle_extractor" / "unshuffle_extractor.cpp").read_text(encoding="utf-8")
         self.assertIn("unshuffle_extractor 1.0.0", source)
-        self.assertNotIn("unshuffle_extractor 1.1.0", source)
+        self.assertNotIn("unshuffle_extractor 1.1.1", source)
 
         if os.name == "nt":
             repo_root = Path(__file__).resolve().parent.parent

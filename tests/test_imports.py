@@ -20,7 +20,7 @@ class TestImports(unittest.TestCase):
     def test_root_package_exposes_only_v1_release_constants(self):
         import unshuffle
 
-        self.assertEqual(unshuffle.APP_VERSION, "1.1.0")
+        self.assertEqual(unshuffle.APP_VERSION, "1.1.1")
         self.assertFalse(hasattr(unshuffle, "Unshuffler"))
         self.assertFalse(hasattr(unshuffle, "run_plan"))
         self.assertFalse(hasattr(unshuffle, "setup_logging"))

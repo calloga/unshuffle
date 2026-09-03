@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import plistlib
 import sys
 from pathlib import Path
 import pytest
@@ -149,6 +150,45 @@ def test_app_binary_builder_sets_macos_bundle_identifier_only_on_macos(monkeypat
     assert "--osx-bundle-identifier" not in build_app_binary.pyinstaller_command(repo_root)
 
 
+def test_app_binary_builder_stamps_and_validates_macos_release_metadata(tmp_path, monkeypatch) -> None:
+    from scripts import build_app_binary
+
+    app_path = tmp_path / "Unshuffle.app"
+    info_plist_path = app_path / "Contents" / "Info.plist"
+    info_plist_path.parent.mkdir(parents=True)
+    with info_plist_path.open("wb") as plist_file:
+        plistlib.dump({"CFBundleIdentifier": "Unshuffle"}, plist_file)
+
+    calls = []
+
+    def fake_run(command: list[str], *, cwd: Path) -> None:
+        calls.append((command, cwd))
+
+    monkeypatch.setattr(build_app_binary, "_run", fake_run)
+
+    build_app_binary._configure_macos_bundle(
+        app_path,
+        bundle_identifier=build_app_binary.BUNDLE_IDENTIFIER,
+        minimum_macos_version=build_app_binary.MINIMUM_MACOS_VERSION,
+    )
+    build_app_binary._validate_macos_bundle(
+        app_path,
+        bundle_identifier=build_app_binary.BUNDLE_IDENTIFIER,
+        minimum_macos_version=build_app_binary.MINIMUM_MACOS_VERSION,
+    )
+
+    with info_plist_path.open("rb") as plist_file:
+        info = plistlib.load(plist_file)
+    assert info["CFBundleIdentifier"] == "com.umu.unshuffle"
+    assert info["LSMinimumSystemVersion"] == "13.0"
+    assert calls == [
+        (
+            ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(app_path)],
+            app_path.parent,
+        )
+    ]
+
+
 def test_app_binary_expected_path_matches_platform(monkeypatch) -> None:
     from scripts import build_app_binary
 
@@ -211,6 +251,8 @@ def test_windows_installer_script_registers_app_shortcuts_and_logo() -> None:
     script = (Path(__file__).resolve().parent.parent / "packaging" / "windows" / "unshuffle.iss").read_text(encoding="utf-8")
 
     assert "AppId={{9D84E78F-9EB3-47A7-A42C-86C9AD5F0E46}" in script
+    assert "MuseHub application ID: {9D84E78F-9EB3-47A7-A42C-86C9AD5F0E46}_is1" in script
+    assert "MinVersion=10.0.17763" in script
     assert "SetupIconFile=..\\..\\icons\\app_logo.ico" in script
     assert "AppVersion={#AppVersion}" in script
     assert "AppVerName={#AppName} {#AppVersion}" in script
@@ -239,6 +281,9 @@ def test_app_binary_workflow_uploads_installable_platform_artifacts() -> None:
 
     assert 'python-version: "3.14"' in workflow
     assert 'python-version: "3.11"' not in workflow
+    assert "runner: macos-15" in workflow
+    assert "runner: ubuntu-24.04" in workflow
+    assert "MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos' && '13.0' || '' }}" in workflow
     assert "dist/installer/UnshuffleWinSetup.exe" in workflow
     assert "dist/installer/Unshuffle-macos.pkg" in workflow
     assert "dist/installer/*.deb" in workflow

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.1 - 2026-09-03
+
+- Harden the Peewee persistence migration while retaining SQLite compatibility, reusing active database connections, and batching large writes below SQLite's variable limit.
+- Speed up rescans by reusing completed hashes and audio analysis, and stabilize scan launching, source-root deduplication, folder-removal progress, and worker cleanup.
+- Improve the native extractor's cross-platform silence detection and leading-silence handling without requiring FFmpeg at runtime.
+- Repair saved-change undo/redo, docked saved-filter creation, constrained drag-fill across editable table fields, custom-tree restoration after rescans, and large tree/build operations.
+- Run CSV and staging-session imports in the background with a progress monitor while preserving source directories, tree/filter state, and portable session metadata.
+- Make staging-session export/import safer and clearer, including exact destination paths and reliable synchronization between the global database and its target-local mirror.
+- Stabilize sound-map initialization, filtering, cache prewarming, and view switching; reduce the prominence of unmatched points and restore theme-aware filter previews.
+- Polish docked/adaptive window behavior and tree contrast, enforce release OS support floors, stamp the macOS bundle identifier, document the MuseHub application IDs, and build release applications with Python 3.14.
+
 ## 1.1.0 - 2026-08-10
 
 - Add fast segmented hashing with full-hash collision confirmation for substantially faster large-library scans.

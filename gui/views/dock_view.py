@@ -380,7 +380,7 @@ class DockView(QWidget):
     categoryChangeRequested = Signal(object, str)
     tagsEditRequested = Signal(object, object, object)
     openExplorerRequested = Signal(object)
-    saveSearchRequested = Signal(str)
+    saveSearchRequested = Signal(str, str)
     filterRequested = Signal(str, bool)
     categoryFilterRequested = Signal(str, bool)
     rangeChanged = Signal(float, float)
@@ -478,7 +478,7 @@ class DockView(QWidget):
         apply_fixed_height(self.btn_save_search, DOCKED_SEARCH_BAR_FIXED_HEIGHT)
         self.btn_save_search.setEnabled(False)
         apply_style(self.btn_save_search, dock_save_search_button_style())
-        self.btn_save_search.clicked.connect(lambda: self.saveSearchRequested.emit(self.edit_search.text()))
+        self.btn_save_search.clicked.connect(lambda checked=False: self._emit_save_current_search())
         search_row.addWidget(self.btn_save_search)
 
         self._search_row = search_row
@@ -764,6 +764,13 @@ class DockView(QWidget):
 
     def _refresh_search_button_state(self):
         self.btn_save_search.setEnabled(self.edit_search.isEnabled() and bool(self.edit_search.text().strip()))
+
+    def _emit_save_current_search(self) -> None:
+        query = self.edit_search.text().strip()
+        if not query:
+            return
+        default_name = query.split(":", 1)[1].strip().strip('"') if ":" in query else query
+        self.saveSearchRequested.emit(default_name, query)
 
 
     def set_filters(self, options: list[tuple[str, str]]):

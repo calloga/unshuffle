@@ -7,11 +7,13 @@ It scans messy source folders, classifies files into a persistent virtual librar
 ## Core Capabilities
 
 - Scans one or multiple directories and returns one persistent library.
+- Reuses completed hashing and audio analysis when refreshing an existing library.
 - Classifies samples by `category`, `subcategory`, and `audio type`.
 - Allows for custom re-organization of your samples after classification, so you may choose the structure of your library.
 - Surfaces possible duplicates, confirmed duplicates, and corrupt/silent files in your library.
 - Provides multiple ways to interact with your organized library (through Table, Tree and Map library views).
 - Enables quick structured text-and-similarity-based exploration of your samples.
+- Imports CSV and portable staging sessions in the background with progress reporting, while preserving source directories and session metadata.
 - Allows Compare-first build dialog (`Current Directories` vs `After Migration`) before execution. Building a virtual library persists your validated organization onto the target.
 - Provides build history with undo actions, for safety.
 
@@ -21,24 +23,32 @@ Download the installer for your operating system:
 
 - Windows: `UnshuffleWinSetup.exe`
 - macOS: `Unshuffle-macos.pkg`
-- Linux: `unshuffle_1.0.0_amd64.deb`
+- Linux: `unshuffle_1.1.1_amd64.deb` or `Unshuffle-1.1.1-x86_64.AppImage`
+
+Supported release targets:
+
+- Windows 10 version 1809 or newer, x64
+- macOS 13 or newer; the current automated package targets Apple silicon (arm64)
+- Ubuntu 24.04 or a compatible newer x86-64 Linux distribution
 
 ## Source Setup
 
-You need libpulse0 library for development.
-For Ubuntu\Linux:
+Unshuffle requires Python 3.11 or newer. On Ubuntu/Linux, install the desktop and audio runtime libraries first:
+
 ```bash
 sudo apt update
-sudo apt install libpulse0
-sudo apt install libva-x11-2
-sudo apt install libva-drm2 
+sudo apt install ffmpeg libpulse0 libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
 ```
+
+Then install the Python dependencies and launch the GUI:
 
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m gui
 ```
+
 Entry points:
+
 - GUI: `python -m gui`
 - CLI: `python -m unshuffle.cli`
 
@@ -47,8 +57,9 @@ Entry points:
 1. Launch GUI and scan one or more source folders.
 2. Review and update staged files in table, tree, or map views.
 3. Refine with query filters, saved filters, category/type controls, and confidence range.
-4. Open `Build`, choose a target directory, validate the compare view, then execute copy/move.
-5. Use `History` for undo/maintenance actions.
+4. Optionally use `Library > Import` or `Library > Export Session` to move a staged session between installations without moving the samples themselves.
+5. Open `Build`, choose a target directory, validate the compare view, then execute copy/move.
+6. Use `History` for undo/maintenance actions.
 
 ## Search Basics
 
@@ -96,15 +107,20 @@ The V1 extractor contract reports `unshuffle_extractor 1.0.0` and emits current-
 
 ## Persistence and Locking
 
-Global metadata dir:
+Unshuffle uses one global database as the active metadata authority. A target-local sidecar is a portable mirror used for build history, undo, and staging-session transfer; it is not a second independent library.
+
+Global metadata directory:
+
 - Windows: `%APPDATA%\\Unshuffle`
 - macOS: `~/Library/Application Support/Unshuffle`
 - Linux: `~/.config/Unshuffle`
 
-Target sidecar:
+Target-local mirror:
+
 - `DO_NOT_DELETE_unshuffle/unshuffle.db`
 
 Locking:
+
 - `<target>/.unshuffle/lock.json`
 - Force takeover env: `UNSHUFFLE_FORCE_LOCK_TAKEOVER=1`
 - Stale lock threshold env: `UNSHUFFLE_LOCK_STALE_MINUTES`

@@ -2,6 +2,7 @@ import json
 import logging
 from pathlib import Path
 
+from PySide6.QtCore import QCoreApplication, QEventLoop
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
@@ -225,16 +226,35 @@ def do_remove_folder(app, root: Path):
     original_roots = list(getattr(app.engine, "session_source_roots", []) or [])
     original_records = None
     model_reset = False
+    monitor = getattr(app, "operation_monitor", None)
+    monitor_token = None
     try:
         root = Path(root).resolve()
+        if monitor is not None:
+            monitor_token = monitor.start("Removing Folder", cancellable=False)
+            _update_operation_monitor(
+                monitor,
+                monitor_token,
+                {"phase": "Updating Session", "percent": 0},
+            )
         app.workflow_controller.detach_source_root(root)
         root_prefix = root.as_posix().lower()
 
         session_store = getattr(app, "session_store", None)
         if session_store is not None and hasattr(app.model, "refresh_index"):
+            _update_operation_monitor(
+                monitor,
+                monitor_token,
+                {"phase": "Removing Staged Files", "percent": 25},
+            )
             removed_count = session_store.delete_source_root(root)
             promoted_count = session_store.promote_duplicate_shadows_after_root_removal(root)
             session_store.conn.commit()
+            _update_operation_monitor(
+                monitor,
+                monitor_token,
+                {"phase": "Refreshing Library", "percent": 75},
+            )
             if hasattr(app.model, "refresh_duplicate_shadow_ids"):
                 app.model.refresh_duplicate_shadow_ids()
             app.model.refresh_index()
@@ -248,9 +268,16 @@ def do_remove_folder(app, root: Path):
             finalize_model_mutation(app, resort=True, refresh_search=True)
             workflow_scan_finalization.update_corrupt_filter_state(app)
             workflow_scan_finalization.update_possible_duplicate_filter_state(app)
+            if monitor_token is not None:
+                monitor.finish("Folder removed.", token=monitor_token)
             return
 
         if app.model:
+            _update_operation_monitor(
+                monitor,
+                monitor_token,
+                {"phase": "Removing Staged Files", "percent": 25},
+            )
             original_records = list(getattr(app.model, "records", []) or [])
             app.model.beginResetModel()
             model_reset = True
@@ -272,6 +299,12 @@ def do_remove_folder(app, root: Path):
             app.model.endResetModel()
             model_reset = False
 
+            _update_operation_monitor(
+                monitor,
+                monitor_token,
+                {"phase": "Refreshing Library", "percent": 75},
+            )
+
             if hasattr(app.library_tab, "set_sources"):
                 app.library_tab.set_sources(app.engine.session_source_roots)
 
@@ -283,6 +316,8 @@ def do_remove_folder(app, root: Path):
             else:
                 app.footer.log(f"<b>Removed:</b> {root.name} ({removed_count} files removed from workbench)")
                 finalize_model_mutation(app, resort=True, refresh_search=True)
+        if monitor_token is not None:
+            monitor.finish("Folder removed.", token=monitor_token)
     except Exception as exc:
         logging.exception("Failed to remove source folder from workbench.")
         if model_reset:
@@ -304,7 +339,17 @@ def do_remove_folder(app, root: Path):
                 app.engine.session_source_root = original_roots[0]
         if hasattr(app.library_tab, "set_sources"):
             app.library_tab.set_sources(original_roots)
+        if monitor_token is not None:
+            monitor.fail(f"Could not remove folder: {exc}", token=monitor_token)
         QMessageBox.warning(app, "Remove Folder", f"Could not remove folder: {exc}")
+
+
+def _update_operation_monitor(monitor, token, payload: dict) -> None:
+    if monitor is None or token is None:
+        return
+    monitor.update(payload, token=token)
+    if QCoreApplication.instance() is not None:
+        QCoreApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
 
 def _clear_removed_source_filter(app, root: Path) -> None:

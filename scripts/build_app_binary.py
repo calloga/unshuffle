@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import plistlib
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 
 APP_NAME = "Unshuffle"
 BUNDLE_IDENTIFIER = "com.umu.unshuffle"
+MINIMUM_MACOS_VERSION = "13.0"
 ASSET_PATHS = (
     ("data/config.json", "data"),
     ("data/anchors", "data/anchors"),
@@ -127,6 +129,54 @@ def _validate_app_binary(repo_root: Path, *, name: str, dist_dir: Path | None) -
     return app_path
 
 
+def _configure_macos_bundle(
+    app_path: Path,
+    *,
+    bundle_identifier: str,
+    minimum_macos_version: str,
+) -> None:
+    """Stamp release metadata that PyInstaller's CLI cannot set, then re-sign."""
+    info_plist_path = app_path / "Contents" / "Info.plist"
+    if not info_plist_path.is_file():
+        raise FileNotFoundError(f"Expected macOS bundle metadata was not created: {info_plist_path}")
+
+    with info_plist_path.open("rb") as plist_file:
+        info = plistlib.load(plist_file)
+    info["CFBundleIdentifier"] = bundle_identifier
+    info["LSMinimumSystemVersion"] = minimum_macos_version
+    with info_plist_path.open("wb") as plist_file:
+        plistlib.dump(info, plist_file)
+
+    # Editing Info.plist invalidates PyInstaller's ad-hoc bundle signature.
+    _run(
+        ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(app_path)],
+        cwd=app_path.parent,
+    )
+
+
+def _validate_macos_bundle(
+    app_path: Path,
+    *,
+    bundle_identifier: str,
+    minimum_macos_version: str,
+) -> None:
+    info_plist_path = app_path / "Contents" / "Info.plist"
+    with info_plist_path.open("rb") as plist_file:
+        info = plistlib.load(plist_file)
+
+    expected = {
+        "CFBundleIdentifier": bundle_identifier,
+        "LSMinimumSystemVersion": minimum_macos_version,
+    }
+    mismatches = {
+        key: {"expected": expected_value, "actual": info.get(key)}
+        for key, expected_value in expected.items()
+        if info.get(key) != expected_value
+    }
+    if mismatches:
+        raise RuntimeError(f"Invalid macOS bundle metadata in {info_plist_path}: {mismatches}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the standalone Unshuffle GUI app for the current platform.")
     parser.add_argument("--name", default=APP_NAME, help="Application/binary name.")
@@ -134,6 +184,11 @@ def main(argv: list[str] | None = None) -> int:
         "--bundle-identifier",
         default=BUNDLE_IDENTIFIER,
         help="macOS application bundle identifier.",
+    )
+    parser.add_argument(
+        "--minimum-macos-version",
+        default=MINIMUM_MACOS_VERSION,
+        help="Minimum macOS version recorded in the application bundle.",
     )
     parser.add_argument("--dist-dir", type=Path, default=None, help="PyInstaller output directory.")
     parser.add_argument("--work-dir", type=Path, default=None, help="PyInstaller work directory.")
@@ -155,6 +210,17 @@ def main(argv: list[str] | None = None) -> int:
     _run(command, cwd=repo_root)
     if not args.skip_output_check:
         app_path = _validate_app_binary(repo_root, name=args.name, dist_dir=args.dist_dir)
+        if sys.platform == "darwin":
+            _configure_macos_bundle(
+                app_path,
+                bundle_identifier=args.bundle_identifier,
+                minimum_macos_version=args.minimum_macos_version,
+            )
+            _validate_macos_bundle(
+                app_path,
+                bundle_identifier=args.bundle_identifier,
+                minimum_macos_version=args.minimum_macos_version,
+            )
         print(f"Built {app_path}")
     return 0
 

@@ -1,10 +1,10 @@
 #define AppName "Unshuffle"
 #define AppPublisher "UmU"
 #ifndef AppVersion
-#define AppVersion "1.1.0"
+#define AppVersion "1.1.1"
 #endif
 #ifndef AppVersionInfo
-#define AppVersionInfo "1.1.0.0"
+#define AppVersionInfo "1.1.1.0"
 #endif
 #ifndef SourceDir
 #define SourceDir "..\..\dist\Unshuffle"
@@ -14,6 +14,7 @@
 #endif
 
 [Setup]
+; MuseHub application ID: {9D84E78F-9EB3-47A7-A42C-86C9AD5F0E46}_is1
 AppId={{9D84E78F-9EB3-47A7-A42C-86C9AD5F0E46}
 AppName={#AppName}
 AppVersion={#AppVersion}
@@ -38,6 +39,7 @@ UninstallDisplayIcon={app}\_internal\icons\app_logo.ico
 UninstallDisplayName={#AppName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0.17763
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
