@@ -69,6 +69,21 @@ class ThemeManagerTests(unittest.TestCase):
         self.assertNotIn("font-size:", inherited)
         self.assertIn("font-size:", explicit)
 
+    def test_saved_filter_tooltip_keeps_plain_query_for_native_rendering(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+
+        from gui.widgets.sidebar import SavedFilterItem
+
+        _app = QApplication.instance() or QApplication([])
+        query = 'tag:"Silent" OR tag:"Empty"'
+        item = SavedFilterItem("Filter", query)
+        try:
+            self.assertEqual(item.toolTip(), query)
+            self.assertEqual(item.lbl.toolTip(), "")
+        finally:
+            item.close()
+
     def test_scaled_font_preserves_pixel_sized_fonts_without_invalid_point_size(self):
         from PySide6.QtGui import QFont
 
@@ -219,14 +234,11 @@ class ThemeManagerTests(unittest.TestCase):
         self.assertIn("min-height: 30px", qss)
         self.assertIn(f"background: {manager.colors.primary};", qss)
 
-    def test_tooltips_are_theme_bound(self):
+    def test_tooltip_colors_are_left_to_the_native_platform(self):
         manager = ThemeManager()
         qss = manager.build_qss()
 
-        self.assertIn("QToolTip", qss)
-        self.assertIn(f"background-color: {manager.colors.bg_dropdown};", qss)
-        self.assertIn(f"color: {manager.colors.text_main};", qss)
-        self.assertIn(f"border: 1px solid {manager.colors.border_accent};", qss)
+        self.assertNotIn("QToolTip", qss)
 
     def test_table_selection_tints_are_explicitly_visible(self):
         from gui.styles.tokens_semantic import THEMES

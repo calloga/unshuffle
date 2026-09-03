@@ -98,7 +98,6 @@ def sync_search_ui_state(
         window.library_tab.category_carousel.set_active_values(active_category_values)
         window.library_tab.signal_floor_control.set_range(*confidence_range)
         window.sync_type_filter_state()
-        window.library_tab.sync_map_filters()
 
     if hasattr(window, "dock_view"):
         window.dock_view.set_search_text(query)
@@ -106,7 +105,6 @@ def sync_search_ui_state(
         window.dock_view.set_category_state(active_categories)
         window.sync_type_filter_state()
         window.dock_view.set_confidence_range(*confidence_range)
-        window.view_controller.refresh_docked_map(force=False)
 
 
 def type_filter_state(window) -> tuple[bool, bool, bool]:

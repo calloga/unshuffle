@@ -7,7 +7,7 @@ from collections import OrderedDict, defaultdict
 from typing import Callable, Iterable
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -477,7 +477,7 @@ class CoherenceMapWidget(QWidget):
         dimmed_color = QColor(
             self._adaptive_muted or self._paint_color(make_qcolor(ColorPalette.TEXT_MUTED))
         )
-        dimmed_color.setAlpha(70)
+        dimmed_color.setAlpha(20)
         
         dimmed_points = []
         normal_by_cluster = defaultdict(list)
@@ -571,6 +571,11 @@ class CoherenceAnalyzerPage(QFrame):
         self._data_priority_row_ids: frozenset[int] = frozenset()
         self._source_cache: OrderedDict[tuple, tuple[list[AnalyzerPoint], list[dict], object]] = OrderedDict()
         self._prewarmed_projection_key = None
+        self._projection_prewarm_key = None
+        self._projection_prewarm_queue: list[tuple[str, str]] = []
+        self._projection_prewarm_timer = QTimer(self)
+        self._projection_prewarm_timer.setSingleShot(True)
+        self._projection_prewarm_timer.timeout.connect(self._prewarm_next_library_projection)
         self._selected_audio_type = "Loops"
         self._selected_category = ""
         self._settings = None
@@ -699,7 +704,11 @@ class CoherenceAnalyzerPage(QFrame):
                     self._selected_category = (category or "")
                 fetch_audio_type = self._selected_audio_type if (self._show_filters or fetch_scope) else ""
                 fetch_category = self._selected_category if (self._show_filters or fetch_scope) else ""
-                priority_ids = set(priority_row_ids or self._priority_row_ids_from_selection(app))
+                priority_ids = set(
+                    self._priority_row_ids_from_selection(app)
+                    if priority_row_ids is None
+                    else priority_row_ids
+                )
                 session_id = getattr(getattr(app, "engine", None), "session_id", "")
                 source_signature = (
                     str(session_id or ""),
@@ -981,15 +990,9 @@ class CoherenceAnalyzerPage(QFrame):
                 continue
         return rows
 
-    def prewarm_library_projections(self, *, frontload: bool = False) -> None:
-        prewarm_key = (self._data_key, bool(frontload))
-        if self._prewarmed_projection_key == prewarm_key:
-            return
+    def _library_projection_targets(self, *, frontload: bool = False) -> list[tuple[str, str]]:
         if frontload:
-            for audio_type in ("", "Loops", "Oneshots"):
-                self.map.prewarm_projection(audio_type, "")
-            self._prewarmed_projection_key = prewarm_key
-            return
+            return [(audio_type, "") for audio_type in ("", "Loops", "Oneshots")]
 
         categories_by_type: dict[str, set[str]] = {"Loops": set(), "Oneshots": set()}
         for point in self._records:
@@ -997,24 +1000,84 @@ class CoherenceAnalyzerPage(QFrame):
             category = str(getattr(point, "category", "") or "")
             if audio_type in categories_by_type and category:
                 categories_by_type[audio_type].add(category)
-        self.map.prewarm_projection("", "")
+        targets = [("", "")]
         for audio_type in ("Loops", "Oneshots"):
-            self.map.prewarm_projection(audio_type, "")
-            for category in sorted(categories_by_type[audio_type]):
-                self.map.prewarm_projection(audio_type, category)
+            targets.append((audio_type, ""))
+            targets.extend((audio_type, category) for category in sorted(categories_by_type[audio_type]))
+        return targets
+
+    def prewarm_library_projections(self, *, frontload: bool = False) -> None:
+        prewarm_key = (self._data_key, bool(frontload))
+        if self._prewarmed_projection_key == prewarm_key:
+            return
+        self._projection_prewarm_timer.stop()
+        self._projection_prewarm_queue.clear()
+        self._projection_prewarm_key = None
+        for audio_type, category in self._library_projection_targets(frontload=frontload):
+            self.map.prewarm_projection(audio_type, category)
         self._prewarmed_projection_key = prewarm_key
+
+    def schedule_library_projection_prewarm(self, *, frontload: bool = False, delay_ms: int = 25) -> None:
+        prewarm_key = (self._data_key, bool(frontload))
+        if self._prewarmed_projection_key == prewarm_key:
+            return
+        if self._projection_prewarm_key == prewarm_key and (
+            self._projection_prewarm_queue or self._projection_prewarm_timer.isActive()
+        ):
+            return
+        self._projection_prewarm_timer.stop()
+        self._projection_prewarm_key = prewarm_key
+        self._projection_prewarm_queue = self._library_projection_targets(frontload=frontload)
+        if self._projection_prewarm_queue:
+            self._projection_prewarm_timer.start(max(0, int(delay_ms)))
+
+    def _prewarm_next_library_projection(self) -> None:
+        prewarm_key = self._projection_prewarm_key
+        if prewarm_key is None or prewarm_key[0] != self._data_key:
+            self._projection_prewarm_queue.clear()
+            self._projection_prewarm_key = None
+            return
+        if not self._projection_prewarm_queue:
+            self._prewarmed_projection_key = prewarm_key
+            self._projection_prewarm_key = None
+            return
+        audio_type, category = self._projection_prewarm_queue.pop(0)
+        self.map.prewarm_projection(audio_type, category)
+        if self._projection_prewarm_queue:
+            self._projection_prewarm_timer.start(25)
+        else:
+            self._prewarmed_projection_key = prewarm_key
+            self._projection_prewarm_key = None
 
     def set_library_filters(self, audio_type: str, category: str, visible_record_ids: set[str] | None = None) -> None:
         """Mirror the Library sidebar filters when embedded as a Library view."""
         new_audio_type = (audio_type or "")
         new_category = (category or "")
         priority_row_ids = self._row_ids_from_visible_record_ids(visible_record_ids)
-        needs_fetch = (
-            self._records
+        returning_to_full_source = visible_record_ids is None and bool(self._data_priority_row_ids)
+        map_excluded_scope = (
+            new_audio_type == "Non-Audio Assets"
+            or new_category in {"Non-Audio Assets", "Metadata"}
+        )
+        empty_scoped_source_mismatch = (
+            not self._records
+            and self._data_source_signature is not None
             and (
-                not self._has_points_for_filter(new_audio_type, new_category)
-                or self._visible_ids_need_fetch(visible_record_ids)
-                or (bool(new_category) and self._data_scope_category != new_category)
+                bool(self._data_scope_audio_type)
+                and self._data_scope_audio_type != new_audio_type
+                or bool(self._data_scope_category)
+                and self._data_scope_category != new_category
+            )
+        )
+        needs_fetch = not map_excluded_scope and (
+            returning_to_full_source
+            or empty_scoped_source_mismatch
+            or (
+                self._records
+                and (
+                    not self._has_points_for_filter(new_audio_type, new_category)
+                    or self._visible_ids_need_fetch(visible_record_ids)
+                )
             )
         )
         if needs_fetch:
@@ -1029,6 +1092,7 @@ class CoherenceAnalyzerPage(QFrame):
                     fetch_scope=True,
                     priority_row_ids=priority_row_ids,
                 )
+                self.schedule_library_projection_prewarm(delay_ms=50)
                 self.map.set_visible_record_ids(visible_record_ids)
                 return
         if new_audio_type == self._selected_audio_type and new_category == self._selected_category:

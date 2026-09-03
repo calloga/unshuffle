@@ -2,6 +2,7 @@ from pathlib import Path
 from dataclasses import replace
 import json
 import struct
+from typing import Any, cast
 
 import pytest
 
@@ -1442,6 +1443,46 @@ def test_all_sound_map_uses_mixed_projection_over_per_type_capped_points(monkeyp
     assert [point.record_id for point, _pos in widget._projected] == ["1", "2"]
 
 
+def test_sound_map_nonmatching_points_are_subtle():
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets.coherence_analyzer import CoherenceMapWidget
+    from gui.widgets.coherence_view_model import AnalyzerPoint
+
+    class _Painter:
+        def __init__(self):
+            self.brush = QColor()
+            self.draws = []
+
+        def setPen(self, _pen):
+            return None
+
+        def setBrush(self, brush):
+            self.brush = QColor(brush)
+
+        def drawEllipse(self, _position, radius_x, radius_y):
+            self.draws.append((QColor(self.brush), radius_x, radius_y))
+
+    _app = QApplication.instance() or QApplication([])
+    widget = CoherenceMapWidget()
+    widget._visible_record_ids = {"visible"}
+    points = [
+        (AnalyzerPoint("hidden", "Oneshots", "Kicks", "", "Oneshots:Kicks:", [0.1]), QPointF()),
+        (AnalyzerPoint("visible", "Oneshots", "Kicks", "", "Oneshots:Kicks:", [0.2]), QPointF()),
+    ]
+    painter = _Painter()
+
+    try:
+        widget._paint_points(cast(Any, painter), points)
+
+        assert len(painter.draws) == 2
+        assert painter.draws[0][0].alpha() <= 24
+        assert painter.draws[1][0].alpha() == 255
+    finally:
+        widget.close()
+
+
 def test_embedded_map_all_filter_switches_underlying_map_audio_type():
     from PySide6.QtWidgets import QApplication
     from gui.widgets.coherence_analyzer import CoherenceAnalyzerPage
@@ -1466,6 +1507,132 @@ def test_embedded_map_all_filter_switches_underlying_map_audio_type():
     assert page.map._audio_type == ""
 
 
+def test_embedded_map_clearing_visible_subset_restores_unfiltered_source(monkeypatch):
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication, QWidget
+    from gui.widgets.coherence_analyzer import CoherenceAnalyzerPage
+    from gui.widgets.coherence_view_model import AnalyzerPoint
+
+    _app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    parent.engine = SimpleNamespace(session_id="session")
+    parent.model = object()
+    page = CoherenceAnalyzerPage(parent, show_header=False, show_filters=False)
+    point = AnalyzerPoint("1", "Loops", "Bass", "", "Loops:Bass:", [0.1])
+    page._records = [point]
+    page._results = []
+    page._data_key = "filtered"
+    page._data_priority_row_ids = frozenset({1})
+    refreshes = []
+    monkeypatch.setattr(page, "refresh_from_app", lambda app, **kwargs: refreshes.append((app, kwargs)))
+
+    page.set_library_filters("", "", None)
+
+    assert refreshes == [
+        (
+            parent,
+            {
+                "force": False,
+                "audio_type": "",
+                "category": "",
+                "fetch_scope": True,
+                "priority_row_ids": set(),
+            },
+        )
+    ]
+    assert page.map._visible_record_ids is None
+
+
+def test_embedded_map_explicit_empty_priority_does_not_reuse_table_selection(monkeypatch):
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets import coherence_analyzer
+    from gui.widgets.coherence_analyzer import CoherenceAnalyzerPage
+
+    _app = QApplication.instance() or QApplication([])
+    page = CoherenceAnalyzerPage(show_header=False, show_filters=False)
+    captured_priorities = []
+    monkeypatch.setattr(
+        coherence_analyzer,
+        "coherence_points_from_app",
+        lambda _app, **kwargs: (captured_priorities.append(kwargs["priority_row_ids"]) or [], []),
+    )
+    app = SimpleNamespace(
+        engine=SimpleNamespace(session_id="session"),
+        model=SimpleNamespace(records=[]),
+        settings=None,
+        selected_records=lambda: [SimpleNamespace(staging_row_id=99)],
+    )
+
+    page.refresh_from_app(app, priority_row_ids=set())
+
+    assert captured_priorities == [set()]
+
+
+def test_embedded_map_non_audio_category_preserves_audio_source(monkeypatch):
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication, QWidget
+    from gui.widgets.coherence_analyzer import CoherenceAnalyzerPage
+    from gui.widgets.coherence_view_model import AnalyzerPoint
+
+    _app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    parent.engine = SimpleNamespace(session_id="session")
+    parent.model = object()
+    page = CoherenceAnalyzerPage(parent, show_header=False, show_filters=False)
+    point = AnalyzerPoint("1", "Oneshots", "Kicks", "", "Oneshots:Kicks:", [0.1])
+    page._records = [point]
+    page._results = []
+    page._data_key = "full"
+    page._data_source_signature = ("session", id(parent.model), 10000, "", "", frozenset())
+    refreshes = []
+    monkeypatch.setattr(page, "refresh_from_app", lambda app, **kwargs: refreshes.append((app, kwargs)))
+
+    page.set_library_filters("", "Non-Audio Assets", None)
+    page.set_library_filters("", "Kicks", None)
+
+    assert refreshes == []
+    assert page._records == [point]
+    assert page._selected_category == "Kicks"
+    assert [mapped.record_id for mapped, _position in page.map._projected] == ["1"]
+
+
+def test_embedded_map_recovers_when_leaving_existing_empty_scoped_source(monkeypatch):
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication, QWidget
+    from gui.widgets.coherence_analyzer import CoherenceAnalyzerPage
+
+    _app = QApplication.instance() or QApplication([])
+    parent = QWidget()
+    parent.engine = SimpleNamespace(session_id="session")
+    parent.model = object()
+    page = CoherenceAnalyzerPage(parent, show_header=False, show_filters=False)
+    page._records = []
+    page._results = []
+    page._data_key = "empty-non-audio"
+    page._data_scope_category = "Non-Audio Assets"
+    page._data_source_signature = (
+        "session",
+        id(parent.model),
+        10000,
+        "",
+        "Non-Audio Assets",
+        frozenset(),
+    )
+    refreshes = []
+    monkeypatch.setattr(page, "refresh_from_app", lambda app, **kwargs: refreshes.append((app, kwargs)))
+
+    page.set_library_filters("", "Kicks", None)
+
+    assert len(refreshes) == 1
+    assert refreshes[0][0] is parent
+    assert refreshes[0][1]["category"] == "Kicks"
+
+
 def test_map_projection_prewarm_is_noop_for_unchanged_data(monkeypatch):
     from PySide6.QtWidgets import QApplication
     from gui.widgets.coherence_analyzer import CoherenceAnalyzerPage
@@ -1487,6 +1654,33 @@ def test_map_projection_prewarm_is_noop_for_unchanged_data(monkeypatch):
 
     assert calls
     assert calls.count(("", "")) == 1
+
+
+def test_map_projection_prewarm_yields_between_static_filters(monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from gui.widgets.coherence_analyzer import CoherenceAnalyzerPage
+    from gui.widgets.coherence_view_model import AnalyzerPoint
+
+    _app = QApplication.instance() or QApplication([])
+    page = CoherenceAnalyzerPage(show_header=False, show_filters=False)
+    page._records = [
+        AnalyzerPoint("1", "Loops", "Melodics", "", "Loops:Melodics:", [0.1]),
+        AnalyzerPoint("2", "Oneshots", "Kicks", "", "Oneshots:Kicks:", [0.2]),
+    ]
+    page._data_key = "test"
+    calls = []
+    monkeypatch.setattr(page.map, "prewarm_projection", lambda audio_type, category="": calls.append((audio_type, category)))
+
+    page.schedule_library_projection_prewarm(delay_ms=500)
+    assert calls == []
+    assert page._projection_prewarm_timer.isActive()
+
+    page._projection_prewarm_timer.stop()
+    page._prewarm_next_library_projection()
+    page._projection_prewarm_timer.stop()
+
+    assert calls == [("", "")]
+    assert page._projection_prewarm_queue
 
 
 def test_acoustic_session_state_uses_db_row_ids_without_hydrating_records(tmp_path):

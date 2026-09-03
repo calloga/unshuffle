@@ -171,7 +171,11 @@ class SearchController(QObject):
         text = (text or "").strip()
         if self._current_query == text and not immediate:
             return
-        
+
+        # Invalidate the result of any search already in flight immediately.
+        # Waiting for the debounce timer to execute the replacement search
+        # leaves a window where the previous query can repaint the UI.
+        self._search_request_id += 1
         self._current_query = text
         self.filterChanged.emit(text)
         if self.app and not getattr(self.app, "_restoring_library_page_state", False) and hasattr(self.app, "save_library_page_state"):

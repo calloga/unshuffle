@@ -539,12 +539,10 @@ class LibraryTab(QWidget):
 
     def _on_category_carousel_toggled(self, category, is_active):
         self.category_carousel.set_active_values({category} if is_active else set())
-        self.sync_map_filters()
         self.categoryFilterRequested.emit(str(category), is_active)
 
     def _on_category_carousel_selected(self, category):
         self.category_carousel.set_active_values({category})
-        self.sync_map_filters()
         self.categoryFilterRequested.emit(str(category), True)
 
     def _handle_tree_category_change(self, rec, category):

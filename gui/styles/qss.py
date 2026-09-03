@@ -21,7 +21,6 @@ def build_main_style(colors: ThemeColors) -> str:
     QMenu::item {{ background: transparent; color: {colors.text_light}; padding: 7px 38px 7px 12px; border-radius: 4px; }}
     QMenu::item:selected {{ background: {colors.primary}; color: {colors.text_inverse}; }}
     QMenu::separator {{ height: 1px; background: {colors.bg_light}; margin: 4px 8px; }}
-    QToolTip {{ background-color: {colors.bg_dropdown}; color: {colors.text_main}; border: 1px solid {colors.border_accent}; padding: 5px 7px; border-radius: 4px; }}
     QTabWidget {{ background: transparent; }}
     QTabWidget::pane {{ border: none; top: -1px; background: {colors.surface_subtle}; border-radius: 4px; }}
     QTabWidget::tab-bar {{ left: 0; }}

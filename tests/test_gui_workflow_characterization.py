@@ -2361,6 +2361,7 @@ class MainWindowDebounceTests(unittest.TestCase):
                 active_categories={"Melodics"},
                 confidence_range=(0.0, 1.0),
             )
+            window.handle_search_results_applied()
             self.assertEqual(window.height(), 720)
             self.assertEqual(window.dock_view.map_page.map._visible_record_ids, {"record-1", "record-2"})
 
@@ -6106,7 +6107,7 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         refresh_mock.assert_called_once_with()
         parent.save_library_page_state.assert_called_once_with()
 
-    def test_refresh_library_map_prewarms_type_specific_projections(self):
+    def test_refresh_library_map_schedules_type_specific_projection_prewarm(self):
         from gui.core.view_controller import ViewController
 
         class _LibraryTab:
@@ -6140,7 +6141,8 @@ class ViewControllerAndMainWindowStateTests(unittest.TestCase):
         controller.refresh_library_map()
 
         page.refresh_from_app.assert_called_once()
-        page.prewarm_library_projections.assert_called_once_with()
+        page.schedule_library_projection_prewarm.assert_called_once_with()
+        page.prewarm_library_projections.assert_not_called()
         page.set_library_filters.assert_called_once_with("", "", None)
 
     def test_large_confidence_filter_returns_capped_visible_ids_for_map(self):

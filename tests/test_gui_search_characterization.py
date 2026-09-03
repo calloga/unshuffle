@@ -467,6 +467,93 @@ class IconRenderingTests(unittest.TestCase):
 
 
 class SearchControllerConfidenceFilterTests(unittest.TestCase):
+    def test_query_change_invalidates_running_worker_before_debounce(self):
+        class _FakeWorker(QObject):
+            finished = Signal(dict)
+            error = Signal(str)
+            instances = []
+
+            def __init__(self, request_id, engine, query_text):
+                super().__init__()
+                self.request_id = request_id
+                self.query_text = query_text
+                self.instances.append(self)
+
+            def start(self):
+                return None
+
+        model = mock.Mock()
+        proxy_model = mock.Mock()
+        controller = SearchController(
+            engine=SimpleNamespace(db=mock.Mock()),
+            model=model,
+            proxy_model=proxy_model,
+            parent=None,
+        )
+        controller._current_query = 'category:"Kicks"'
+
+        with mock.patch("gui.core.workers.SearchWorker", _FakeWorker):
+            controller.execute_search()
+            stale_worker = _FakeWorker.instances[-1]
+            controller.set_query('category:"Snares"')
+
+        stale_worker.finished.emit(
+            {
+                "request_id": stale_worker.request_id,
+                "query_text": stale_worker.query_text,
+                "matched_ids": [1, 2],
+            }
+        )
+
+        self.assertEqual(controller._search_request_id, stale_worker.request_id + 1)
+        proxy_model.set_matched_ids.assert_not_called()
+        model.clear_similarity_scores.assert_not_called()
+        controller._search_timer.stop()
+
+    def test_active_carousel_navigation_emits_one_semantic_change(self):
+        from PySide6.QtWidgets import QApplication
+
+        from gui.widgets.carousels import SidebarCarousel
+
+        _app = QApplication.instance() or QApplication([])
+        carousel = SidebarCarousel("Category", [("Kicks", "Kicks"), ("Snares", "Snares")])
+        carousel.set_active_values({"Kicks"})
+        selected = []
+        active_changes = []
+        carousel.valueSelected.connect(selected.append)
+        carousel.activeChanged.connect(lambda value, active: active_changes.append((value, active)))
+
+        try:
+            carousel._move(1)
+
+            self.assertEqual(selected, ["Snares"])
+            self.assertEqual(active_changes, [])
+            self.assertEqual(carousel.active_values, {"Snares"})
+        finally:
+            carousel.close()
+
+    def test_category_selection_defers_map_sync_until_search_result(self):
+        from PySide6.QtGui import QUndoStack
+        from PySide6.QtWidgets import QApplication
+
+        from gui.widgets.library_tab import LibraryTab
+
+        _app = QApplication.instance() or QApplication([])
+        tab = LibraryTab(QUndoStack())
+        tab.sync_map_filters = mock.Mock()
+        requests = []
+        tab.categoryFilterRequested.connect(
+            lambda category, active: requests.append((category, active))
+        )
+
+        try:
+            tab._on_category_carousel_selected("Snares")
+
+            self.assertEqual(requests, [("Snares", True)])
+            tab.sync_map_filters.assert_not_called()
+        finally:
+            tab.close()
+
     def test_all_audio_types_does_not_override_non_audio_preference(self):
         proxy_model = mock.Mock()
 
@@ -593,6 +680,39 @@ class SearchControllerConfidenceFilterTests(unittest.TestCase):
 
         self.assertEqual(edit.text(), 'category:"Kicks" AND ')
         self.assertEqual(edit.blocked, [])
+
+    def test_search_ui_sync_defers_map_filtering_until_results_are_current(self):
+        from gui.main.window_search import sync_search_ui_state
+
+        library_tab = SimpleNamespace(
+            edit_search=SimpleNamespace(
+                text=lambda: "",
+                blockSignals=mock.Mock(),
+                setText=mock.Mock(),
+            ),
+            _refresh_search_button_state=mock.Mock(),
+            set_active_saved_filters=mock.Mock(),
+            set_active_source_filters=mock.Mock(),
+            category_carousel=SimpleNamespace(set_active_values=mock.Mock()),
+            signal_floor_control=SimpleNamespace(set_range=mock.Mock()),
+            sync_map_filters=mock.Mock(),
+        )
+        window = SimpleNamespace(
+            library_tab=library_tab,
+            sync_type_filter_state=mock.Mock(),
+        )
+
+        sync_search_ui_state(
+            window,
+            query='source:"D:/Drum Kits"',
+            active_saved_filters=set(),
+            active_source_filters={"D:/Drum Kits"},
+            active_categories=set(),
+            confidence_range=(0.0, 1.0),
+        )
+
+        library_tab.set_active_source_filters.assert_called_once_with({"D:/Drum Kits"})
+        library_tab.sync_map_filters.assert_not_called()
 
     def test_clear_query_state_skips_library_page_state_while_restore_applies(self):
         class _Parent(QObject):

@@ -141,12 +141,14 @@ class ViewController(QObject):
                 category=category,
                 priority_row_ids=page._row_ids_from_visible_record_ids(visible_ids) if hasattr(page, "_row_ids_from_visible_record_ids") else None,
             )
-            if hasattr(page, "prewarm_library_projections"):
+            if hasattr(page, "schedule_library_projection_prewarm"):
                 is_frontload = getattr(self.app, "_frontloading_startup", False)
                 if is_frontload:
-                    page.prewarm_library_projections(frontload=True)
+                    page.schedule_library_projection_prewarm(frontload=True)
                 else:
-                    page.prewarm_library_projections()
+                    page.schedule_library_projection_prewarm()
+            elif hasattr(page, "prewarm_library_projections"):
+                page.prewarm_library_projections()
             if hasattr(page, "set_library_filters"):
                 page.set_library_filters(
                     audio_type,
@@ -200,7 +202,9 @@ class ViewController(QObject):
         if page is None:
             return
         page.refresh_from_app(self.app, force=False, priority_row_ids=row_ids)
-        if hasattr(page, "prewarm_library_projections"):
+        if hasattr(page, "schedule_library_projection_prewarm"):
+            page.schedule_library_projection_prewarm()
+        elif hasattr(page, "prewarm_library_projections"):
             page.prewarm_library_projections()
 
     def _coherence_is_running(self) -> bool:

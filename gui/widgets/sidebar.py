@@ -238,8 +238,8 @@ class SavedFilterItem(QFrame):
             ),
         )
 
+        self.setToolTip(query)
         self.lbl = QLabel(name)
-        self.lbl.setToolTip(query)
         self.lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         apply_style(self.lbl, sidebar_item_label_style())
         layout.addWidget(self.lbl, 1)

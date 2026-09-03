@@ -180,10 +180,9 @@ class SidebarCarousel(QFrame):
         self.current_index = (self.current_index + delta) % len(self.options)
         self._refresh()
         _, value = self.options[self.current_index]
-        self.valueSelected.emit(value)
         if self.is_active:
             self.active_values = {value}
-            self.activeChanged.emit(value, True)
+        self.valueSelected.emit(value)
 
     def _show_menu(self):
         if not self.options:
@@ -203,10 +202,9 @@ class SidebarCarousel(QFrame):
         self.current_index = idx
         self._refresh()
         _, value = self.options[self.current_index]
-        self.valueSelected.emit(value)
         if self.is_active:
             self.active_values = {value}
-            self.activeChanged.emit(value, True)
+        self.valueSelected.emit(value)
 
     def _on_title_toggled(self, checked):
         if not self.toggleable:
