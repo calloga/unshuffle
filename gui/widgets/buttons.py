@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtWidgets import QPushButton
-from PySide6.QtCore import Property, QPropertyAnimation, QEasingCurve, QSize, Qt
+from PySide6.QtCore import Property, QPropertyAnimation, QEasingCurve, QPointF, QSize, Qt
 from PySide6.QtGui import QPainter, QColor, QPixmap, QBrush
 from unshuffle.core.assets import asset_path
 from ..utils.styles import ColorPalette, make_qcolor, scaled_px
@@ -115,10 +115,11 @@ class AnimatedIconButton(QPushButton):
             painter.setOpacity(self.alpha_mult)
 
             target_rect = self.rect()
-            x = (target_rect.width() - self.icon_size.width()) / 2
-            y = (target_rect.height() - self.icon_size.height()) / 2 + self.hover_offset
+            logical_size = icon_pixmap.deviceIndependentSize()
+            x = (target_rect.width() - logical_size.width()) / 2
+            y = (target_rect.height() - logical_size.height()) / 2 + self.hover_offset
 
-            painter.drawPixmap(int(x), int(y), icon_pixmap)
+            painter.drawPixmap(QPointF(x, y), icon_pixmap)
         finally:
             painter.end()
 
@@ -126,12 +127,14 @@ class AnimatedIconButton(QPushButton):
         """Returns a colorized version of the icon from cache or creates it."""
         has_dynamic_icon = not self.icon().isNull()
         icon_key = self.icon().cacheKey() if has_dynamic_icon else self.icon_path
+        pixel_ratio = self.devicePixelRatioF()
 
         paint_color = self._paint_color(self.color)
         cache_key = (
             icon_key,
             self.icon_size.width(),
             self.icon_size.height(),
+            pixel_ratio,
             paint_color.name(QColor.HexArgb) if paint_color else "default",
         )
         if cache_key in self._shared_icon_cache:
@@ -141,14 +144,20 @@ class AnimatedIconButton(QPushButton):
             self._shared_icon_cache.clear()
 
         if has_dynamic_icon:
-            pixmap = self.icon().pixmap(self.icon_size)
+            pixmap = self.icon().pixmap(self.icon_size, pixel_ratio)
         else:
             pixmap = QPixmap(self.icon_path)
 
         if pixmap.isNull():
             return None
             
-        pixmap = pixmap.scaled(self.icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation).copy()
+        physical_size = QSize(
+            max(1, round(self.icon_size.width() * pixel_ratio)),
+            max(1, round(self.icon_size.height() * pixel_ratio)),
+        )
+        pixmap = pixmap.scaled(physical_size, Qt.KeepAspectRatio, Qt.SmoothTransformation).copy()
+        # Recolor in physical pixels; restore logical sizing after the image round trip.
+        pixmap.setDevicePixelRatio(1.0)
         
         if paint_color:
             image = pixmap.toImage()
@@ -160,6 +169,7 @@ class AnimatedIconButton(QPushButton):
                 painter.end()
             pixmap = QPixmap.fromImage(image)
             
+        pixmap.setDevicePixelRatio(pixel_ratio)
         self._shared_icon_cache[cache_key] = pixmap
         return pixmap
 
