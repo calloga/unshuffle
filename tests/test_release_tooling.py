@@ -302,7 +302,11 @@ def test_app_binary_workflow_uploads_installable_platform_artifacts() -> None:
     assert "python scripts/build_linux_appimage.py" in workflow
     assert "Smoke test Linux app binary startup" in workflow
     assert "dist/Unshuffle/Unshuffle" in workflow
-    assert "Unshuffle GUI requires a graphical desktop session on Linux" in workflow
+    assert "python scripts/install_release_dependencies.py" in workflow
+    assert "python scripts/check_linux_bundle.py --app dist/Unshuffle/Unshuffle" in workflow
+    assert "python scripts/check_linux_bundle.py --appimage dist/installer/Unshuffle-1.1.1-x86_64.AppImage" in workflow
+    assert "xvfb xauth xdotool qemu-user" in workflow
+    assert "dist/build-metadata/" in workflow
 
 
 def test_release_build_dependencies_include_backports_tarfile() -> None:

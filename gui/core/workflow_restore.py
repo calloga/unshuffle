@@ -8,6 +8,7 @@ from .settings_controller import (
     SHOW_STARTUP_LAUNCHER_KEY,
     STARTUP_LAUNCHER_LAST_CHOICE_KEY,
 )
+from .session_relink import prepare_saved_session_sources
 
 def qt_object_alive(obj) -> bool:
     if obj is None:
@@ -93,13 +94,13 @@ def restore_previous_session(controller, *, frontload: bool = False, bridge_fact
                 return
             if controller.app._restore_session_worker is not worker:
                 return
-            controller.app._restore_session_worker = None
             restored_session_id = str(payload.get("session_id") or sid or "")
             restored_target = str(payload.get("target") or target)
             sources = payload.get("sources") or []
             plan = payload.get("plan") or []
             record_count = int(payload.get("record_count") or len(plan))
             if record_count <= 0:
+                controller.app._restore_session_worker = None
                 ui_helpers.set_ui_busy(controller.app, False)
                 restored_handover = workflow_handover.restore_build_handover_state(controller)
                 if not restored_handover:
@@ -110,6 +111,27 @@ def restore_previous_session(controller, *, frontload: bool = False, bridge_fact
                     )
                 controller._emit_restore_finished(False)
                 return
+            try:
+                payload = prepare_saved_session_sources(controller.app, payload)
+            except Exception as exc:
+                if controller.app._restore_session_worker is not worker:
+                    return
+                controller.app._restore_session_worker = None
+                logging.exception("Failed to relink restored session sources.")
+                ui_helpers.set_ui_busy(controller.app, False)
+                controller._surface_workflow_error(f"Startup restore failed: {exc}")
+                controller._emit_restore_finished(False)
+                return
+            if controller.app._restore_session_worker is not worker:
+                return
+            controller.app._restore_session_worker = None
+            if payload is None:
+                ui_helpers.set_ui_busy(controller.app, False)
+                controller._emit_restore_finished(False)
+                return
+            restored_target = str(payload.get("target") or restored_target)
+            sources = payload.get("sources") or []
+            plan = payload.get("plan") or []
             engine = payload.get("engine")
             if engine is None:
                 try:

@@ -894,6 +894,7 @@ class SessionLoadWorker(QThread):
                         from ..utils.history import load_staging_records
 
                         record_count = len(load_staging_records(self.target, session_id))
+                    db_path = str(getattr(db_conn, "db_path", ""))
                     sources = (
                         db_conn.get_session_sources(session_id)
                         if session_id and hasattr(db_conn, "get_session_sources")
@@ -905,6 +906,7 @@ class SessionLoadWorker(QThread):
             else:
                 record_count = 0
                 sources = []
+                db_path = ""
 
             self.finished.emit(
                 {
@@ -912,6 +914,7 @@ class SessionLoadWorker(QThread):
                     "sources": sources,
                     "record_count": record_count,
                     "db_scope": db_scope,
+                    "db_path": db_path,
                 }
             )
         except Exception as exc:
@@ -950,6 +953,7 @@ class StartupRestoreWorker(QThread):
                         from ..utils.history import load_staging_records
 
                         record_count = len(load_staging_records(self.target, session_id))
+                    db_path = str(getattr(db_conn, "db_path", ""))
                     sources = (
                         db_conn.get_session_sources(session_id)
                         if session_id and hasattr(db_conn, "get_session_sources")
@@ -961,6 +965,7 @@ class StartupRestoreWorker(QThread):
             else:
                 record_count = 0
                 sources = []
+                db_path = ""
 
             self.finished.emit(
                 {
@@ -969,6 +974,7 @@ class StartupRestoreWorker(QThread):
                     "sources": sources,
                     "record_count": record_count,
                     "db_scope": db_scope,
+                    "db_path": db_path,
                 }
             )
         except Exception as exc:

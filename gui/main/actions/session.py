@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QMessageBox
 from unshuffle.bridge.persistence_bridge import PersistenceBridge
 from unshuffle.bridge.search_bridge import SearchBridge
 from unshuffle.bridge.workflow_bridge import create_workflow_bridge
+from ...core.session_relink import prepare_saved_session_sources
 
 
 def request_new_session(app) -> bool:
@@ -52,46 +53,57 @@ def load_staging_session(app, sess, show_errors=True):
 
     old_engine = getattr(app, "engine", None)
 
-    try:
-        new_engine = create_workflow_bridge(Path(tgt), session_id=sid)
-    except Exception as e:
-        if show_errors:
-            QMessageBox.warning(app, "Session Resume Error", str(e))
-        else:
-            logging.exception("Session resume failed for target %s", tgt)
-        return
-
     src = sess.get("source_path")
     from ...core.workers import SessionLoadWorker
 
     worker = SessionLoadWorker(
         tgt,
         sid,
-        local_db=getattr(new_engine, "local_db", None),
-        global_db=getattr(new_engine, "db", None),
     )
     app._session_load_worker = worker
 
     def _finish_resume(payload):
         if not _is_qobject_valid(app):
-            try:
-                new_engine.close()
-            except Exception:
-                logging.exception("Failed to close abandoned session engine.")
             return
-        if app._session_load_worker is worker:
-            app._session_load_worker = None
+        if app._session_load_worker is not worker:
+            return
 
         plan = payload.get("plan") or []
         record_count = int(payload.get("record_count") or len(plan))
         if record_count <= 0:
-            try:
-                new_engine.close()
-            except Exception:
-                logging.exception("Failed to close unloaded session engine.")
+            app._session_load_worker = None
             QMessageBox.warning(app, "Error", "No staging data found for this session.")
             return
 
+        new_engine = None
+        try:
+            payload = prepare_saved_session_sources(app, dict(payload, target=tgt))
+            if app._session_load_worker is not worker:
+                return
+            app._session_load_worker = None
+            if payload is None:
+                return
+            resolved_sid = str(payload.get("session_id") or sid)
+            new_engine = create_workflow_bridge(Path(payload["target"]), session_id=resolved_sid)
+            if payload.get("db_scope") == "local":
+                raw_engine = getattr(new_engine, "engine", new_engine)
+                if raw_engine.db is not raw_engine.local_db:
+                    raw_engine.db.close()
+                    raw_engine.db = raw_engine.local_db
+        except Exception as exc:
+            if app._session_load_worker is worker:
+                app._session_load_worker = None
+            if new_engine is not None:
+                try:
+                    new_engine.close()
+                except Exception:
+                    logging.exception("Failed to close unloaded session engine.")
+            if show_errors:
+                QMessageBox.warning(app, "Session Resume Error", str(exc))
+            else:
+                logging.exception("Session resume failed for target %s", tgt)
+            return
+        plan = payload.get("plan") or []
         sources_strs = payload.get("sources") or []
         if sources_strs:
             new_engine.session_source_roots = [Path(s) for s in sources_strs]
@@ -133,17 +145,10 @@ def load_staging_session(app, sess, show_errors=True):
 
     def _handle_error(message):
         if not _is_qobject_valid(app):
-            try:
-                new_engine.close()
-            except Exception:
-                logging.exception("Failed to close failed session resume engine.")
             return
-        if app._session_load_worker is worker:
-            app._session_load_worker = None
-        try:
-            new_engine.close()
-        except Exception:
-            logging.exception("Failed to close failed session resume engine.")
+        if app._session_load_worker is not worker:
+            return
+        app._session_load_worker = None
         if show_errors:
             QMessageBox.warning(app, "Session Resume Error", message)
         else:
