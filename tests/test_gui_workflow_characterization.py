@@ -4587,7 +4587,8 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
 
         fake_engine = SimpleNamespace(db=mock.Mock(), session_source_roots=[])
 
-        with mock.patch("gui.core.workers.StartupRestoreWorker", _FakeWorker):
+        with mock.patch("gui.core.workers.StartupRestoreWorker", _FakeWorker), \
+             mock.patch("gui.core.workflow_restore.prepare_saved_session_sources", side_effect=lambda _app, payload: payload):
             with mock.patch.object(controller, "finalize_scan_data") as finalize_mock:
                 controller.restore_session()
 
@@ -4688,6 +4689,7 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         controller = WorkflowController(None, mock.Mock(), mock.Mock(), parent)
 
         with mock.patch("gui.core.workers.StartupRestoreWorker", _FakeWorker), \
+             mock.patch("gui.core.workflow_restore.prepare_saved_session_sources", side_effect=lambda _app, payload: payload), \
              mock.patch.object(controller, "finalize_scan_data"):
             controller.restore_session()
 
@@ -4869,6 +4871,7 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         record.source_path = Path("Source/kick.wav")
 
         with mock.patch("gui.core.workers.StartupRestoreWorker", _FakeWorker), \
+             mock.patch("gui.core.workflow_restore.prepare_saved_session_sources", side_effect=lambda _app, payload: payload), \
              mock.patch.object(controller, "finalize_scan_data") as finalize_mock:
             controller.restore_session()
             controller.restore_session()
@@ -5777,6 +5780,7 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         fake_engine.session_source_roots = []
 
         with mock.patch("gui.main.actions.session.create_workflow_bridge", return_value=fake_engine), \
+             mock.patch("gui.main.actions.session.prepare_saved_session_sources", side_effect=lambda _app, payload: payload), \
              mock.patch("gui.core.workers.SessionLoadWorker", _FakeWorker):
             load_staging_session(app, sess)
 
@@ -5803,7 +5807,10 @@ class WorkflowControllerRestoreTests(unittest.TestCase):
         app._session_load_worker = None
         sess = {"session_id": "session-1", "source_path": "Source"}
 
-        with mock.patch("gui.main.actions.session.create_workflow_bridge", side_effect=RuntimeError("boom")):
+        worker = mock.Mock()
+        worker.start.side_effect = lambda: worker.finished.connect.call_args_list[0].args[0]({"record_count": 1})
+        with mock.patch("gui.main.actions.session.create_workflow_bridge", side_effect=RuntimeError("boom")), \
+             mock.patch("gui.core.workers.SessionLoadWorker", return_value=worker):
             with mock.patch("gui.main.actions.session.QMessageBox.warning"):
                 load_staging_session(app, sess)
 

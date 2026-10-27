@@ -48,6 +48,7 @@ python -m pytest -q
 - Keep package identities stable across patch releases. The macOS app and package use bundle ID `com.umu.unshuffle`. The Windows Inno Setup App ID is `{9D84E78F-9EB3-47A7-A42C-86C9AD5F0E46}`; enter `{9D84E78F-9EB3-47A7-A42C-86C9AD5F0E46}_is1` as MuseHub's Windows application ID because MuseHub identifies the uninstall-registry key.
 - Keep release support floors synchronized with packaging and CI: Windows 10 version 1809 (build 17763), macOS 13, and Ubuntu 24.04 x86-64 (or a compatible newer Linux distribution).
 - Run the full validation suite and build each platform artifact before publishing the GitHub Release.
+- Install distribution dependencies with `python scripts/install_release_dependencies.py`; retain `dist/build-metadata/` with candidate installers. Follow the [1.1.2 remediation gates](packaging/REMEDIATION_1_1_2.md) for scaled-display and Linux CPU compatibility validation before versioning the patch.
 
 ## Pull Request Checklist
 

@@ -130,9 +130,16 @@ class StartupLauncherDialog(QDialog):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(scaled_px(16), scaled_px(16), scaled_px(16), scaled_px(12))
-        layout.setSpacing(scaled_px(10))
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         self.setStyleSheet(self._style_sheet())
+
+        body = QFrame()
+        body.setObjectName("LauncherBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(scaled_px(10))
+        layout.addWidget(body, 1)
 
         self.roots_container = QWidget()
         self.roots_layout = QVBoxLayout(self.roots_container)
@@ -146,7 +153,7 @@ class StartupLauncherDialog(QDialog):
         self.btn_new_session.setProperty("launcherPanelButton", True)
         self.btn_new_session.clicked.connect(self._new_session)
         directories_panel = self._panel_with("Directories", self.roots_container, footer_widgets=(self.btn_add_root, self.btn_new_session))
-        layout.addWidget(directories_panel)
+        body_layout.addWidget(directories_panel)
 
         import_container = QWidget()
         import_layout = QHBoxLayout(import_container)
@@ -161,7 +168,7 @@ class StartupLauncherDialog(QDialog):
         import_layout.addWidget(btn_import_session, 1)
         import_layout.addWidget(btn_import_csv, 1)
         import_panel = self._panel_with("Import", import_container)
-        layout.addWidget(import_panel)
+        body_layout.addWidget(import_panel)
 
         view_container = QWidget()
         view_row = QHBoxLayout(view_container)
@@ -182,9 +189,13 @@ class StartupLauncherDialog(QDialog):
             view_row.addWidget(check)
         view_row.addStretch(1)
         view_panel = self._panel_with("Views", view_container)
-        layout.addWidget(view_panel)
+        body_layout.addWidget(view_panel)
 
-        bottom = QHBoxLayout()
+        footer = QFrame()
+        footer.setObjectName("LauncherFooter")
+        bottom = QHBoxLayout(footer)
+        bottom.setContentsMargins(scaled_px(16), scaled_px(10), scaled_px(16), scaled_px(12))
+        bottom.setSpacing(scaled_px(10))
         self.dont_show = QCheckBox("Don't show again")
         self.chk_high_performance = QCheckBox("High Performance Scan")
         bottom.addWidget(self.dont_show)
@@ -197,7 +208,7 @@ class StartupLauncherDialog(QDialog):
         launch.setProperty("primary", True)
         launch.clicked.connect(self._accept_launch)
         bottom.addWidget(launch)
-        layout.addLayout(bottom)
+        layout.addWidget(footer)
 
     def _panel_with(self, title: str, widget, *, footer_widgets: tuple[QWidget, ...] = ()) -> QFrame:
         panel = QFrame()
@@ -293,6 +304,8 @@ class StartupLauncherDialog(QDialog):
         dialog_bg = self._color(ColorPalette.BG_DARKER)
         return (
             f"QDialog {{ background: {dialog_bg}; color: {self._color(ColorPalette.TEXT_LIGHT)}; }}"
+            f"QFrame#LauncherBody {{ background: {panel}; border: none; }}"
+            f"QFrame#LauncherFooter {{ background: {dialog_bg}; border: none; }}"
             f"QLabel#Section {{ color: {self._color(ColorPalette.TEXT_LIGHT)}; font-weight: 700; "
             f"font-size: {scaled_px(12)}px; letter-spacing: 0px; }}"
             f"QFrame#Panel {{ background: {panel}; border: none; border-radius: {scaled_px(8)}px; }}"
